@@ -39,7 +39,9 @@ def _csv_env(name: str) -> frozenset[str]:
 @dataclass(frozen=True)
 class AiChatConfig:
     bot_name: str
+    bot_aliases: frozenset[str]
     bot_owner_qq: str
+    bot_owner_public_name: str
     openai_api_key: str
     openai_base_url: str
     openai_model: str
@@ -62,13 +64,20 @@ class AiChatConfig:
     group_whitelist: frozenset[str]
     group_rate_limit_seconds: int
     max_group_message_length: int
+    enable_group_auto_reply: bool
+    group_auto_reply_threshold: int
+    group_auto_reply_cooldown_seconds: int
+    group_auto_reply_owner_cooldown_seconds: int
+    group_auto_reply_user_cooldown_seconds: int
     user_blacklist: frozenset[str]
 
 
 def load_config() -> AiChatConfig:
     return AiChatConfig(
         bot_name=os.getenv("BOT_NAME", "AI Assistant"),
+        bot_aliases=_csv_env("BOT_ALIASES"),
         bot_owner_qq=os.getenv("BOT_OWNER_QQ", "").strip(),
+        bot_owner_public_name=os.getenv("BOT_OWNER_PUBLIC_NAME", "").strip(),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
         openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
@@ -91,5 +100,10 @@ def load_config() -> AiChatConfig:
         group_whitelist=_csv_env("GROUP_WHITELIST"),
         group_rate_limit_seconds=_int_env("GROUP_RATE_LIMIT_SECONDS", 5),
         max_group_message_length=_int_env("MAX_GROUP_MESSAGE_LENGTH", 300),
+        enable_group_auto_reply=_bool_env("ENABLE_GROUP_AUTO_REPLY", False),
+        group_auto_reply_threshold=_int_env("GROUP_AUTO_REPLY_THRESHOLD", 50),
+        group_auto_reply_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_COOLDOWN_SECONDS", 60),
+        group_auto_reply_owner_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_OWNER_COOLDOWN_SECONDS", 30),
+        group_auto_reply_user_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_USER_COOLDOWN_SECONDS", 120),
         user_blacklist=_csv_env("USER_BLACKLIST"),
     )

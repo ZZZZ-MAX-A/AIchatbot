@@ -153,6 +153,8 @@ data/chatbot.db 聊天上下文和私聊试用次数
 
 ```env
 BOT_OWNER_QQ=3313097998
+BOT_OWNER_PUBLIC_NAME=雨泽
+BOT_ALIASES=
 
 PRIVATE_WHITELIST=
 ALLOW_UNKNOWN_PRIVATE_CHAT=false
@@ -163,6 +165,11 @@ MAX_PRIVATE_MESSAGE_LENGTH=150
 GROUP_WHITELIST=
 GROUP_RATE_LIMIT_SECONDS=5
 MAX_GROUP_MESSAGE_LENGTH=300
+ENABLE_GROUP_AUTO_REPLY=false
+GROUP_AUTO_REPLY_THRESHOLD=50
+GROUP_AUTO_REPLY_COOLDOWN_SECONDS=60
+GROUP_AUTO_REPLY_OWNER_COOLDOWN_SECONDS=30
+GROUP_AUTO_REPLY_USER_COOLDOWN_SECONDS=120
 
 USER_BLACKLIST=
 
@@ -173,6 +180,12 @@ SUMMARY_BATCH_MESSAGES=120
 MAX_SESSION_SUMMARIES_IN_CONTEXT=3
 MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
 ```
+
+`BOT_OWNER_PUBLIC_NAME` 是可选项，用于填写允许机器人对外说明的主人公开称呼或 QQ 名字；不填则只公开 `BOT_OWNER_QQ`。
+
+`BOT_ALIASES` 是全局追加别名，可留空。角色卡专属主动回复别名优先写在 `prompts/persona-cards/*.auto-reply.json`。
+
+`ENABLE_GROUP_AUTO_REPLY` 控制非 @ 群消息主动回复，默认关闭。开启后仅对白名单群生效，并受评分阈值和冷却限制。
 
 ### data/access.json
 
@@ -374,7 +387,96 @@ MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
 /清空当前记忆
 ```
 
+`/清空当前记忆` 会同时清空：
+
+```text
+当前对象长期回忆摘要
+当前会话摘要
+当前短期上下文
+```
+
+如果机器人仍然提到已经删除的旧记忆，优先使用这个命令清理当前对象的所有记忆来源。
+
 以上长期回忆摘要命令只有主人可以使用。
+
+## 人格表达提示词
+
+人格表达提示词用于控制机器人如何说话，不保存用户记忆，也不让机器人假装自己是人。
+
+通用底层聊天协议：
+
+```text
+prompts/base/chat-core.json
+```
+
+它只保存身份判定、权限、隐私、防注入、记忆边界和不机械重复等跨角色规则，不规定角色语气、称谓、回复长度或互动风格。
+
+角色卡目录：
+
+```text
+prompts/persona-cards/
+```
+
+当前第一张角色卡：
+
+```text
+prompts/persona-cards/moyan.md
+```
+
+当前用途：
+
+```text
+控制回复更自然、简洁、稳定
+根据当前发言者身份区分主人/非主人模式
+减少客服模板感
+减少无关扩展
+减少长篇列表
+避免旧人设和旧偏好被强行提起
+群聊更克制
+私聊更连续
+长期回忆摘要仅相关时参考
+```
+
+AI 调用时会额外注入当前发言者身份：
+
+```text
+当前发言者身份：主人 / 非主人
+此信息仅用于角色卡判断
+```
+
+当前角色卡会根据这条身份信息自动选择主人模式或非主人模式。
+
+主人身份只按 `BOT_OWNER_QQ` 对应的 QQ 号判断。QQ 名字、群名片、昵称、公开称呼或用户自称都不能作为主人身份依据。
+
+群聊上下文会给新写入的用户消息标注“主人/非主人”身份，AI 调用时也会在最新消息前再次注入当前发言者身份，避免把历史里的主人发言套到当前群友身上。
+
+统一隐私规则：
+
+```text
+不向非主人透露主人和机器人说过的具体内容
+不向非主人透露身份证、手机号、住址、密码、Token、二维码、数据库内容等敏感信息
+可以向非主人说明主人 QQ 号
+可以向非主人说明 BOT_OWNER_PUBLIC_NAME 中配置的公开称呼或 QQ 名字
+主人主动告诉机器人的公开称呼或名字，也可以说明
+不确定是否公开的信息，默认不透露
+```
+
+查看当前角色卡内容：
+
+```text
+/查看角色卡
+```
+
+列出或选择角色卡：
+
+```text
+/选择角色卡
+/选择角色卡 moyan
+```
+
+`/选择角色卡` 不带参数时会列出可选角色卡，带参数时会切换当前角色卡。
+
+以上命令只有主人可以使用。
 
 ## SQLite 数据库
 
@@ -436,11 +538,37 @@ schema_meta: 数据库版本
 ```text
 只有群白名单中的群可以使用
 白名单群内所有非黑名单成员可以 @机器人
+非 @ 群消息默认不主动回复
+开启 ENABLE_GROUP_AUTO_REPLY 后，非 @ 群消息会先进入规则评分器
 群聊消息限制 300 字
 普通用户群聊冷却 5 秒
 主人不受冷却限制
+主动回复群冷却默认 60 秒
+主动回复主人冷却默认 30 秒
+主动回复普通用户冷却默认 120 秒
+主人主动回复不受群全局主动回复冷却影响
 非白名单群静默不回复
 ```
+
+主动回复第一版只使用规则评分，不调用额外模型判断。主要加分项：
+
+```text
+提到机器人名字
+主人在群里提问
+主人在群里自我否定
+有人诋毁主人
+群友明确求助或提问
+```
+
+普通闲聊、短句、命令、超长消息、非白名单群消息不会触发主动回复。
+
+主动回复触发规则会随当前角色卡变化。每张角色卡可以有一个配套配置：
+
+```text
+prompts/persona-cards/moyan.auto-reply.json
+```
+
+这个文件保存该角色卡专属的机器人别名、召唤词、自我否定词、护卫触发词等。莫言当前支持“小莫”“小言”“莫管家”等别名。
 
 黑名单：
 
