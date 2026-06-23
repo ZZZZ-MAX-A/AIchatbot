@@ -53,6 +53,7 @@ class AiChatConfig:
     summary_keep_recent_messages: int
     summary_batch_messages: int
     max_session_summaries_in_context: int
+    max_long_term_memories_in_context: int
     private_whitelist: frozenset[str]
     allow_unknown_private_chat: bool
     private_trial_messages: int
@@ -81,6 +82,7 @@ def load_config() -> AiChatConfig:
         summary_keep_recent_messages=_int_env("SUMMARY_KEEP_RECENT_MESSAGES", 80),
         summary_batch_messages=_int_env("SUMMARY_BATCH_MESSAGES", 120),
         max_session_summaries_in_context=_int_env("MAX_SESSION_SUMMARIES_IN_CONTEXT", 3),
+        max_long_term_memories_in_context=_int_env("MAX_LONG_TERM_MEMORIES_IN_CONTEXT", 8),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
