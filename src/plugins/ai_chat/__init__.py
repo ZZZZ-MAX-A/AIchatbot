@@ -28,6 +28,15 @@ from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, ensure_database
 from .llm import ask_llm
+from .long_term import (
+    add_long_term_memory,
+    clear_long_term_memories,
+    count_long_term_memories,
+    delete_long_term_memory,
+    format_long_term_context,
+    list_long_term_memories,
+    long_term_memory_stats,
+)
 from .memory import (
     append_message,
     build_history,
@@ -188,20 +197,29 @@ def status_lines() -> list[str]:
     ]
 
 
-def memory_status_lines() -> list[str]:
+def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
     stats = memory_stats()
     trials = trial_stats()
-    return [
+    long_term = long_term_memory_stats()
+    lines = [
         f"数据库：{DATABASE_PATH}",
         f"消息数量：{stats['message_count']}",
         f"会话数量：{stats['session_count']}",
         f"摘要数量：{stats['summary_count']}",
         f"已压缩消息：{stats['summarized_message_count']}",
         f"长期记忆：{stats['long_term_memory_count']}",
+        f"记忆主体：{long_term['subject_count']}",
         f"语义索引：{stats['embedding_count']}",
         f"试用用户：{trials['trial_user_count']}",
         f"试用消息：{trials['trial_message_count']}",
     ]
+    if event is not None:
+        subject_type, subject_id = current_memory_subject(event)
+        lines.append(
+            f"当前对象长期回忆摘要："
+            f"{count_long_term_memories(subject_type, subject_id)}"
+        )
+    return lines
 
 
 def summary_status_lines(key: str) -> list[str]:
@@ -224,6 +242,36 @@ def compression_result_message(result: CompressionResult) -> str:
     if result.compressed:
         return f"{result.reason}，摘要 ID：{result.summary_id}"
     return f"未压缩：{result.reason}"
+
+
+def current_memory_subject(event: MessageEvent) -> tuple[str, str]:
+    if isinstance(event, GroupMessageEvent):
+        return "group", group_id(event)
+    return "user", user_id(event)
+
+
+def memory_subjects_for_context(event: MessageEvent) -> list[tuple[str, str]]:
+    if isinstance(event, GroupMessageEvent):
+        return [("group", group_id(event))]
+    return [("user", user_id(event))]
+
+
+def subject_label(subject_type: str, subject_id: str) -> str:
+    if subject_type == "group":
+        return f"群 {subject_id}"
+    if subject_type == "user":
+        return f"用户 {subject_id}"
+    return f"{subject_type}:{subject_id}"
+
+
+def format_memories(title: str, subject_type: str, subject_id: str) -> str:
+    memories = list_long_term_memories(subject_type, subject_id, 20)
+    if not memories:
+        return f"{title}：暂无长期回忆摘要。"
+    lines = [f"{title}："]
+    for memory in memories:
+        lines.append(f"ID {memory.id} {memory.content}")
+    return "\n".join(lines)
 
 
 def list_lines(title: str, items: frozenset[str]) -> str:
@@ -263,6 +311,11 @@ clear_session_summaries_cmd = on_command(
     block=True,
 )
 clear_all_summaries_cmd = on_command("清空全部摘要", aliases={"clear_all_summaries"}, priority=5, block=True)
+add_memory_cmd = on_command("添加记忆", aliases={"add_memory"}, priority=5, block=True)
+rewrite_memory_cmd = on_command("重写当前记忆", aliases={"rewrite_current_memory"}, priority=5, block=True)
+view_memory_cmd = on_command("查看记忆", aliases={"view_memory"}, priority=5, block=True)
+delete_memory_cmd = on_command("删除记忆", aliases={"delete_memory"}, priority=5, block=True)
+clear_current_memory_cmd = on_command("清空当前记忆", aliases={"clear_current_memory"}, priority=5, block=True)
 help_cmd = on_command("权限帮助", aliases={"白名单帮助", "管理帮助"}, priority=5, block=True)
 
 allow_group_cmd = on_command("加入群白名单", aliases={"允许群", "allow_group"}, priority=5, block=True)
@@ -304,6 +357,10 @@ async def handle_chat(event: MessageEvent, matcher: Matcher) -> None:
             key,
             config.max_context_messages,
             config.max_session_summaries_in_context,
+            format_long_term_context(
+                memory_subjects_for_context(event),
+                config.max_long_term_memories_in_context,
+            ),
         )
         event_user_id = user_id(event)
         event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
@@ -363,7 +420,7 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @memory_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish("\n".join(memory_status_lines()))
+    await matcher.finish("\n".join(memory_status_lines(event)))
 
 
 @clear_all_memory_cmd.handle()
@@ -419,6 +476,76 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish(f"已清空全部摘要：{count} 条。")
 
 
+@add_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    content = arg.extract_plain_text().strip()
+    if not content:
+        await matcher.finish("用法：/添加记忆 当前对话对象的长期回忆摘要")
+    subject_type, subject_id = current_memory_subject(event)
+    memory_id = add_long_term_memory(
+        subject_type,
+        subject_id,
+        content,
+        session_key(event),
+    )
+    await matcher.finish(
+        f"已添加长期回忆摘要：ID {memory_id}，"
+        f"{subject_label(subject_type, subject_id)}。"
+    )
+
+
+@view_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    subject_type, subject_id = current_memory_subject(event)
+    await matcher.finish(
+        format_memories(
+            f"{subject_label(subject_type, subject_id)}长期记忆",
+            subject_type,
+            subject_id,
+        )
+    )
+
+
+@rewrite_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    content = arg.extract_plain_text().strip()
+    if not content:
+        await matcher.finish("用法：/重写当前记忆 当前对话对象的新长期回忆摘要")
+    subject_type, subject_id = current_memory_subject(event)
+    removed_count = clear_long_term_memories(subject_type, subject_id)
+    memory_id = add_long_term_memory(
+        subject_type,
+        subject_id,
+        content,
+        session_key(event),
+    )
+    await matcher.finish(
+        f"已重写{subject_label(subject_type, subject_id)}长期回忆摘要："
+        f"删除 {removed_count} 条旧摘要，新增 ID {memory_id}。"
+    )
+
+
+@delete_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    target = parse_single_arg(arg.extract_plain_text())
+    if not target or not target.isdigit():
+        await matcher.finish("用法：/删除记忆 记忆ID")
+    deleted = delete_long_term_memory(int(target))
+    await matcher.finish("已删除长期回忆摘要。" if deleted else f"没有找到长期回忆摘要：{target}")
+
+
+@clear_current_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    subject_type, subject_id = current_memory_subject(event)
+    count = clear_long_term_memories(subject_type, subject_id)
+    await matcher.finish(f"已清空{subject_label(subject_type, subject_id)}长期记忆：{count} 条。")
+
+
 @help_cmd.handle()
 async def _(matcher: Matcher) -> None:
     await matcher.finish(
@@ -444,6 +571,11 @@ async def _(matcher: Matcher) -> None:
                 "/压缩当前对话",
                 "/清空当前摘要",
                 "/清空全部摘要",
+                "/添加记忆 内容",
+                "/重写当前记忆 内容",
+                "/查看记忆",
+                "/删除记忆 记忆ID",
+                "/清空当前记忆",
                 "以上管理命令只有主人可用。",
             ]
         )
