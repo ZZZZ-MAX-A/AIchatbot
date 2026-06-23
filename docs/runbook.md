@@ -134,6 +134,7 @@ Token: 留空
 ```text
 .env 静态配置
 data/access.json 动态配置
+data/chatbot.db 聊天上下文和私聊试用次数
 ```
 
 最终权限是两者合并：
@@ -164,6 +165,12 @@ GROUP_RATE_LIMIT_SECONDS=5
 MAX_GROUP_MESSAGE_LENGTH=300
 
 USER_BLACKLIST=
+
+ENABLE_MEMORY_COMPRESSION=true
+MAX_STORED_MESSAGES_PER_SESSION=200
+SUMMARY_KEEP_RECENT_MESSAGES=80
+SUMMARY_BATCH_MESSAGES=120
+MAX_SESSION_SUMMARIES_IN_CONTEXT=3
 ```
 
 ### data/access.json
@@ -279,6 +286,96 @@ USER_BLACKLIST=
 ```
 
 `/状态` 只有主人可以使用。
+
+查看 SQLite 记忆状态：
+
+```text
+/记忆状态
+```
+
+`/记忆状态` 只有主人可以使用。
+
+清空全部会话上下文：
+
+```text
+/清空全部上下文
+```
+
+`/清空全部上下文` 只有主人可以使用。它只清空聊天上下文，不清空白名单、黑名单和私聊试用次数。
+
+查看当前摘要压缩状态：
+
+```text
+/摘要状态
+```
+
+查看当前会话最近摘要：
+
+```text
+/查看摘要
+```
+
+手动压缩当前会话：
+
+```text
+/压缩当前会话
+```
+
+清空当前会话摘要：
+
+```text
+/清空当前摘要
+```
+
+清空全部会话摘要：
+
+```text
+/清空全部摘要
+```
+
+以上摘要命令只有主人可以使用。
+
+## SQLite 数据库
+
+v0.3 开始，聊天上下文和陌生人私聊试用次数会保存到：
+
+```text
+data/chatbot.db
+```
+
+这个文件是本地运行数据，不要提交到 GitHub。当前 `.gitignore` 已经忽略 `data/*`。
+
+数据库里主要保存：
+
+```text
+messages: 私聊和群聊上下文
+private_trials: 陌生人私聊试用次数
+session_summaries: 会话摘要
+long_term_memories: 长期记忆归档
+memory_embeddings: 长期记忆的语义索引
+schema_meta: 数据库版本
+```
+
+重启 NoneBot2 后端后，近期上下文会继续保留。
+
+当前版本已经预留分层记忆结构：
+
+```text
+第一层：短期对话缓存，已启用
+第二层：会话摘要压缩，已启用
+第三层：长期记忆归档，已预留表结构
+第四层：语义索引，已预留表结构
+```
+
+摘要压缩规则：
+
+```text
+每次回复后检查当前会话原始消息数量
+超过 MAX_STORED_MESSAGES_PER_SESSION 后自动压缩旧消息
+压缩时保留最近 SUMMARY_KEEP_RECENT_MESSAGES 条原文
+每次最多压缩 SUMMARY_BATCH_MESSAGES 条旧消息
+每次调用 AI 时最多带入 MAX_SESSION_SUMMARIES_IN_CONTEXT 条最近摘要
+```
 
 ## 限制规则
 
@@ -412,6 +509,7 @@ D:\AIchatbot\tools\PortableGit\cmd\git.exe push
 - `tools/`
 - `.venv/`
 - `data/access.json`
+- `data/chatbot.db`
 - `logs/`
 - `__pycache__/`
 - `*.egg-info/`

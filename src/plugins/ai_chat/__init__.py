@@ -21,14 +21,23 @@ from .access import (
 from .access_store import (
     add_item,
     ensure_access_store,
-    load_access_store,
     merged_access,
     remove_item,
 )
+from .compressor import CompressionResult, compress_session
 from .config import load_config
+from .database import DATABASE_PATH, ensure_database
 from .llm import ask_llm
-from .memory import append_message, build_history, clear_session
-from .rate_limit import can_use_private_trial, check_rate_limit, increment_private_trial
+from .memory import (
+    append_message,
+    build_history,
+    clear_all_sessions,
+    clear_session,
+    memory_stats,
+)
+from .rate_limit import check_rate_limit
+from .summaries import clear_all_summaries, clear_session_summaries, recent_summaries, summary_stats
+from .trials import can_use_private_trial, increment_private_trial, trial_stats
 
 
 __plugin_meta__ = PluginMetadata(
@@ -39,6 +48,7 @@ __plugin_meta__ = PluginMetadata(
 
 config = load_config()
 ensure_access_store()
+ensure_database()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
@@ -69,6 +79,10 @@ def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
             f"user={event.user_id} group={group} "
             f"{type(exc).__name__}: {exc}\n"
         )
+
+
+def log_background_error(exc: Exception, event: MessageEvent) -> None:
+    log_ai_event_error(exc, event)
 
 
 async def reject_or_silent(matcher: Matcher, reason: str | None) -> None:
@@ -174,6 +188,44 @@ def status_lines() -> list[str]:
     ]
 
 
+def memory_status_lines() -> list[str]:
+    stats = memory_stats()
+    trials = trial_stats()
+    return [
+        f"数据库：{DATABASE_PATH}",
+        f"消息数量：{stats['message_count']}",
+        f"会话数量：{stats['session_count']}",
+        f"摘要数量：{stats['summary_count']}",
+        f"已压缩消息：{stats['summarized_message_count']}",
+        f"长期记忆：{stats['long_term_memory_count']}",
+        f"语义索引：{stats['embedding_count']}",
+        f"试用用户：{trials['trial_user_count']}",
+        f"试用消息：{trials['trial_message_count']}",
+    ]
+
+
+def summary_status_lines(key: str) -> list[str]:
+    current = summary_stats(key)
+    total = summary_stats()
+    return [
+        f"当前会话摘要：{current['summary_count']}",
+        f"当前会话已压缩消息：{current['summarized_message_count']}",
+        f"全部摘要：{total['summary_count']}",
+        f"全部已压缩消息：{total['summarized_message_count']}",
+        f"自动压缩：{'开启' if config.enable_memory_compression else '关闭'}",
+        f"每会话原文上限：{config.max_stored_messages_per_session}",
+        f"保留最近原文：{config.summary_keep_recent_messages}",
+        f"每次压缩条数：{config.summary_batch_messages}",
+        f"上下文摘要数：{config.max_session_summaries_in_context}",
+    ]
+
+
+def compression_result_message(result: CompressionResult) -> str:
+    if result.compressed:
+        return f"{result.reason}，摘要 ID：{result.summary_id}"
+    return f"未压缩：{result.reason}"
+
+
 def list_lines(title: str, items: frozenset[str]) -> str:
     if not items:
         return f"{title}：空"
@@ -189,6 +241,28 @@ private_chat = on_message(rule=Rule(private_rule), priority=20, block=True)
 group_chat = on_message(rule=to_me() & Rule(group_rule), priority=20, block=True)
 reset_cmd = on_command("reset", aliases={"重置", "清空上下文"}, priority=5, block=True)
 status_cmd = on_command("status", aliases={"状态"}, priority=5, block=True)
+memory_status_cmd = on_command("记忆状态", aliases={"memory_status"}, priority=5, block=True)
+clear_all_memory_cmd = on_command(
+    "清空全部上下文",
+    aliases={"clear_all_context"},
+    priority=5,
+    block=True,
+)
+summary_status_cmd = on_command("摘要状态", aliases={"summary_status"}, priority=5, block=True)
+view_summaries_cmd = on_command("查看摘要", aliases={"summaries"}, priority=5, block=True)
+compress_session_cmd = on_command(
+    "压缩当前会话",
+    aliases={"压缩当前对话", "compress_session"},
+    priority=5,
+    block=True,
+)
+clear_session_summaries_cmd = on_command(
+    "清空当前摘要",
+    aliases={"清空当前对话摘要", "clear_session_summaries"},
+    priority=5,
+    block=True,
+)
+clear_all_summaries_cmd = on_command("清空全部摘要", aliases={"clear_all_summaries"}, priority=5, block=True)
 help_cmd = on_command("权限帮助", aliases={"白名单帮助", "管理帮助"}, priority=5, block=True)
 
 allow_group_cmd = on_command("加入群白名单", aliases={"允许群", "allow_group"}, priority=5, block=True)
@@ -207,6 +281,14 @@ private_users_cmd = on_command("私聊白名单", aliases={"private_users"}, pri
 blacklist_cmd = on_command("黑名单", aliases={"blacklist"}, priority=5, block=True)
 
 
+async def run_auto_compression(key: str, event: MessageEvent) -> None:
+    try:
+        async with session_lock(key):
+            await compress_session(config, key)
+    except Exception as exc:
+        log_background_error(exc, event)
+
+
 async def handle_chat(event: MessageEvent, matcher: Matcher) -> None:
     await check_access(event, matcher)
 
@@ -218,7 +300,13 @@ async def handle_chat(event: MessageEvent, matcher: Matcher) -> None:
 
     key = session_key(event)
     async with session_lock(key):
-        history = build_history(key, config.max_context_messages)
+        history = build_history(
+            key,
+            config.max_context_messages,
+            config.max_session_summaries_in_context,
+        )
+        event_user_id = user_id(event)
+        event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
 
         await matcher.send("正在思考...")
         try:
@@ -228,11 +316,26 @@ async def handle_chat(event: MessageEvent, matcher: Matcher) -> None:
             await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
             return
 
-        append_message(key, "user", text, config.max_context_messages)
-        append_message(key, "assistant", reply, config.max_context_messages)
+        append_message(
+            key,
+            "user",
+            text,
+            event.message_type,
+            event_user_id,
+            event_group_id,
+        )
+        append_message(
+            key,
+            "assistant",
+            reply,
+            event.message_type,
+            event_user_id,
+            event_group_id,
+        )
         if should_count_private_trial(event):
-            increment_private_trial(user_id(event))
-        await matcher.finish(reply)
+            increment_private_trial(event_user_id)
+        await matcher.send(reply)
+        asyncio.create_task(run_auto_compression(key, event))
 
 
 @private_chat.handle()
@@ -257,6 +360,65 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish("\n".join(status_lines()))
 
 
+@memory_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish("\n".join(memory_status_lines()))
+
+
+@clear_all_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    clear_all_sessions()
+    await matcher.finish("已清空全部会话上下文。")
+
+
+@summary_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish("\n".join(summary_status_lines(session_key(event))))
+
+
+@view_summaries_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    summaries = recent_summaries(session_key(event), 5)
+    if not summaries:
+        await matcher.finish("当前会话暂无摘要。")
+    lines = ["当前会话最近摘要："]
+    for summary in summaries:
+        lines.append(
+            f"ID {summary.id}，覆盖 {summary.source_message_count} 条，"
+            f"{summary.created_at}\n{summary.summary}"
+        )
+    await matcher.finish("\n".join(lines))
+
+
+@compress_session_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    try:
+        result = await compress_session(config, session_key(event), force=True)
+    except Exception as exc:
+        log_ai_event_error(exc, event)
+        await matcher.finish(f"压缩失败：{type(exc).__name__}")
+    await matcher.finish(compression_result_message(result))
+
+
+@clear_session_summaries_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    count = clear_session_summaries(session_key(event))
+    await matcher.finish(f"已清空当前会话摘要：{count} 条。")
+
+
+@clear_all_summaries_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    count = clear_all_summaries()
+    await matcher.finish(f"已清空全部摘要：{count} 条。")
+
+
 @help_cmd.handle()
 async def _(matcher: Matcher) -> None:
     await matcher.finish(
@@ -274,6 +436,14 @@ async def _(matcher: Matcher) -> None:
                 "/群白名单",
                 "/私聊白名单",
                 "/黑名单",
+                "/记忆状态",
+                "/清空全部上下文",
+                "/摘要状态",
+                "/查看摘要",
+                "/压缩当前会话",
+                "/压缩当前对话",
+                "/清空当前摘要",
+                "/清空全部摘要",
                 "以上管理命令只有主人可用。",
             ]
         )
