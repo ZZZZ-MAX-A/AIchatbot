@@ -96,6 +96,7 @@ cd D:\AIchatbot
 - [方案 C：NoneBot2 自研 QQ AI 机器人](docs/plan-c-nonebot.md)
 - [NapCatQQ 接入 NoneBot2](docs/napcatqq-setup.md)
 - [v0.2 权限与安全设计](docs/v0.2-access-control.md)
+- [运行维护手册](docs/runbook.md)
 - [推送到 GitHub](docs/push-to-github.md)
 
 ## 安全提醒
