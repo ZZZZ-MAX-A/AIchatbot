@@ -33,7 +33,12 @@ GitHub 仓库：
 - 用户冷却限制
 - 主人免冷却
 - 同一会话串行处理
+- SQLite 聊天上下文持久化
+- 私聊试用次数持久化
+- 分层记忆数据库结构
+- 会话摘要压缩
 - `/状态` 查看机器人状态
+- `/记忆状态` 查看记忆数据库状态
 - `/权限帮助` 查看管理命令
 
 ## 启动
@@ -66,6 +71,7 @@ cd D:\AIchatbot
 ```text
 /重置
 /状态
+/记忆状态
 /权限帮助
 ```
 
@@ -83,19 +89,28 @@ cd D:\AIchatbot
 /群白名单
 /私聊白名单
 /黑名单
+/清空全部上下文
+/摘要状态
+/查看摘要
+/压缩当前会话
+/清空当前摘要
+/清空全部摘要
 ```
 
 ## 当前规划
 
 - `v0.1`: QQ + NapCatQQ + NoneBot2 + DeepSeek 基础聊天，已跑通。
 - `v0.2`: 权限、安全、白名单、黑名单、冷却和长度限制，已实现第一批和中文管理命令。
-- `v0.3`: SQLite 聊天记录、试用次数持久化和长期记忆。
+- `v0.3`: SQLite 聊天记录、试用次数持久化和基础记忆管理，已实现第一批。
+- `v0.4`: 会话摘要压缩，已实现第一批。
 
 ## 文档
 
 - [方案 C：NoneBot2 自研 QQ AI 机器人](docs/plan-c-nonebot.md)
 - [NapCatQQ 接入 NoneBot2](docs/napcatqq-setup.md)
 - [v0.2 权限与安全设计](docs/v0.2-access-control.md)
+- [v0.3 SQLite 记忆方案](docs/v0.3-sqlite-memory.md)
+- [v0.4 记忆压缩方案](docs/v0.4-memory-compression.md)
 - [运行维护手册](docs/runbook.md)
 - [推送到 GitHub](docs/push-to-github.md)
 
@@ -112,3 +127,4 @@ cd D:\AIchatbot
 - `tools/`
 - `.venv/`
 - `data/access.json`
+- `data/chatbot.db`

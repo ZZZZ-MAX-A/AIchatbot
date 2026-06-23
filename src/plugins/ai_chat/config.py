@@ -48,6 +48,11 @@ class AiChatConfig:
     enable_private_chat: bool
     enable_group_chat: bool
     max_context_messages: int
+    enable_memory_compression: bool
+    max_stored_messages_per_session: int
+    summary_keep_recent_messages: int
+    summary_batch_messages: int
+    max_session_summaries_in_context: int
     private_whitelist: frozenset[str]
     allow_unknown_private_chat: bool
     private_trial_messages: int
@@ -71,6 +76,11 @@ def load_config() -> AiChatConfig:
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
         max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 20),
+        enable_memory_compression=_bool_env("ENABLE_MEMORY_COMPRESSION", True),
+        max_stored_messages_per_session=_int_env("MAX_STORED_MESSAGES_PER_SESSION", 200),
+        summary_keep_recent_messages=_int_env("SUMMARY_KEEP_RECENT_MESSAGES", 80),
+        summary_batch_messages=_int_env("SUMMARY_BATCH_MESSAGES", 120),
+        max_session_summaries_in_context=_int_env("MAX_SESSION_SUMMARIES_IN_CONTEXT", 3),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
