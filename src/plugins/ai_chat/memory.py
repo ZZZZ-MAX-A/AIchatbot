@@ -9,11 +9,12 @@ def build_history(
     session_key: str,
     max_messages: int,
     max_summaries: int = 0,
-    long_term_context: str = "",
+    system_contexts: list[str] | None = None,
 ) -> list[Message]:
     history: list[Message] = []
-    if long_term_context:
-        history.append({"role": "system", "content": long_term_context})
+    for context in system_contexts or []:
+        if context:
+            history.append({"role": "system", "content": context})
 
     summary_context = format_summary_context(session_key, max_summaries)
     if summary_context:
