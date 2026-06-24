@@ -104,6 +104,20 @@ def clear_session_summaries(session_key: str) -> int:
         return int(cursor.rowcount)
 
 
+def delete_session_summary(session_key: str, summary_id: int) -> bool:
+    ensure_database()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM session_summaries
+            WHERE session_key = ?
+              AND id = ?
+            """,
+            (session_key, summary_id),
+        )
+        return int(cursor.rowcount) > 0
+
+
 def clear_all_summaries() -> int:
     ensure_database()
     with connect() as connection:
@@ -145,4 +159,3 @@ def format_summary_context(session_key: str, limit: int) -> str:
     for index, summary in enumerate(summaries, start=1):
         lines.append(f"{index}. {summary.summary}")
     return "\n".join(lines)
-

@@ -61,10 +61,15 @@ def _delete_message_range(session_key: str, start_id: int, end_id: int) -> int:
         return int(cursor.rowcount)
 
 
-def _format_messages(rows: list[Any]) -> str:
+def _format_messages(rows: list[Any], owner_qq: str) -> str:
     lines: list[str] = []
     for row in rows:
-        role = "用户" if row["role"] == "user" else "AI"
+        if row["role"] != "user":
+            role = "AI"
+        elif owner_qq and str(row["user_id"]) == owner_qq:
+            role = "主人"
+        else:
+            role = "用户"
         lines.append(f"{role}: {row['content']}")
     return "\n".join(lines)
 
@@ -81,18 +86,34 @@ async def compress_session(
     if not force and total <= config.max_stored_messages_per_session:
         return CompressionResult(False, "消息数量未超过压缩阈值")
 
-    keep_recent = max(config.summary_keep_recent_messages, 0)
+    keep_recent = 0 if force else max(config.summary_keep_recent_messages, 0)
     compressible_count = total - keep_recent
     if compressible_count <= 0:
         return CompressionResult(False, "可压缩消息不足")
+    min_source_messages = max(config.summary_min_source_messages, 0)
+    if min_source_messages and compressible_count < min_source_messages:
+        return CompressionResult(
+            False,
+            f"可压缩消息 {compressible_count} 条，少于最低摘要门槛 {min_source_messages} 条",
+            source_message_count=compressible_count,
+        )
 
-    batch_size = config.summary_batch_messages if config.summary_batch_messages > 0 else compressible_count
-    batch_size = min(batch_size, compressible_count)
+    if force:
+        batch_size = compressible_count
+    else:
+        batch_size = config.summary_batch_messages if config.summary_batch_messages > 0 else compressible_count
+        batch_size = min(batch_size, compressible_count)
+    if min_source_messages and batch_size < min_source_messages:
+        return CompressionResult(
+            False,
+            f"本批可压缩消息 {batch_size} 条，少于最低摘要门槛 {min_source_messages} 条",
+            source_message_count=batch_size,
+        )
     rows = _oldest_messages(session_key, batch_size)
     if not rows:
         return CompressionResult(False, "没有可压缩消息")
 
-    message_text = _format_messages(rows)
+    message_text = _format_messages(rows, config.bot_owner_qq)
     summary = await summarize_messages(config, message_text)
     if not summary:
         return CompressionResult(False, "摘要为空")
@@ -121,4 +142,3 @@ async def compress_session(
         summary_id=summary_id,
         source_message_count=deleted_count,
     )
-

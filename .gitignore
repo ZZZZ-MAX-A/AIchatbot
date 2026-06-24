@@ -23,8 +23,14 @@ logs/*
 data/*
 !data/.gitkeep
 
+# Local persona cards
+prompts/persona-cards/
+
 # Local tools
 tools/
+
+# Local backups
+backups/
 
 # Local editor files
 .vscode/

@@ -80,6 +80,24 @@ def clear_all_sessions() -> None:
         connection.execute("DELETE FROM messages")
 
 
+def session_message_count(session_key: str) -> int:
+    ensure_database()
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS message_count
+            FROM messages
+            WHERE session_key = ?
+            """,
+            (session_key,),
+        ).fetchone()
+    return int(row["message_count"])
+
+
+def session_message_progress(session_key: str) -> int:
+    return session_message_count(session_key) + summary_stats(session_key)["summarized_message_count"]
+
+
 def memory_stats() -> dict[str, int]:
     ensure_database()
     with connect() as connection:
@@ -91,26 +109,10 @@ def memory_stats() -> dict[str, int]:
             FROM messages
             """
         ).fetchone()
-        memory_row = connection.execute(
-            """
-            SELECT
-                COUNT(*) AS long_term_memory_count
-            FROM long_term_memories
-            """
-        ).fetchone()
-        embedding_row = connection.execute(
-            """
-            SELECT
-                COUNT(*) AS embedding_count
-            FROM memory_embeddings
-            """
-        ).fetchone()
     summaries = summary_stats()
     return {
         "message_count": int(row["message_count"]),
         "session_count": int(row["session_count"]),
-        "long_term_memory_count": int(memory_row["long_term_memory_count"]),
-        "embedding_count": int(embedding_row["embedding_count"]),
         "summary_count": summaries["summary_count"],
         "summarized_message_count": summaries["summarized_message_count"],
     }

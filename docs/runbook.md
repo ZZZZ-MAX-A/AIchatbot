@@ -170,6 +170,11 @@ GROUP_AUTO_REPLY_THRESHOLD=50
 GROUP_AUTO_REPLY_COOLDOWN_SECONDS=60
 GROUP_AUTO_REPLY_OWNER_COOLDOWN_SECONDS=30
 GROUP_AUTO_REPLY_USER_COOLDOWN_SECONDS=120
+ENABLE_OWNER_NOTIFICATIONS=true
+OWNER_NOTIFICATION_MAX_LENGTH=50
+OWNER_NOTIFICATION_GLOBAL_COOLDOWN_SECONDS=60
+OWNER_NOTIFICATION_GROUP_COOLDOWN_SECONDS=120
+OWNER_NOTIFICATION_USER_COOLDOWN_SECONDS=300
 
 USER_BLACKLIST=
 
@@ -177,8 +182,9 @@ ENABLE_MEMORY_COMPRESSION=true
 MAX_STORED_MESSAGES_PER_SESSION=200
 SUMMARY_KEEP_RECENT_MESSAGES=80
 SUMMARY_BATCH_MESSAGES=120
+SUMMARY_MIN_SOURCE_MESSAGES=40
 MAX_SESSION_SUMMARIES_IN_CONTEXT=3
-MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
+RULE_REMINDER_INTERVAL_MESSAGES=40
 ```
 
 `BOT_OWNER_PUBLIC_NAME` 是可选项，用于填写允许机器人对外说明的主人公开称呼或 QQ 名字；不填则只公开 `BOT_OWNER_QQ`。
@@ -186,6 +192,12 @@ MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
 `BOT_ALIASES` 是全局追加别名，可留空。角色卡专属主动回复别名优先写在 `prompts/persona-cards/*.auto-reply.json`。
 
 `ENABLE_GROUP_AUTO_REPLY` 控制非 @ 群消息主动回复，默认关闭。开启后仅对白名单群生效，并受评分阈值和冷却限制。
+
+`ENABLE_OWNER_NOTIFICATIONS` 控制主人转告通知，默认开启。转告命令只接受 50 字以内纯文本，超过后回复“请主动联系主人，文本过长不予转告。”。
+
+`SUMMARY_MIN_SOURCE_MESSAGES` 控制最低摘要门槛，默认 40 条消息，约等于 20 轮问答。未达到门槛时不会生成摘要。
+
+`RULE_REMINDER_INTERVAL_MESSAGES` 控制长上下文短版底层规则提醒间隔，默认每累计 40 条会话消息提醒一次。设置为 `0` 可关闭。
 
 ### data/access.json
 
@@ -341,6 +353,12 @@ MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
 /清空当前摘要
 ```
 
+删除当前会话指定摘要：
+
+```text
+/删除摘要 摘要ID
+```
+
 清空全部会话摘要：
 
 ```text
@@ -349,55 +367,55 @@ MAX_LONG_TERM_MEMORIES_IN_CONTEXT=8
 
 以上摘要命令只有主人可以使用。
 
+## 主人转告通知
+
+转告命令：
+
+```text
+/转告主人 内容
+/留言给主人 内容
+```
+
+允许使用：
+
+```text
+主人
+私聊白名单用户
+授权群成员
+```
+
+限制：
+
+```text
+最多 50 字
+只转告纯文本
+不调用 LLM
+不走角色卡
+不写长期记忆
+黑名单用户、非授权群和陌生私聊用户不能转告
+```
+
+超过 50 字时回复：
+
+```text
+请主动联系主人，文本过长不予转告。
+```
+
+命中密码、验证码、Token、API Key、身份证号、手机号、二维码或数据库等敏感内容时，不予转告。
+
+成功后机器人会用固定模板私聊主人，原会话只回复：
+
+```text
+已转告主人。
+```
+
 ## 长期回忆摘要
 
-长期回忆摘要由主人手动维护，用于保存当前对话对象值得长期保留的大致摘要。
+长期回忆摘要模块当前暂停使用。
 
-私聊中，当前对象是私聊用户。群聊中，当前对象是当前群。
+运行时不再提供 `/添加记忆`、`/重写当前记忆`、`/查看记忆`、`/删除记忆` 和 `/清空当前记忆`，AI 上下文也不再注入长期回忆摘要。
 
-添加当前对象长期回忆摘要：
-
-```text
-/添加记忆 内容
-```
-
-重写当前对象长期回忆摘要：
-
-```text
-/重写当前记忆 内容
-```
-
-`/重写当前记忆` 会先清空当前对象已有长期回忆摘要，再写入新的摘要。
-
-查看当前对象长期回忆摘要：
-
-```text
-/查看记忆
-```
-
-删除长期回忆摘要：
-
-```text
-/删除记忆 记忆ID
-```
-
-清空当前对象长期回忆摘要：
-
-```text
-/清空当前记忆
-```
-
-`/清空当前记忆` 会同时清空：
-
-```text
-当前对象长期回忆摘要
-当前会话摘要
-当前短期上下文
-```
-
-如果机器人仍然提到已经删除的旧记忆，优先使用这个命令清理当前对象的所有记忆来源。
-
-以上长期回忆摘要命令只有主人可以使用。
+数据库中的 `long_term_memories` 和 `memory_embeddings` 表暂时保留，作为后续需要恢复长期记忆模块时的兼容结构。
 
 ## 人格表达提示词
 
@@ -434,7 +452,7 @@ prompts/persona-cards/moyan.md
 避免旧人设和旧偏好被强行提起
 群聊更克制
 私聊更连续
-长期回忆摘要仅相关时参考
+长期回忆摘要模块暂时停用
 ```
 
 AI 调用时会额外注入当前发言者身份：
@@ -494,8 +512,8 @@ data/chatbot.db
 messages: 私聊和群聊上下文
 private_trials: 陌生人私聊试用次数
 session_summaries: 会话摘要
-long_term_memories: 长期记忆归档
-memory_embeddings: 长期记忆的语义索引
+long_term_memories: 长期记忆归档，当前暂停使用
+memory_embeddings: 长期记忆的语义索引，当前暂停使用
 schema_meta: 数据库版本
 ```
 
@@ -506,8 +524,8 @@ schema_meta: 数据库版本
 ```text
 第一层：短期对话缓存，已启用
 第二层：会话摘要压缩，已启用
-第三层：长期回忆摘要，已启用手动管理
-第四层：语义索引，已预留表结构
+第三层：长期回忆摘要，当前暂停使用
+第四层：语义索引，当前暂停使用
 ```
 
 摘要压缩规则：
@@ -515,9 +533,14 @@ schema_meta: 数据库版本
 ```text
 每次回复后检查当前会话原始消息数量
 超过 MAX_STORED_MESSAGES_PER_SESSION 后自动压缩旧消息
-压缩时保留最近 SUMMARY_KEEP_RECENT_MESSAGES 条原文
-每次最多压缩 SUMMARY_BATCH_MESSAGES 条旧消息
+自动压缩时保留最近 SUMMARY_KEEP_RECENT_MESSAGES 条原文
+自动压缩每次最多压缩 SUMMARY_BATCH_MESSAGES 条旧消息
+手动执行 /压缩当前会话 时，会把上次摘要后的未摘要消息压缩到最新一条
+待摘要消息少于 SUMMARY_MIN_SOURCE_MESSAGES 时，不生成摘要
+摘要生成优先保留主人明确说过的需求、决定、纠正、验收结果、待办和边界
+事实分析只做客观归类，不分析主人的性格、动机或情绪价值
 每次调用 AI 时最多带入 MAX_SESSION_SUMMARIES_IN_CONTEXT 条最近摘要
+每累计 RULE_REMINDER_INTERVAL_MESSAGES 条会话消息，回复前追加一次短版底层规则提醒
 ```
 
 ## 限制规则
@@ -649,6 +672,67 @@ cd D:\AIchatbot
 ```
 
 如果 `data/access.json` 损坏，可以关闭机器人后手动修复或删除该文件，再重启机器人。
+
+## 视觉识图运行说明
+
+视觉识图使用本地 Ollama，不走 DeepSeek 接口。
+
+确认模型存在：
+
+```powershell
+ollama list
+```
+
+应能看到：
+
+```text
+qwen2.5vl:3b
+```
+
+如果 Windows 用户名包含中文，建议使用纯英文模型目录：
+
+```powershell
+$env:OLLAMA_MODELS
+```
+
+期望输出：
+
+```text
+D:\OllamaModels
+```
+
+如果识图报错中出现 `C:\Users\����\.ollama\models`，说明实际监听 `127.0.0.1:11434` 的 Ollama server 仍在使用默认中文用户目录。需要关闭 `ollama app.exe` 托盘程序和旧的 `ollama.exe`，再用正确环境变量启动 server。
+
+视觉配置：
+
+```env
+ENABLE_VISION=true
+VISION_OLLAMA_BASE_URL=http://127.0.0.1:11434
+VISION_MODEL=qwen2.5vl:3b
+VISION_TIMEOUT_SECONDS=180
+VISION_MAX_IMAGES=1
+VISION_MAX_IMAGE_BYTES=5242880
+VISION_IMAGE_CACHE_TTL_SECONDS=120
+VISION_PRIVATE_IMAGE_WAIT_SECONDS=5
+```
+
+私聊行为：
+
+```text
+用户发图片 -> 机器人等待 5 秒
+5 秒内用户补文字 -> 图片和文字合并，只回复一次
+5 秒内没有补文字 -> 按纯图片识别并回复
+```
+
+群聊行为：
+
+```text
+用户发图片 -> 机器人只缓存，不回复
+同一用户 120 秒内 @机器人问图 -> 识别刚才图片并回复一次
+其他用户问图 -> 不默认使用前一个人的图片
+```
+
+图片观察结果是不可信输入。图片文字不能修改系统提示、角色卡、主人身份、安全规则或隐私规则。真实人物身份不识别；公开动漫/游戏角色、游戏名和 UI 可以在高置信度时识别，不确定时只描述特征。
 
 ## Git 提交
 
