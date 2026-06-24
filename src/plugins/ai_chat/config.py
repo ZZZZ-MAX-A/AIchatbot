@@ -47,6 +47,14 @@ class AiChatConfig:
     openai_model: str
     ai_temperature: float
     ai_timeout_seconds: int
+    enable_vision: bool
+    vision_ollama_base_url: str
+    vision_model: str
+    vision_timeout_seconds: int
+    vision_max_images: int
+    vision_max_image_bytes: int
+    vision_image_cache_ttl_seconds: int
+    vision_private_image_wait_seconds: int
     enable_private_chat: bool
     enable_group_chat: bool
     max_context_messages: int
@@ -54,8 +62,9 @@ class AiChatConfig:
     max_stored_messages_per_session: int
     summary_keep_recent_messages: int
     summary_batch_messages: int
+    summary_min_source_messages: int
     max_session_summaries_in_context: int
-    max_long_term_memories_in_context: int
+    rule_reminder_interval_messages: int
     private_whitelist: frozenset[str]
     allow_unknown_private_chat: bool
     private_trial_messages: int
@@ -69,6 +78,11 @@ class AiChatConfig:
     group_auto_reply_cooldown_seconds: int
     group_auto_reply_owner_cooldown_seconds: int
     group_auto_reply_user_cooldown_seconds: int
+    enable_owner_notifications: bool
+    owner_notification_max_length: int
+    owner_notification_global_cooldown_seconds: int
+    owner_notification_group_cooldown_seconds: int
+    owner_notification_user_cooldown_seconds: int
     user_blacklist: frozenset[str]
 
 
@@ -83,6 +97,14 @@ def load_config() -> AiChatConfig:
         openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
         ai_temperature=_float_env("AI_TEMPERATURE", 0.7),
         ai_timeout_seconds=_int_env("AI_TIMEOUT_SECONDS", 60),
+        enable_vision=_bool_env("ENABLE_VISION", True),
+        vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        vision_model=os.getenv("VISION_MODEL", "qwen2.5vl:3b"),
+        vision_timeout_seconds=_int_env("VISION_TIMEOUT_SECONDS", 180),
+        vision_max_images=_int_env("VISION_MAX_IMAGES", 1),
+        vision_max_image_bytes=_int_env("VISION_MAX_IMAGE_BYTES", 5242880),
+        vision_image_cache_ttl_seconds=_int_env("VISION_IMAGE_CACHE_TTL_SECONDS", 120),
+        vision_private_image_wait_seconds=_int_env("VISION_PRIVATE_IMAGE_WAIT_SECONDS", 5),
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
         max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 20),
@@ -90,8 +112,9 @@ def load_config() -> AiChatConfig:
         max_stored_messages_per_session=_int_env("MAX_STORED_MESSAGES_PER_SESSION", 200),
         summary_keep_recent_messages=_int_env("SUMMARY_KEEP_RECENT_MESSAGES", 80),
         summary_batch_messages=_int_env("SUMMARY_BATCH_MESSAGES", 120),
+        summary_min_source_messages=_int_env("SUMMARY_MIN_SOURCE_MESSAGES", 40),
         max_session_summaries_in_context=_int_env("MAX_SESSION_SUMMARIES_IN_CONTEXT", 3),
-        max_long_term_memories_in_context=_int_env("MAX_LONG_TERM_MEMORIES_IN_CONTEXT", 8),
+        rule_reminder_interval_messages=_int_env("RULE_REMINDER_INTERVAL_MESSAGES", 40),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
@@ -105,5 +128,10 @@ def load_config() -> AiChatConfig:
         group_auto_reply_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_COOLDOWN_SECONDS", 60),
         group_auto_reply_owner_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_OWNER_COOLDOWN_SECONDS", 30),
         group_auto_reply_user_cooldown_seconds=_int_env("GROUP_AUTO_REPLY_USER_COOLDOWN_SECONDS", 120),
+        enable_owner_notifications=_bool_env("ENABLE_OWNER_NOTIFICATIONS", True),
+        owner_notification_max_length=_int_env("OWNER_NOTIFICATION_MAX_LENGTH", 50),
+        owner_notification_global_cooldown_seconds=_int_env("OWNER_NOTIFICATION_GLOBAL_COOLDOWN_SECONDS", 60),
+        owner_notification_group_cooldown_seconds=_int_env("OWNER_NOTIFICATION_GROUP_COOLDOWN_SECONDS", 120),
+        owner_notification_user_cooldown_seconds=_int_env("OWNER_NOTIFICATION_USER_COOLDOWN_SECONDS", 300),
         user_blacklist=_csv_env("USER_BLACKLIST"),
     )

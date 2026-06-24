@@ -1,9 +1,11 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 
 from nonebot import get_driver, on_command, on_message
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, PrivateMessageEvent
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
@@ -24,6 +26,7 @@ from .access_store import (
     merged_access,
     remove_item,
 )
+from .base_prompt import load_base_chat_reminder
 from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, ensure_database
@@ -32,27 +35,37 @@ from .llm import (
     ask_llm,
     load_persona_prompt,
 )
-from .long_term import (
-    add_long_term_memory,
-    clear_long_term_memories,
-    count_long_term_memories,
-    delete_long_term_memory,
-    format_long_term_context,
-    list_long_term_memories,
-    long_term_memory_stats,
-)
 from .memory import (
     append_message,
     build_history,
     clear_all_sessions,
     clear_session,
     memory_stats,
+    session_message_count,
+    session_message_progress,
 )
-from .rate_limit import check_rate_limit
+from .owner_notify import (
+    format_owner_notification,
+    validate_owner_notification_content,
+)
+from .rate_limit import check_rate_limit, check_rate_limits
 from .reply_decider import ReplyDecision, decide_group_auto_reply
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, select_role_card
-from .summaries import clear_all_summaries, clear_session_summaries, recent_summaries, summary_stats
+from .summaries import (
+    clear_all_summaries,
+    clear_session_summaries,
+    delete_session_summary,
+    recent_summaries,
+    summary_stats,
+)
 from .trials import can_use_private_trial, increment_private_trial, trial_stats
+from .vision import (
+    describe_images,
+    event_has_image,
+    format_image_descriptions,
+    image_urls_from_event,
+    vision_safety_context,
+)
 
 
 __plugin_meta__ = PluginMetadata(
@@ -67,6 +80,15 @@ ensure_database()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
+
+
+@dataclass(frozen=True)
+class CachedImages:
+    urls: tuple[str, ...]
+    created_at: float
+
+
+_recent_images: dict[str, CachedImages] = {}
 
 
 def current_access():
@@ -178,10 +200,82 @@ async def group_auto_rule(event: MessageEvent) -> bool:
     return config.enable_group_auto_reply and _is_group_enabled(event)
 
 
+async def group_image_cache_rule(event: MessageEvent) -> bool:
+    if not config.enable_vision or not _is_group_enabled(event):
+        return False
+    return isinstance(event, GroupMessageEvent) and event_has_image(event)
+
+
 def session_key(event: MessageEvent) -> str:
     if isinstance(event, GroupMessageEvent):
         return f"group:{event.group_id}"
     return f"private:{event.user_id}"
+
+
+def image_cache_key(event: MessageEvent) -> str:
+    if isinstance(event, GroupMessageEvent):
+        return f"group:{event.group_id}:user:{event.user_id}"
+    return f"private:{event.user_id}"
+
+
+def cache_image_urls(event: MessageEvent, urls: list[str]) -> None:
+    if not urls:
+        return
+    max_images = max(config.vision_max_images, 1)
+    _recent_images[image_cache_key(event)] = CachedImages(
+        tuple(urls[:max_images]),
+        monotonic(),
+    )
+
+
+def pop_cached_image_urls(event: MessageEvent) -> list[str]:
+    cached = _recent_images.pop(image_cache_key(event), None)
+    if cached is None:
+        return []
+    if monotonic() - cached.created_at > max(config.vision_image_cache_ttl_seconds, 1):
+        return []
+    return list(cached.urls)
+
+
+def cached_image_is_current(event: MessageEvent, urls: list[str]) -> bool:
+    cached = _recent_images.get(image_cache_key(event))
+    if cached is None:
+        return False
+    if monotonic() - cached.created_at > max(config.vision_image_cache_ttl_seconds, 1):
+        _recent_images.pop(image_cache_key(event), None)
+        return False
+    return list(cached.urls) == urls
+
+
+def is_image_followup_text(text: str) -> bool:
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    markers = (
+        "图",
+        "图片",
+        "这张",
+        "这个",
+        "刚才",
+        "上面",
+        "截图",
+        "表情",
+        "表情包",
+        "识图",
+        "看图",
+        "看一下",
+        "这是谁",
+        "是谁",
+        "是什么",
+        "什么游戏",
+        "哪个角色",
+        "角色",
+        "动漫",
+        "游戏",
+        "ui",
+        "界面",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def clean_text(event: MessageEvent) -> str:
@@ -189,6 +283,20 @@ def clean_text(event: MessageEvent) -> str:
     if text.startswith(("/", "!", "！")):
         return ""
     return text
+
+
+def command_text(event: MessageEvent) -> str:
+    return event.get_plaintext().strip()
+
+
+def is_command_message(event: MessageEvent) -> bool:
+    return command_text(event).startswith(("/", "!", "锛?"))
+
+
+def combine_text_and_images(text: str, image_descriptions: list[str]) -> str:
+    image_context = format_image_descriptions(image_descriptions)
+    parts = [part for part in (text, image_context) if part]
+    return "\n\n".join(parts)
 
 
 def parse_single_arg(arg_text: str) -> str:
@@ -209,6 +317,11 @@ def status_lines() -> list[str]:
         f"主动回复群冷却：{config.group_auto_reply_cooldown_seconds} 秒",
         f"主动回复用户冷却：{config.group_auto_reply_user_cooldown_seconds} 秒",
         f"主动回复主人冷却：{config.group_auto_reply_owner_cooldown_seconds} 秒",
+        f"主人转告：{'开启' if config.enable_owner_notifications else '关闭'}",
+        f"转告长度限制：{config.owner_notification_max_length}",
+        f"转告全局冷却：{config.owner_notification_global_cooldown_seconds} 秒",
+        f"转告群冷却：{config.owner_notification_group_cooldown_seconds} 秒",
+        f"转告用户冷却：{config.owner_notification_user_cooldown_seconds} 秒",
         f"主人：{'已配置' if config.bot_owner_qq else '未配置'}",
         f"私聊白名单：{len(access.private_whitelist)}",
         f"群白名单：{len(access.group_whitelist)}",
@@ -224,41 +337,49 @@ def status_lines() -> list[str]:
 def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
     stats = memory_stats()
     trials = trial_stats()
-    long_term = long_term_memory_stats()
     lines = [
         f"数据库：{DATABASE_PATH}",
         f"消息数量：{stats['message_count']}",
         f"会话数量：{stats['session_count']}",
         f"摘要数量：{stats['summary_count']}",
         f"已压缩消息：{stats['summarized_message_count']}",
-        f"长期记忆：{stats['long_term_memory_count']}",
-        f"记忆主体：{long_term['subject_count']}",
-        f"语义索引：{stats['embedding_count']}",
+        "长期记忆：已停用",
         f"试用用户：{trials['trial_user_count']}",
         f"试用消息：{trials['trial_message_count']}",
     ]
-    if event is not None:
-        subject_type, subject_id = current_memory_subject(event)
-        lines.append(
-            f"当前对象长期回忆摘要："
-            f"{count_long_term_memories(subject_type, subject_id)}"
-        )
     return lines
 
 
 def summary_status_lines(key: str) -> list[str]:
     current = summary_stats(key)
     total = summary_stats()
+    raw_count = session_message_count(key)
+    progress_count = session_message_progress(key)
+    min_count = max(config.summary_min_source_messages, 0)
+    auto_compressible = max(raw_count - max(config.summary_keep_recent_messages, 0), 0)
+    if min_count <= 0:
+        manual_status = "可执行" if raw_count > 0 else "暂无原文"
+    elif raw_count >= min_count:
+        manual_status = "可执行"
+    else:
+        manual_status = f"不足，还差 {min_count - raw_count} 条"
     return [
         f"当前会话摘要：{current['summary_count']}",
         f"当前会话已压缩消息：{current['summarized_message_count']}",
+        f"当前会话原文消息：{raw_count}",
+        f"当前未摘要消息：{raw_count}",
+        f"当前累计消息：{progress_count}",
         f"全部摘要：{total['summary_count']}",
         f"全部已压缩消息：{total['summarized_message_count']}",
         f"自动压缩：{'开启' if config.enable_memory_compression else '关闭'}",
         f"每会话原文上限：{config.max_stored_messages_per_session}",
         f"保留最近原文：{config.summary_keep_recent_messages}",
+        f"当前自动可压缩消息：{auto_compressible}",
         f"每次压缩条数：{config.summary_batch_messages}",
+        f"最低摘要消息：{config.summary_min_source_messages}",
+        f"手动压缩：{manual_status}",
         f"上下文摘要数：{config.max_session_summaries_in_context}",
+        f"规则提醒间隔：{config.rule_reminder_interval_messages} 条",
     ]
 
 
@@ -266,18 +387,6 @@ def compression_result_message(result: CompressionResult) -> str:
     if result.compressed:
         return f"{result.reason}，摘要 ID：{result.summary_id}"
     return f"未压缩：{result.reason}"
-
-
-def current_memory_subject(event: MessageEvent) -> tuple[str, str]:
-    if isinstance(event, GroupMessageEvent):
-        return "group", group_id(event)
-    return "user", user_id(event)
-
-
-def memory_subjects_for_context(event: MessageEvent) -> list[tuple[str, str]]:
-    if isinstance(event, GroupMessageEvent):
-        return [("group", group_id(event))]
-    return [("user", user_id(event))]
 
 
 def speaker_identity_context(event: MessageEvent) -> str:
@@ -333,22 +442,60 @@ def llm_user_text(event: MessageEvent, text: str) -> str:
     )
 
 
-def subject_label(subject_type: str, subject_id: str) -> str:
-    if subject_type == "group":
-        return f"群 {subject_id}"
-    if subject_type == "user":
-        return f"用户 {subject_id}"
-    return f"{subject_type}:{subject_id}"
+def rule_reminder_context(key: str) -> str:
+    interval = config.rule_reminder_interval_messages
+    if interval <= 0:
+        return ""
+    progress = session_message_progress(key)
+    if progress <= 0 or progress % interval != 0:
+        return ""
+    return load_base_chat_reminder()
 
 
-def format_memories(title: str, subject_type: str, subject_id: str) -> str:
-    memories = list_long_term_memories(subject_type, subject_id, 20)
-    if not memories:
-        return f"{title}：暂无长期回忆摘要。"
-    lines = [f"{title}："]
-    for memory in memories:
-        lines.append(f"ID {memory.id} {memory.content}")
-    return "\n".join(lines)
+def can_tell_owner(event: MessageEvent) -> tuple[bool, str | None]:
+    if not config.enable_owner_notifications:
+        return False, "主人转告功能未开启。"
+    if not config.bot_owner_qq:
+        return False, "主人未配置，无法转告。"
+
+    access = current_access()
+    if user_id(event) in access.user_blacklist:
+        return False, None
+    if is_owner(config, event):
+        return True, None
+    if isinstance(event, PrivateMessageEvent):
+        if not config.enable_private_chat:
+            return False, "当前私聊无权转告主人。"
+        if user_id(event) in access.private_whitelist:
+            return True, None
+        return False, "当前私聊无权转告主人。"
+    if isinstance(event, GroupMessageEvent):
+        if not config.enable_group_chat:
+            return False, "当前群未启用转告。"
+        if group_id(event) in access.group_whitelist:
+            return True, None
+        return False, "当前群未启用转告。"
+    return False, "当前会话无权转告主人。"
+
+
+def check_owner_notification_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
+    limits = [
+        ("owner_notify:global", config.owner_notification_global_cooldown_seconds),
+        (
+            f"owner_notify:user:{user_id(event)}",
+            config.owner_notification_user_cooldown_seconds,
+        ),
+    ]
+    if isinstance(event, GroupMessageEvent):
+        limits.append(
+            (
+                f"owner_notify:group:{group_id(event)}",
+                config.owner_notification_group_cooldown_seconds,
+            )
+        )
+
+    ok, _ = check_rate_limits(limits)
+    return (True, None) if ok else (False, "转告过于频繁，请稍后再试。")
 
 
 def persona_status_lines() -> list[str]:
@@ -376,6 +523,7 @@ async def require_owner(event: MessageEvent, matcher: Matcher) -> None:
 
 private_chat = on_message(rule=Rule(private_rule), priority=20, block=True)
 group_chat = on_message(rule=to_me() & Rule(group_rule), priority=20, block=True)
+group_image_cache = on_message(rule=Rule(group_image_cache_rule), priority=25, block=False)
 group_auto_chat = on_message(rule=Rule(group_auto_rule), priority=30, block=False)
 reset_cmd = on_command("reset", aliases={"重置", "清空上下文"}, priority=5, block=True)
 status_cmd = on_command("status", aliases={"状态"}, priority=5, block=True)
@@ -400,14 +548,11 @@ clear_session_summaries_cmd = on_command(
     priority=5,
     block=True,
 )
+delete_summary_cmd = on_command("删除摘要", aliases={"delete_summary"}, priority=5, block=True)
 clear_all_summaries_cmd = on_command("清空全部摘要", aliases={"clear_all_summaries"}, priority=5, block=True)
-add_memory_cmd = on_command("添加记忆", aliases={"add_memory"}, priority=5, block=True)
-rewrite_memory_cmd = on_command("重写当前记忆", aliases={"rewrite_current_memory"}, priority=5, block=True)
-view_memory_cmd = on_command("查看记忆", aliases={"view_memory"}, priority=5, block=True)
-delete_memory_cmd = on_command("删除记忆", aliases={"delete_memory"}, priority=5, block=True)
-clear_current_memory_cmd = on_command("清空当前记忆", aliases={"clear_current_memory"}, priority=5, block=True)
 view_persona_cmd = on_command("查看角色卡", aliases={"view_persona"}, priority=5, block=True)
 select_persona_cmd = on_command("选择角色卡", aliases={"select_persona"}, priority=5, block=True)
+tell_owner_cmd = on_command("转告主人", aliases={"留言给主人", "tell_owner"}, priority=5, block=True)
 help_cmd = on_command("权限帮助", aliases={"白名单帮助", "管理帮助"}, priority=5, block=True)
 
 allow_group_cmd = on_command("加入群白名单", aliases={"允许群", "allow_group"}, priority=5, block=True)
@@ -441,11 +586,32 @@ async def handle_chat(
 ) -> None:
     await check_access(event, matcher)
 
+    if is_command_message(event):
+        return
+
     text = clean_text(event)
-    if not text:
+    has_image = event_has_image(event)
+    if not text and not has_image:
         return
 
     await check_message_limits(event, matcher, text, silent_limit_rejection)
+
+    image_urls = image_urls_from_event(event) if has_image else []
+    if isinstance(event, PrivateMessageEvent) and image_urls and not text:
+        wait_seconds = max(config.vision_private_image_wait_seconds, 0)
+        if wait_seconds > 0:
+            cache_image_urls(event, image_urls)
+            await asyncio.sleep(wait_seconds)
+            if not cached_image_is_current(event, image_urls):
+                return
+            pop_cached_image_urls(event)
+    elif not image_urls and text:
+        if isinstance(event, PrivateMessageEvent) or (
+            isinstance(event, GroupMessageEvent) and is_image_followup_text(text)
+        ):
+            image_urls = pop_cached_image_urls(event)
+
+    has_image_context = bool(image_urls) or has_image
 
     key = session_key(event)
     async with session_lock(key):
@@ -456,18 +622,33 @@ async def handle_chat(
             [
                 speaker_identity_context(event),
                 owner_public_context(),
-                format_long_term_context(
-                    memory_subjects_for_context(event),
-                    config.max_long_term_memories_in_context,
-                ),
             ],
         )
+        reminder = rule_reminder_context(key)
+        if reminder:
+            history.append({"role": "system", "content": reminder})
+        if has_image_context:
+            history.append({"role": "system", "content": vision_safety_context()})
         history.append({"role": "system", "content": current_message_identity_context(event)})
         event_user_id = user_id(event)
         event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
+        image_descriptions: list[str] = []
+        if has_image_context:
+            if image_urls:
+                try:
+                    image_descriptions = await describe_images(config, image_urls)
+                except Exception as exc:
+                    log_ai_event_error(exc, event)
+                    image_descriptions = [f"图片识别失败：{type(exc).__name__}"]
+            elif config.enable_vision:
+                image_descriptions = ["无法读取图片地址。"]
+
+        user_content = combine_text_and_images(text, image_descriptions)
+        if not user_content:
+            return
 
         try:
-            reply = await ask_llm(config, history, llm_user_text(event, text))
+            reply = await ask_llm(config, history, llm_user_text(event, user_content))
         except Exception as exc:
             log_ai_event_error(exc, event)
             await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
@@ -476,7 +657,7 @@ async def handle_chat(
         append_message(
             key,
             "user",
-            stored_user_content(event, text),
+            stored_user_content(event, user_content),
             event.message_type,
             event_user_id,
             event_group_id,
@@ -545,6 +726,19 @@ async def should_group_auto_reply(event: GroupMessageEvent) -> bool:
         return False
 
     return check_group_auto_reply_cooldown(event)
+
+
+@group_image_cache.handle()
+async def _(event: GroupMessageEvent) -> None:
+    if is_command_message(event):
+        return
+    access = current_access()
+    allowed, _ = can_group_chat(config, access, event)
+    if not allowed:
+        return
+    image_urls = image_urls_from_event(event)
+    if image_urls:
+        cache_image_urls(event, image_urls)
 
 
 @private_chat.handle()
@@ -628,90 +822,25 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish(f"已清空当前会话摘要：{count} 条。")
 
 
+@delete_summary_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    target = parse_single_arg(arg.extract_plain_text())
+    if not target or not target.isdigit():
+        await matcher.finish("用法：/删除摘要 摘要ID")
+    deleted = delete_session_summary(session_key(event), int(target))
+    await matcher.finish(
+        f"已删除当前会话摘要：ID {target}。"
+        if deleted
+        else f"没有找到当前会话摘要：{target}"
+    )
+
+
 @clear_all_summaries_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
     count = clear_all_summaries()
     await matcher.finish(f"已清空全部摘要：{count} 条。")
-
-
-@add_memory_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    await require_owner(event, matcher)
-    content = arg.extract_plain_text().strip()
-    if not content:
-        await matcher.finish("用法：/添加记忆 当前对话对象的长期回忆摘要")
-    subject_type, subject_id = current_memory_subject(event)
-    memory_id = add_long_term_memory(
-        subject_type,
-        subject_id,
-        content,
-        session_key(event),
-    )
-    await matcher.finish(
-        f"已添加长期回忆摘要：ID {memory_id}，"
-        f"{subject_label(subject_type, subject_id)}。"
-    )
-
-
-@view_memory_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher) -> None:
-    await require_owner(event, matcher)
-    subject_type, subject_id = current_memory_subject(event)
-    await matcher.finish(
-        format_memories(
-            f"{subject_label(subject_type, subject_id)}长期记忆",
-            subject_type,
-            subject_id,
-        )
-    )
-
-
-@rewrite_memory_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    await require_owner(event, matcher)
-    content = arg.extract_plain_text().strip()
-    if not content:
-        await matcher.finish("用法：/重写当前记忆 当前对话对象的新长期回忆摘要")
-    subject_type, subject_id = current_memory_subject(event)
-    removed_count = clear_long_term_memories(subject_type, subject_id)
-    summary_count = clear_session_summaries(session_key(event))
-    clear_session(session_key(event))
-    memory_id = add_long_term_memory(
-        subject_type,
-        subject_id,
-        content,
-        session_key(event),
-    )
-    await matcher.finish(
-        f"已重写{subject_label(subject_type, subject_id)}长期回忆摘要："
-        f"删除 {removed_count} 条旧摘要，清空会话摘要 {summary_count} 条，"
-        f"短期上下文已清空，新增 ID {memory_id}。"
-    )
-
-
-@delete_memory_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    await require_owner(event, matcher)
-    target = parse_single_arg(arg.extract_plain_text())
-    if not target or not target.isdigit():
-        await matcher.finish("用法：/删除记忆 记忆ID")
-    deleted = delete_long_term_memory(int(target))
-    await matcher.finish("已删除长期回忆摘要。" if deleted else f"没有找到长期回忆摘要：{target}")
-
-
-@clear_current_memory_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher) -> None:
-    await require_owner(event, matcher)
-    subject_type, subject_id = current_memory_subject(event)
-    long_term_count = clear_long_term_memories(subject_type, subject_id)
-    summary_count = clear_session_summaries(session_key(event))
-    clear_session(session_key(event))
-    await matcher.finish(
-        f"已清空{subject_label(subject_type, subject_id)}当前记忆："
-        f"长期回忆摘要 {long_term_count} 条，会话摘要 {summary_count} 条，"
-        "短期上下文已清空。"
-    )
 
 
 @view_persona_cmd.handle()
@@ -743,6 +872,37 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await matcher.finish(f"已选择角色卡：{card.key}，{card.title}")
 
 
+@tell_owner_cmd.handle()
+async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    allowed, reason = can_tell_owner(event)
+    if not allowed:
+        await reject_or_silent(matcher, reason)
+
+    content = arg.extract_plain_text().strip()
+    validation_error = validate_owner_notification_content(
+        content,
+        config.owner_notification_max_length,
+    )
+    if validation_error:
+        await matcher.finish(validation_error)
+
+    cooldown_ok, cooldown_reason = check_owner_notification_cooldown(event)
+    if not cooldown_ok:
+        await matcher.finish(cooldown_reason or "转告过于频繁，请稍后再试。")
+
+    message = format_owner_notification(event, content)
+    try:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=int(config.bot_owner_qq),
+            message=message,
+        )
+    except Exception as exc:
+        log_ai_event_error(exc, event)
+        await matcher.finish("转告发送失败，请稍后再试。")
+    await matcher.finish("已转告主人。")
+
+
 @help_cmd.handle()
 async def _(matcher: Matcher) -> None:
     await matcher.finish(
@@ -767,15 +927,14 @@ async def _(matcher: Matcher) -> None:
                 "/压缩当前会话",
                 "/压缩当前对话",
                 "/清空当前摘要",
+                "/删除摘要 摘要ID",
                 "/清空全部摘要",
-                "/添加记忆 内容",
-                "/重写当前记忆 内容",
-                "/查看记忆",
-                "/删除记忆 记忆ID",
-                "/清空当前记忆",
                 "/查看角色卡",
                 "/选择角色卡",
-                "以上管理命令只有主人可用。",
+                "/转告主人 内容",
+                "/留言给主人 内容",
+                "除转告命令外，以上管理命令只有主人可用。",
+                "转告命令允许主人、私聊白名单用户和授权群成员使用。",
             ]
         )
     )
