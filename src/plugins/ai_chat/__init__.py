@@ -30,6 +30,14 @@ from .base_prompt import load_base_chat_reminder
 from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, ensure_database
+from .diagnostics import (
+    clear_error_log,
+    format_config_status,
+    format_diagnostics,
+    format_image_cache_status,
+    format_recent_errors,
+    format_vision_status,
+)
 from .llm import (
     active_persona_prompt_path,
     ask_llm,
@@ -89,6 +97,30 @@ class CachedImages:
 
 
 _recent_images: dict[str, CachedImages] = {}
+
+
+def image_cache_stats() -> dict[str, int]:
+    now = monotonic()
+    ttl = max(config.vision_image_cache_ttl_seconds, 1)
+    expired = [
+        key for key, cached in _recent_images.items()
+        if now - cached.created_at > ttl
+    ]
+    for key in expired:
+        _recent_images.pop(key, None)
+    private_count = sum(1 for key in _recent_images if key.startswith("private:"))
+    group_count = sum(1 for key in _recent_images if key.startswith("group:"))
+    return {
+        "total": len(_recent_images),
+        "private": private_count,
+        "group": group_count,
+    }
+
+
+def clear_image_cache() -> int:
+    count = len(_recent_images)
+    _recent_images.clear()
+    return count
 
 
 def current_access():
@@ -527,6 +559,13 @@ group_image_cache = on_message(rule=Rule(group_image_cache_rule), priority=25, b
 group_auto_chat = on_message(rule=Rule(group_auto_rule), priority=30, block=False)
 reset_cmd = on_command("reset", aliases={"重置", "清空上下文"}, priority=5, block=True)
 status_cmd = on_command("status", aliases={"状态"}, priority=5, block=True)
+diagnostics_cmd = on_command("诊断", aliases={"diagnose"}, priority=5, block=True)
+config_status_cmd = on_command("配置状态", aliases={"config_status"}, priority=5, block=True)
+vision_status_cmd = on_command("视觉状态", aliases={"vision_status"}, priority=5, block=True)
+recent_errors_cmd = on_command("最近错误", aliases={"recent_errors"}, priority=5, block=True)
+clear_error_log_cmd = on_command("清空错误日志", aliases={"clear_error_log"}, priority=5, block=True)
+image_cache_status_cmd = on_command("图片缓存状态", aliases={"image_cache_status"}, priority=5, block=True)
+clear_image_cache_cmd = on_command("清空图片缓存", aliases={"clear_image_cache"}, priority=5, block=True)
 memory_status_cmd = on_command("记忆状态", aliases={"memory_status"}, priority=5, block=True)
 clear_all_memory_cmd = on_command(
     "清空全部上下文",
@@ -770,6 +809,49 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish("\n".join(status_lines()))
 
 
+@diagnostics_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(await format_diagnostics(config, image_cache_stats()))
+
+
+@config_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(format_config_status(config))
+
+
+@vision_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(format_vision_status(config, image_cache_stats()))
+
+
+@recent_errors_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(format_recent_errors())
+
+
+@clear_error_log_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(clear_error_log())
+
+
+@image_cache_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(format_image_cache_status(config, image_cache_stats()))
+
+
+@clear_image_cache_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    count = clear_image_cache()
+    await matcher.finish(f"已清空图片缓存：{count} 条。")
+
+
 @memory_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
@@ -921,6 +1003,13 @@ async def _(matcher: Matcher) -> None:
                 "/私聊白名单",
                 "/黑名单",
                 "/记忆状态",
+                "/诊断",
+                "/配置状态",
+                "/视觉状态",
+                "/最近错误",
+                "/清空错误日志",
+                "/图片缓存状态",
+                "/清空图片缓存",
                 "/清空全部上下文",
                 "/摘要状态",
                 "/查看摘要",

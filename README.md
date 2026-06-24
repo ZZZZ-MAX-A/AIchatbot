@@ -81,6 +81,11 @@ cd D:\AIchatbot
 ```text
 /重置
 /状态
+/诊断
+/配置状态
+/视觉状态
+/最近错误
+/图片缓存状态
 /记忆状态
 /权限帮助
 ```
@@ -99,6 +104,8 @@ cd D:\AIchatbot
 /群白名单
 /私聊白名单
 /黑名单
+/清空错误日志
+/清空图片缓存
 /清空全部上下文
 /摘要状态
 /查看摘要
@@ -123,6 +130,7 @@ cd D:\AIchatbot
 - `v0.7`: 群聊主动回复规则评分，已实现第一批，默认关闭。
 - `v0.8`: 主人通知与转告，已实现第一批。
 - `v0.9`: 视觉识图与图片上下文，已实现第一批。
+- `v1.0`: 稳定性与双通道诊断，已实现第一批。
 
 ## 文档
 
@@ -136,6 +144,7 @@ cd D:\AIchatbot
 - [v0.7 群聊主动回复方案](docs/v0.7-group-auto-reply.md)
 - [v0.8 主人通知与转告方案](docs/v0.8-owner-notifications.md)
 - [v0.9 视觉识图与图片上下文方案](docs/v0.9-vision-image-context.md)
+- [v1.0 稳定性与双通道诊断方案](docs/v1.0-diagnostics-and-operations.md)
 - [运行维护手册](docs/runbook.md)
 - [推送到 GitHub](docs/push-to-github.md)
 
