@@ -22,6 +22,11 @@ ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 
 CHAT_TEST_TIMEOUT_SECONDS = 5
 OLLAMA_TEST_TIMEOUT_SECONDS = 3
+CHAT_TEST_SYSTEM_PROMPT = (
+    "你是聊天接口健康检查。请只返回一句普通中文，"
+    "不要读取、猜测或输出任何隐私信息。"
+)
+CHAT_TEST_USER_PROMPT = "请回复：聊天接口正常"
 
 
 SENSITIVE_PATTERNS = (
@@ -72,6 +77,36 @@ def sanitize_text(text: str) -> str:
     for pattern, replacement in SENSITIVE_PATTERNS:
         sanitized = pattern.sub(replacement, sanitized)
     return " ".join(sanitized.split())
+
+
+def _extract_chat_content(response: object) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ""
+
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+    return ""
+
+
+def _chat_finish_reason(response: object) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return "无 choices"
+    reason = getattr(choices[0], "finish_reason", None)
+    return str(reason) if reason else "未知"
 
 
 def config_warnings(config: AiChatConfig) -> list[str]:
@@ -183,14 +218,17 @@ async def check_chat_api(config: AiChatConfig) -> CheckResult:
         started = time.monotonic()
         response = await client.chat.completions.create(
             model=config.openai_model,
-            messages=[{"role": "user", "content": "只回复 OK"}],
+            messages=[
+                {"role": "system", "content": CHAT_TEST_SYSTEM_PROMPT},
+                {"role": "user", "content": CHAT_TEST_USER_PROMPT},
+            ],
             temperature=0,
-            max_tokens=8,
         )
         elapsed = time.monotonic() - started
-        content = (response.choices[0].message.content or "").strip()
+        content = _extract_chat_content(response)
         if not content:
-            return CheckResult(False, f"返回空内容，用时 {elapsed:.1f} 秒")
+            reason = _chat_finish_reason(response)
+            return CheckResult(False, f"返回空内容，用时 {elapsed:.1f} 秒，结束原因：{reason}")
         return CheckResult(True, f"正常，用时 {elapsed:.1f} 秒")
     except Exception as exc:
         return CheckResult(False, _short_error(exc))
