@@ -83,6 +83,16 @@ class AiChatConfig:
     owner_notification_global_cooldown_seconds: int
     owner_notification_group_cooldown_seconds: int
     owner_notification_user_cooldown_seconds: int
+    enable_tts: bool
+    tts_service_url: str
+    tts_voice: str
+    tts_emotion: str
+    tts_timeout_seconds: int
+    tts_max_chars: int
+    tts_max_total_seconds: int
+    tts_cooldown_seconds: int
+    tts_auto_start: bool
+    tts_startup_wait_seconds: int
     user_blacklist: frozenset[str]
 
 
@@ -133,5 +143,15 @@ def load_config() -> AiChatConfig:
         owner_notification_global_cooldown_seconds=_int_env("OWNER_NOTIFICATION_GLOBAL_COOLDOWN_SECONDS", 60),
         owner_notification_group_cooldown_seconds=_int_env("OWNER_NOTIFICATION_GROUP_COOLDOWN_SECONDS", 120),
         owner_notification_user_cooldown_seconds=_int_env("OWNER_NOTIFICATION_USER_COOLDOWN_SECONDS", 300),
+        enable_tts=_bool_env("ENABLE_TTS", False),
+        tts_service_url=os.getenv("TTS_SERVICE_URL", "http://127.0.0.1:7861"),
+        tts_voice=os.getenv("TTS_VOICE", "zh_kelin_raw_20260625_222137"),
+        tts_emotion=os.getenv("TTS_EMOTION", "affection"),
+        tts_timeout_seconds=_int_env("TTS_TIMEOUT_SECONDS", 180),
+        tts_max_chars=_int_env("TTS_MAX_CHARS", 180),
+        tts_max_total_seconds=_int_env("TTS_MAX_TOTAL_SECONDS", 60),
+        tts_cooldown_seconds=_int_env("TTS_COOLDOWN_SECONDS", 20),
+        tts_auto_start=_bool_env("TTS_AUTO_START", True),
+        tts_startup_wait_seconds=_int_env("TTS_STARTUP_WAIT_SECONDS", 45),
         user_blacklist=_csv_env("USER_BLACKLIST"),
     )

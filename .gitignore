@@ -32,6 +32,11 @@ tools/
 # Local backups
 backups/
 
+# Local validation artifacts
+tts-validation/
+voice-samples/
+temp_audio/
+
 # Local editor files
 .vscode/
 .idea/

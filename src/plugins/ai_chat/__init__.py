@@ -5,7 +5,7 @@ from pathlib import Path
 from time import monotonic
 
 from nonebot import get_driver, on_command, on_message
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
@@ -73,6 +73,17 @@ from .vision import (
     format_image_descriptions,
     image_urls_from_event,
     vision_safety_context,
+)
+from .voice import (
+    VoiceIntent,
+    VoiceIntentType,
+    adapt_speech_text,
+    get_last_tts_candidate,
+    parse_voice_intent,
+    request_tts,
+    semantic_voice_instruction,
+    semantic_voice_user_text,
+    set_last_tts_candidate,
 )
 
 
@@ -158,6 +169,21 @@ async def reject_or_silent(matcher: Matcher, reason: str | None) -> None:
     if reason:
         await matcher.finish(reason)
     await matcher.finish()
+
+
+def tts_status_lines() -> list[str]:
+    return [
+        f"语音输出：{'开启' if config.enable_tts else '关闭'}",
+        f"TTS 服务：{config.tts_service_url}",
+        f"默认音色：{config.tts_voice}",
+        f"默认情绪：{config.tts_emotion}",
+        f"自动启动：{'开启' if config.tts_auto_start else '关闭'}",
+        f"启动等待：{config.tts_startup_wait_seconds} 秒",
+        f"语音超时：{config.tts_timeout_seconds} 秒",
+        f"文本上限：{config.tts_max_chars} 字",
+        f"总时长上限：{config.tts_max_total_seconds} 秒",
+        f"冷却：{config.tts_cooldown_seconds} 秒",
+    ]
 
 
 def should_count_private_trial(event: MessageEvent) -> bool:
@@ -354,6 +380,9 @@ def status_lines() -> list[str]:
         f"转告全局冷却：{config.owner_notification_global_cooldown_seconds} 秒",
         f"转告群冷却：{config.owner_notification_group_cooldown_seconds} 秒",
         f"转告用户冷却：{config.owner_notification_user_cooldown_seconds} 秒",
+        f"语音输出：{'开启' if config.enable_tts else '关闭'}",
+        f"默认音色：{config.tts_voice}",
+        f"默认语音情绪：{config.tts_emotion}",
         f"主人：{'已配置' if config.bot_owner_qq else '未配置'}",
         f"私聊白名单：{len(access.private_whitelist)}",
         f"群白名单：{len(access.group_whitelist)}",
@@ -530,6 +559,70 @@ def check_owner_notification_cooldown(event: MessageEvent) -> tuple[bool, str | 
     return (True, None) if ok else (False, "转告过于频繁，请稍后再试。")
 
 
+def check_tts_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
+    if is_owner(config, event):
+        ok, wait_seconds = check_rate_limit(
+            f"tts:owner:{user_id(event)}",
+            config.tts_cooldown_seconds,
+        )
+        return (True, None) if ok else (False, f"语音生成冷却中，请等 {wait_seconds} 秒。")
+    return False, "只有主人可以使用语音功能。"
+
+
+async def send_tts_record(bot: Bot, event: MessageEvent, text: str) -> None:
+    adapted = adapt_speech_text(text)
+    if not adapted.text:
+        raise RuntimeError("empty speakable text")
+    if config.tts_max_chars > 0 and len(adapted.text) > config.tts_max_chars:
+        raise ValueError("text too long")
+    audio_path = await request_tts(config, adapted)
+    if not isinstance(event, PrivateMessageEvent):
+        raise RuntimeError("TTS is private only")
+    await bot.call_api(
+        "send_private_msg",
+        user_id=int(event.user_id),
+        message=MessageSegment.record(str(audio_path)),
+    )
+
+
+async def handle_direct_or_last_tts(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    intent: VoiceIntent,
+) -> bool:
+    if not isinstance(event, PrivateMessageEvent):
+        return False
+    if not config.enable_tts:
+        await matcher.finish("语音功能当前未开启。")
+    if not is_owner(config, event):
+        await matcher.finish("只有主人可以使用语音功能。")
+
+    cooldown_ok, cooldown_reason = check_tts_cooldown(event)
+    if not cooldown_ok:
+        await matcher.finish(cooldown_reason or "语音生成冷却中，请稍后再试。")
+
+    if intent.type == VoiceIntentType.DIRECT_TEXT:
+        text = intent.text
+    elif intent.type == VoiceIntentType.LAST_REPLY:
+        candidate = get_last_tts_candidate()
+        if candidate is None:
+            await matcher.finish("我现在没有可朗读的上一条回复。")
+        text = candidate.raw_text
+    else:
+        return False
+
+    try:
+        await send_tts_record(bot, event, text)
+    except ValueError:
+        await matcher.finish(f"这段太长了，当前语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。")
+    except Exception as exc:
+        log_ai_event_error(exc, event)
+        await matcher.finish("语音生成失败了，请稍后再试。")
+    await matcher.finish()
+    return True
+
+
 def persona_status_lines() -> list[str]:
     prompt = load_persona_prompt()
     active_path = active_persona_prompt_path()
@@ -592,6 +685,7 @@ clear_all_summaries_cmd = on_command("清空全部摘要", aliases={"clear_all_s
 view_persona_cmd = on_command("查看角色卡", aliases={"view_persona"}, priority=5, block=True)
 select_persona_cmd = on_command("选择角色卡", aliases={"select_persona"}, priority=5, block=True)
 tell_owner_cmd = on_command("转告主人", aliases={"留言给主人", "tell_owner"}, priority=5, block=True)
+tts_status_cmd = on_command("语音状态", aliases={"tts_status"}, priority=5, block=True)
 help_cmd = on_command("权限帮助", aliases={"白名单帮助", "管理帮助"}, priority=5, block=True)
 
 allow_group_cmd = on_command("加入群白名单", aliases={"允许群", "allow_group"}, priority=5, block=True)
@@ -619,9 +713,12 @@ async def run_auto_compression(key: str, event: MessageEvent) -> None:
 
 
 async def handle_chat(
+    bot: Bot,
     event: MessageEvent,
     matcher: Matcher,
     silent_limit_rejection: bool = False,
+    semantic_voice: bool = False,
+    semantic_goal: str = "",
 ) -> None:
     await check_access(event, matcher)
 
@@ -666,6 +763,8 @@ async def handle_chat(
         reminder = rule_reminder_context(key)
         if reminder:
             history.append({"role": "system", "content": reminder})
+        if semantic_voice:
+            history.append({"role": "system", "content": semantic_voice_instruction()})
         if has_image_context:
             history.append({"role": "system", "content": vision_safety_context()})
         history.append({"role": "system", "content": current_message_identity_context(event)})
@@ -683,6 +782,8 @@ async def handle_chat(
                 image_descriptions = ["无法读取图片地址。"]
 
         user_content = combine_text_and_images(text, image_descriptions)
+        if semantic_voice:
+            user_content = semantic_voice_user_text(text, semantic_goal)
         if not user_content:
             return
 
@@ -692,6 +793,15 @@ async def handle_chat(
             log_ai_event_error(exc, event)
             await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
             return
+
+        if semantic_voice:
+            try:
+                await send_tts_record(bot, event, reply)
+            except ValueError:
+                await matcher.finish(f"这段太长了，当前语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。")
+            except Exception as exc:
+                log_ai_event_error(exc, event)
+                await matcher.finish("语音生成失败了，请稍后再试。")
 
         append_message(
             key,
@@ -711,7 +821,13 @@ async def handle_chat(
         )
         if should_count_private_trial(event):
             increment_private_trial(event_user_id)
+        if semantic_voice:
+            set_last_tts_candidate(reply)
+            asyncio.create_task(run_auto_compression(key, event))
+            await matcher.finish()
         await matcher.send(reply)
+        if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
+            set_last_tts_candidate(reply)
         asyncio.create_task(run_auto_compression(key, event))
 
 
@@ -781,20 +897,43 @@ async def _(event: GroupMessageEvent) -> None:
 
 
 @private_chat.handle()
-async def _(event: MessageEvent, matcher: Matcher) -> None:
-    await handle_chat(event, matcher)
+async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
+    text = clean_text(event)
+    intent = parse_voice_intent(text)
+    if intent is not None:
+        if intent.type in {VoiceIntentType.DIRECT_TEXT, VoiceIntentType.LAST_REPLY}:
+            handled = await handle_direct_or_last_tts(bot, event, matcher, intent)
+            if handled:
+                return
+        elif intent.type == VoiceIntentType.SEMANTIC_REPLY:
+            if not config.enable_tts:
+                await matcher.finish("语音功能当前未开启。")
+            if not is_owner(config, event):
+                await matcher.finish("只有主人可以使用语音功能。")
+            cooldown_ok, cooldown_reason = check_tts_cooldown(event)
+            if not cooldown_ok:
+                await matcher.finish(cooldown_reason or "语音生成冷却中，请稍后再试。")
+            await handle_chat(
+                bot,
+                event,
+                matcher,
+                semantic_voice=True,
+                semantic_goal=intent.semantic_goal,
+            )
+            return
+    await handle_chat(bot, event, matcher)
 
 
 @group_chat.handle()
-async def _(event: MessageEvent, matcher: Matcher) -> None:
-    await handle_chat(event, matcher)
+async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
+    await handle_chat(bot, event, matcher)
 
 
 @group_auto_chat.handle()
-async def _(event: GroupMessageEvent, matcher: Matcher) -> None:
+async def _(bot: Bot, event: GroupMessageEvent, matcher: Matcher) -> None:
     if not await should_group_auto_reply(event):
         return
-    await handle_chat(event, matcher, silent_limit_rejection=True)
+    await handle_chat(bot, event, matcher, silent_limit_rejection=True)
 
 
 @reset_cmd.handle()
@@ -985,6 +1124,19 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -
     await matcher.finish("已转告主人。")
 
 
+@tts_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    candidate = get_last_tts_candidate()
+    lines = tts_status_lines()
+    if candidate is None:
+        lines.append("上一条可朗读回复：无")
+    else:
+        lines.append(f"上一条可朗读回复：{candidate.created_at.isoformat(timespec='seconds')}")
+        lines.append(f"可朗读长度：{len(candidate.speakable_text)} 字")
+    await matcher.finish("\n".join(lines))
+
+
 @help_cmd.handle()
 async def _(matcher: Matcher) -> None:
     await matcher.finish(
@@ -1022,6 +1174,7 @@ async def _(matcher: Matcher) -> None:
                 "/选择角色卡",
                 "/转告主人 内容",
                 "/留言给主人 内容",
+                "/语音状态",
                 "除转告命令外，以上管理命令只有主人可用。",
                 "转告命令允许主人、私聊白名单用户和授权群成员使用。",
             ]
