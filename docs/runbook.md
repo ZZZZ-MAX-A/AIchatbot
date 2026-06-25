@@ -780,6 +780,88 @@ SQLite 数据库
 最近 AI 错误
 ```
 
+## v1.1 语音输出运行
+
+v1.1 语音输出使用本地 IndexTTS2 服务生成 WAV，再由 OneBot record 发送到主人 QQ 私聊。TTS 不负责生成语义内容，只负责把聊天 AI 已经生成的文本清理、分句、合成和发送。
+
+当前限制：
+
+```text
+仅私聊可用
+仅主人可用
+首次语音请求会冷启动 TTS 模型
+如果本地 TTS 服务未运行，机器人会先自动拉起服务
+模型空闲 10 分钟后自动释放显存
+单次语音总时长上限 60 秒
+```
+
+TTS 服务可手动启动，也可在第一次语音请求时由机器人自动启动。手动启动方式：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-tts-service.ps1
+```
+
+机器人 `.env` 需要开启：
+
+```text
+ENABLE_TTS=true
+TTS_SERVICE_URL=http://127.0.0.1:7861
+TTS_VOICE=zh_kelin_raw_20260625_222137
+TTS_EMOTION=affection
+TTS_MAX_TOTAL_SECONDS=60
+TTS_AUTO_START=true
+TTS_STARTUP_WAIT_SECONDS=45
+```
+
+QQ 私聊触发方式：
+
+```text
+用语音说：晚安，今天也辛苦了。
+刚刚那句念给我听
+请用语音给我说晚安
+```
+
+三类触发含义：
+
+```text
+直接文本语音：不调用聊天 AI，直接朗读冒号后的文本。
+上一条回复语音：朗读最近一条主人私聊中机器人生成的可朗读回复。
+语义语音回复：聊天 AI 按角色卡生成要说出口的内容，TTS 只负责朗读该回复。
+```
+
+语音文本会在合成前做轻量清理：
+
+```text
+删除括号和星号动作描写
+狗修金 -> 主人
+爱可 -> 我
+保留轻度口吃和省略号停顿
+按完整句子分段，段间约 550ms 停顿
+```
+
+状态命令：
+
+```text
+/语音状态
+```
+
+本地目录：
+
+```text
+D:\AIchatbot\tts-validation
+D:\AIchatbot\voice-samples
+D:\AIchatbot\temp_audio
+```
+
+这些目录包含本地模型、音色样本、临时音频和测试音频，不应提交到 GitHub。
+
+详细设计和验证记录见：
+
+```text
+docs/v1.1-voice-output-draft.md
+```
+
 ## Git 提交
 
 查看状态：
@@ -806,6 +888,7 @@ D:\AIchatbot\tools\PortableGit\cmd\git.exe push
 
 - `.env`
 - `tools/`
+- `tts-validation/`
 - `.venv/`
 - `data/access.json`
 - `data/chatbot.db`
