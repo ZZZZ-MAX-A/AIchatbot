@@ -56,6 +56,27 @@ SUMMARY_SYSTEM_PROMPT = """
 """.strip()
 
 
+GAP_SCENE_SUMMARY_SYSTEM_PROMPT = """
+你是 QQ 聊天中间空窗的场景状态摘要器。请把下面这段已经离开短时窗口、但还没有进入正式会话摘要的聊天，压缩成临时场景状态摘要。
+
+必须输出固定字段：
+- 场景位置：只记录对话中明确设定的位置；未明确则写“未明确”。
+- 场景类型：例如项目设计讨论、排障、日常闲聊、亲密陪伴、调情互动、角色扮演等。
+- 场景分析：简短说明这段互动正在做什么，不推测心理，不编造未发生事件。
+- 已明确发生：只记录对话里明确说过、明确发生或明确确认的事实。
+- 当前话题方向：说明后续回复应接住什么话题或场景状态。
+
+禁止：
+1. 不要写长期回复风格、称呼偏好、2-3 句偏好、括号动作描写偏好，这些属于角色卡或长期偏好。
+2. 不要分析主人的真实性格、心理动机或情绪诊断。
+3. 不要把未发生的亲密行为写成已经发生。
+4. 不要替主人决定身体反应、心理动机或未表达意愿。
+5. 不要保存 API Key、Token、密码、二维码、身份证、手机号等敏感内容。
+
+输出 180 字以内中文摘要，字段名必须保留。
+""".strip()
+
+
 async def ask_llm(
     config: AiChatConfig,
     history: list[dict[str, str]],
@@ -107,6 +128,29 @@ async def summarize_messages(config: AiChatConfig, message_text: str) -> str:
         ],
         temperature=0.2,
         max_tokens=500,
+    )
+    content = response.choices[0].message.content
+    return content.strip() if content else ""
+
+
+async def summarize_gap_scene_messages(config: AiChatConfig, message_text: str) -> str:
+    if not config.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    client = AsyncOpenAI(
+        api_key=config.openai_api_key,
+        base_url=config.openai_base_url,
+        timeout=config.ai_timeout_seconds,
+    )
+
+    response = await client.chat.completions.create(
+        model=config.openai_model,
+        messages=[
+            {"role": "system", "content": GAP_SCENE_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": message_text},
+        ],
+        temperature=0.2,
+        max_tokens=400,
     )
     content = response.choices[0].message.content
     return content.strip() if content else ""

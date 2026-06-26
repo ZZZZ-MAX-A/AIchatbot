@@ -109,10 +109,15 @@ cd D:\AIchatbot
 /清空全部上下文
 /摘要状态
 /查看摘要
+/查看空窗摘要
 /压缩当前会话
 /清空当前摘要
 /删除摘要 摘要ID
 /清空全部摘要
+/添加事实记忆 内容
+/添加偏好记忆 内容
+/查看长期记忆
+/删除长期记忆 记忆ID
 /查看角色卡
 /选择角色卡
 /转告主人 内容
@@ -131,6 +136,7 @@ cd D:\AIchatbot
 - `v0.8`: 主人通知与转告，已实现第一批。
 - `v0.9`: 视觉识图与图片上下文，已实现第一批。
 - `v1.0`: 稳定性与双通道诊断，已实现第一批。
+- `v1.2`: 记忆系统运行结构，短时 40 条、正式压缩 80/40、空窗场景摘要和手动长期记忆。
 
 ## 文档
 
@@ -143,6 +149,7 @@ cd D:\AIchatbot
 - [v0.6 人格表达提示词方案](docs/v0.6-persona-expression.md)
 - [v0.7 群聊主动回复方案](docs/v0.7-group-auto-reply.md)
 - [v0.8 主人通知与转告方案](docs/v0.8-owner-notifications.md)
+- [v1.2 记忆系统运行设计](docs/v1.2-memory-runtime.md)
 - [v0.9 视觉识图与图片上下文方案](docs/v0.9-vision-image-context.md)
 - [v1.0 稳定性与双通道诊断方案](docs/v1.0-diagnostics-and-operations.md)
 - [运行维护手册](docs/runbook.md)

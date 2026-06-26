@@ -3,6 +3,7 @@ from typing import Any
 
 from .config import AiChatConfig
 from .database import connect, ensure_database
+from .gap_scene_summaries import clear_gap_scene_summaries
 from .llm import summarize_messages
 from .summaries import add_summary
 
@@ -135,6 +136,7 @@ async def compress_session(
         source_message_count=len(rows),
     )
     deleted_count = _delete_message_range(session_key, int(first["id"]), int(last["id"]))
+    clear_gap_scene_summaries(session_key)
 
     return CompressionResult(
         compressed=True,

@@ -109,6 +109,28 @@ def ensure_database() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS gap_scene_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                slot INTEGER NOT NULL,
+                summary TEXT NOT NULL,
+                message_start_id INTEGER NOT NULL,
+                message_end_id INTEGER NOT NULL,
+                source_message_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(session_key, slot)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gap_scene_summaries_session_slot
+            ON gap_scene_summaries (session_key, slot)
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS private_trials (
                 user_id TEXT PRIMARY KEY,
                 used_count INTEGER NOT NULL DEFAULT 0,

@@ -121,6 +121,12 @@ def config_warnings(config: AiChatConfig) -> list[str]:
         warnings.append("ENABLE_VISION=true 但 VISION_MODEL 为空。")
     if config.summary_keep_recent_messages >= config.max_stored_messages_per_session:
         warnings.append("SUMMARY_KEEP_RECENT_MESSAGES 不小于 MAX_STORED_MESSAGES_PER_SESSION，自动压缩可能难以触发。")
+    if config.max_context_messages != config.summary_keep_recent_messages:
+        warnings.append("MAX_CONTEXT_MESSAGES 与 SUMMARY_KEEP_RECENT_MESSAGES 不一致，可能产生保留但不可见的原文。")
+    if config.gap_scene_summary_1_threshold < config.max_context_messages:
+        warnings.append("GAP_SCENE_SUMMARY_1_THRESHOLD 小于 MAX_CONTEXT_MESSAGES，空窗摘要可能过早触发。")
+    if config.gap_scene_summary_2_threshold <= config.gap_scene_summary_1_threshold:
+        warnings.append("GAP_SCENE_SUMMARY_2_THRESHOLD 不大于第 1 阈值，第 2 条空窗摘要可能无法正常分段。")
     if config.group_auto_reply_threshold < 20:
         warnings.append("GROUP_AUTO_REPLY_THRESHOLD 低于 20，主动回复可能过于频繁。")
     return warnings
@@ -154,7 +160,15 @@ def format_config_status(config: AiChatConfig) -> str:
         f"主人转告：{_on_off(config.enable_owner_notifications)}",
         f"记忆压缩：{_on_off(config.enable_memory_compression)}",
         f"上下文消息：{config.max_context_messages}",
+        f"每会话原文上限：{config.max_stored_messages_per_session}",
+        f"保留最近原文：{config.summary_keep_recent_messages}",
+        f"每次压缩条数：{config.summary_batch_messages}",
         f"摘要上下文：{config.max_session_summaries_in_context}",
+        f"空窗场景摘要：{_on_off(config.enable_gap_scene_summaries)}",
+        f"空窗阈值：>{config.gap_scene_summary_1_threshold} / >{config.gap_scene_summary_2_threshold}",
+        f"空窗摘要上下文：{config.max_gap_scene_summaries_in_context}",
+        f"手动长期记忆上下文：{_on_off(config.enable_long_term_memory_context)}",
+        f"长期记忆上下文：{config.max_long_term_memories_in_context}",
     ]
     warnings = config_warnings(config)
     if warnings:

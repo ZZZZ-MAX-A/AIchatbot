@@ -38,6 +38,17 @@ from .diagnostics import (
     format_recent_errors,
     format_vision_status,
 )
+from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
+from .long_term import (
+    LONG_TERM_FACT_TYPE,
+    LONG_TERM_PREFERENCE_TYPE,
+    add_long_term_memory,
+    delete_long_term_memory,
+    format_long_term_context,
+    list_long_term_memories,
+    long_term_memory_stats,
+    memory_type_label,
+)
 from .llm import (
     active_persona_prompt_path,
     ask_llm,
@@ -397,6 +408,8 @@ def status_lines() -> list[str]:
 
 def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
     stats = memory_stats()
+    long_term = long_term_memory_stats()
+    gap = gap_scene_summary_stats()
     trials = trial_stats()
     lines = [
         f"数据库：{DATABASE_PATH}",
@@ -404,7 +417,11 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
         f"会话数量：{stats['session_count']}",
         f"摘要数量：{stats['summary_count']}",
         f"已压缩消息：{stats['summarized_message_count']}",
-        "长期记忆：已停用",
+        f"手动长期记忆：{'注入上下文' if config.enable_long_term_memory_context else '不注入上下文'}",
+        f"长期记忆数量：{long_term['memory_count']}",
+        f"长期记忆对象：{long_term['subject_count']}",
+        f"空窗场景摘要：{'开启' if config.enable_gap_scene_summaries else '关闭'}",
+        f"空窗摘要数量：{gap['summary_count']}",
         f"试用用户：{trials['trial_user_count']}",
         f"试用消息：{trials['trial_message_count']}",
     ]
@@ -413,6 +430,7 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
 
 def summary_status_lines(key: str) -> list[str]:
     current = summary_stats(key)
+    gap = gap_scene_summary_stats(key)
     total = summary_stats()
     raw_count = session_message_count(key)
     progress_count = session_message_progress(key)
@@ -440,6 +458,10 @@ def summary_status_lines(key: str) -> list[str]:
         f"最低摘要消息：{config.summary_min_source_messages}",
         f"手动压缩：{manual_status}",
         f"上下文摘要数：{config.max_session_summaries_in_context}",
+        f"空窗摘要：{'开启' if config.enable_gap_scene_summaries else '关闭'}",
+        f"当前空窗摘要数：{gap['summary_count']}",
+        f"空窗摘要阈值：>{config.gap_scene_summary_1_threshold} / >{config.gap_scene_summary_2_threshold}",
+        f"上下文空窗摘要数：{config.max_gap_scene_summaries_in_context}",
         f"规则提醒间隔：{config.rule_reminder_interval_messages} 条",
     ]
 
@@ -484,6 +506,60 @@ def owner_public_context() -> str:
             "- 主人主动告诉你的公开称呼或名字可以向非主人说明；不确定是否公开的信息默认不透露。",
         ]
     )
+    return "\n".join(lines)
+
+
+def long_term_subjects(event: MessageEvent) -> list[tuple[str, str]]:
+    subjects = [("user", user_id(event))]
+    if isinstance(event, GroupMessageEvent):
+        subjects.append(("group", group_id(event)))
+    return subjects
+
+
+def fact_memory_subject(event: MessageEvent) -> tuple[str, str]:
+    if isinstance(event, GroupMessageEvent):
+        return ("group", group_id(event))
+    return ("user", user_id(event))
+
+
+def preference_memory_subject(event: MessageEvent) -> tuple[str, str]:
+    return ("user", user_id(event))
+
+
+def subject_label(subject_type: str, subject_id: str) -> str:
+    if subject_type == "group":
+        return f"群聊 {subject_id}"
+    if config.bot_owner_qq and subject_id == config.bot_owner_qq:
+        return f"主人 {subject_id}"
+    return f"用户 {subject_id}"
+
+
+def manual_long_term_context(event: MessageEvent) -> str:
+    if not config.enable_long_term_memory_context:
+        return ""
+    return format_long_term_context(
+        long_term_subjects(event),
+        config.max_long_term_memories_in_context,
+    )
+
+
+def format_current_long_term_memories(event: MessageEvent) -> str:
+    subjects = long_term_subjects(event)
+    lines = ["当前相关手动长期记忆："]
+    found = False
+    for subject_type, subject_id in subjects:
+        memories = list_long_term_memories(subject_type, subject_id, 20)
+        if not memories:
+            continue
+        found = True
+        lines.append(f"[{subject_label(subject_type, subject_id)}]")
+        for memory in memories:
+            lines.append(
+                f"ID {memory.id}，{memory_type_label(memory.memory_type)}，{memory.updated_at}\n"
+                f"{memory.content}"
+            )
+    if not found:
+        return "当前相关对象暂无手动长期记忆。"
     return "\n".join(lines)
 
 
@@ -668,6 +744,7 @@ clear_all_memory_cmd = on_command(
 )
 summary_status_cmd = on_command("摘要状态", aliases={"summary_status"}, priority=5, block=True)
 view_summaries_cmd = on_command("查看摘要", aliases={"summaries"}, priority=5, block=True)
+view_gap_scene_summaries_cmd = on_command("查看空窗摘要", aliases={"gap_scene_summaries"}, priority=5, block=True)
 compress_session_cmd = on_command(
     "压缩当前会话",
     aliases={"压缩当前对话", "compress_session"},
@@ -682,6 +759,10 @@ clear_session_summaries_cmd = on_command(
 )
 delete_summary_cmd = on_command("删除摘要", aliases={"delete_summary"}, priority=5, block=True)
 clear_all_summaries_cmd = on_command("清空全部摘要", aliases={"clear_all_summaries"}, priority=5, block=True)
+add_fact_memory_cmd = on_command("添加事实记忆", aliases={"add_fact_memory"}, priority=5, block=True)
+add_preference_memory_cmd = on_command("添加偏好记忆", aliases={"add_preference_memory"}, priority=5, block=True)
+view_long_term_memory_cmd = on_command("查看长期记忆", aliases={"long_term_memories"}, priority=5, block=True)
+delete_long_term_memory_cmd = on_command("删除长期记忆", aliases={"delete_long_term_memory"}, priority=5, block=True)
 view_persona_cmd = on_command("查看角色卡", aliases={"view_persona"}, priority=5, block=True)
 select_persona_cmd = on_command("选择角色卡", aliases={"select_persona"}, priority=5, block=True)
 tell_owner_cmd = on_command("转告主人", aliases={"留言给主人", "tell_owner"}, priority=5, block=True)
@@ -751,13 +832,19 @@ async def handle_chat(
 
     key = session_key(event)
     async with session_lock(key):
+        try:
+            await ensure_gap_scene_summaries(config, key)
+        except Exception as exc:
+            log_background_error(exc, event)
         history = build_history(
             key,
             config.max_context_messages,
             config.max_session_summaries_in_context,
+            config.max_gap_scene_summaries_in_context,
             [
                 speaker_identity_context(event),
                 owner_public_context(),
+                manual_long_term_context(event),
             ],
         )
         reminder = rule_reminder_context(key)
@@ -1025,6 +1112,25 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish("\n".join(lines))
 
 
+@view_gap_scene_summaries_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    summaries = list_gap_scene_summaries(
+        session_key(event),
+        config.max_gap_scene_summaries_in_context,
+    )
+    if not summaries:
+        await matcher.finish("当前会话暂无空窗场景状态摘要。")
+    lines = ["当前会话空窗场景状态摘要："]
+    for summary in summaries:
+        lines.append(
+            f"Slot {summary.slot}，覆盖 {summary.source_message_count} 条，"
+            f"消息 ID {summary.message_start_id}-{summary.message_end_id}，"
+            f"{summary.updated_at}\n{summary.summary}"
+        )
+    await matcher.finish("\n".join(lines))
+
+
 @compress_session_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
@@ -1062,6 +1168,64 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
     count = clear_all_summaries()
     await matcher.finish(f"已清空全部摘要：{count} 条。")
+
+
+@add_fact_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    content = arg.extract_plain_text().strip()
+    if not content:
+        await matcher.finish("用法：/添加事实记忆 内容")
+    subject_type, subject_id = fact_memory_subject(event)
+    memory_id = add_long_term_memory(
+        subject_type=subject_type,
+        subject_id=subject_id,
+        content=content,
+        memory_type=LONG_TERM_FACT_TYPE,
+        source_session_key=session_key(event),
+    )
+    await matcher.finish(
+        f"已添加事实摘要记忆：ID {memory_id}，对象：{subject_label(subject_type, subject_id)}。"
+    )
+
+
+@add_preference_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    content = arg.extract_plain_text().strip()
+    if not content:
+        await matcher.finish("用法：/添加偏好记忆 内容")
+    subject_type, subject_id = preference_memory_subject(event)
+    memory_id = add_long_term_memory(
+        subject_type=subject_type,
+        subject_id=subject_id,
+        content=content,
+        memory_type=LONG_TERM_PREFERENCE_TYPE,
+        source_session_key=session_key(event),
+    )
+    await matcher.finish(
+        f"已添加偏好摘要记忆：ID {memory_id}，对象：{subject_label(subject_type, subject_id)}。"
+    )
+
+
+@view_long_term_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(format_current_long_term_memories(event))
+
+
+@delete_long_term_memory_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    target = parse_single_arg(arg.extract_plain_text())
+    if not target or not target.isdigit():
+        await matcher.finish("用法：/删除长期记忆 记忆ID")
+    deleted = delete_long_term_memory(int(target))
+    await matcher.finish(
+        f"已删除长期记忆：ID {target}。"
+        if deleted
+        else f"没有找到长期记忆：{target}"
+    )
 
 
 @view_persona_cmd.handle()
@@ -1165,11 +1329,16 @@ async def _(matcher: Matcher) -> None:
                 "/清空全部上下文",
                 "/摘要状态",
                 "/查看摘要",
+                "/查看空窗摘要",
                 "/压缩当前会话",
                 "/压缩当前对话",
                 "/清空当前摘要",
                 "/删除摘要 摘要ID",
                 "/清空全部摘要",
+                "/添加事实记忆 内容",
+                "/添加偏好记忆 内容",
+                "/查看长期记忆",
+                "/删除长期记忆 记忆ID",
                 "/查看角色卡",
                 "/选择角色卡",
                 "/转告主人 内容",
