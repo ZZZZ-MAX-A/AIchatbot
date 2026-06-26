@@ -64,6 +64,12 @@ class AiChatConfig:
     summary_batch_messages: int
     summary_min_source_messages: int
     max_session_summaries_in_context: int
+    enable_gap_scene_summaries: bool
+    gap_scene_summary_1_threshold: int
+    gap_scene_summary_2_threshold: int
+    max_gap_scene_summaries_in_context: int
+    enable_long_term_memory_context: bool
+    max_long_term_memories_in_context: int
     rule_reminder_interval_messages: int
     private_whitelist: frozenset[str]
     allow_unknown_private_chat: bool
@@ -117,13 +123,19 @@ def load_config() -> AiChatConfig:
         vision_private_image_wait_seconds=_int_env("VISION_PRIVATE_IMAGE_WAIT_SECONDS", 5),
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
-        max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 20),
+        max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 40),
         enable_memory_compression=_bool_env("ENABLE_MEMORY_COMPRESSION", True),
-        max_stored_messages_per_session=_int_env("MAX_STORED_MESSAGES_PER_SESSION", 200),
-        summary_keep_recent_messages=_int_env("SUMMARY_KEEP_RECENT_MESSAGES", 80),
-        summary_batch_messages=_int_env("SUMMARY_BATCH_MESSAGES", 120),
+        max_stored_messages_per_session=_int_env("MAX_STORED_MESSAGES_PER_SESSION", 120),
+        summary_keep_recent_messages=_int_env("SUMMARY_KEEP_RECENT_MESSAGES", 40),
+        summary_batch_messages=_int_env("SUMMARY_BATCH_MESSAGES", 80),
         summary_min_source_messages=_int_env("SUMMARY_MIN_SOURCE_MESSAGES", 40),
         max_session_summaries_in_context=_int_env("MAX_SESSION_SUMMARIES_IN_CONTEXT", 3),
+        enable_gap_scene_summaries=_bool_env("ENABLE_GAP_SCENE_SUMMARIES", True),
+        gap_scene_summary_1_threshold=_int_env("GAP_SCENE_SUMMARY_1_THRESHOLD", 40),
+        gap_scene_summary_2_threshold=_int_env("GAP_SCENE_SUMMARY_2_THRESHOLD", 80),
+        max_gap_scene_summaries_in_context=_int_env("MAX_GAP_SCENE_SUMMARIES_IN_CONTEXT", 2),
+        enable_long_term_memory_context=_bool_env("ENABLE_LONG_TERM_MEMORY_CONTEXT", True),
+        max_long_term_memories_in_context=_int_env("MAX_LONG_TERM_MEMORIES_IN_CONTEXT", 8),
         rule_reminder_interval_messages=_int_env("RULE_REMINDER_INTERVAL_MESSAGES", 40),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),

@@ -4,7 +4,9 @@ from typing import Any, Iterable
 from .database import connect, ensure_database, utc_now
 
 
-LONG_TERM_MEMORY_TYPE = "summary"
+LONG_TERM_FACT_TYPE = "fact_summary"
+LONG_TERM_PREFERENCE_TYPE = "preference_summary"
+LONG_TERM_MEMORY_TYPES = {LONG_TERM_FACT_TYPE, LONG_TERM_PREFERENCE_TYPE}
 
 
 @dataclass(frozen=True)
@@ -20,11 +22,28 @@ class LongTermMemory:
 
 
 def normalize_memory_type(value: str) -> str:
-    return LONG_TERM_MEMORY_TYPE
+    normalized = value.strip().lower()
+    aliases = {
+        "fact": LONG_TERM_FACT_TYPE,
+        "facts": LONG_TERM_FACT_TYPE,
+        "fact_summary": LONG_TERM_FACT_TYPE,
+        "事实": LONG_TERM_FACT_TYPE,
+        "事实摘要": LONG_TERM_FACT_TYPE,
+        "preference": LONG_TERM_PREFERENCE_TYPE,
+        "preferences": LONG_TERM_PREFERENCE_TYPE,
+        "preference_summary": LONG_TERM_PREFERENCE_TYPE,
+        "偏好": LONG_TERM_PREFERENCE_TYPE,
+        "偏好摘要": LONG_TERM_PREFERENCE_TYPE,
+    }
+    return aliases.get(normalized, LONG_TERM_FACT_TYPE)
 
 
 def memory_type_label(value: str) -> str:
-    return "摘要"
+    labels = {
+        LONG_TERM_FACT_TYPE: "事实摘要",
+        LONG_TERM_PREFERENCE_TYPE: "偏好摘要",
+    }
+    return labels.get(value, "事实摘要")
 
 
 def _memory_from_row(row: Any) -> LongTermMemory:
@@ -44,6 +63,7 @@ def add_long_term_memory(
     subject_type: str,
     subject_id: str,
     content: str,
+    memory_type: str = LONG_TERM_FACT_TYPE,
     source_session_key: str | None = None,
     confidence: float = 1.0,
 ) -> int:
@@ -67,7 +87,7 @@ def add_long_term_memory(
             (
                 subject_type,
                 subject_id,
-                LONG_TERM_MEMORY_TYPE,
+                normalize_memory_type(memory_type),
                 content.strip(),
                 source_session_key,
                 confidence,
@@ -196,9 +216,9 @@ def format_long_term_context(
         return ""
 
     lines = [
-        "以下是当前对话对象相关的长期回忆摘要。"
-        "仅在与当前问题相关时参考，不要强行提起，也不要编造额外事实："
+        "以下是主人手动维护的长期记忆摘要。",
+        "这些内容不是 AI 自动提取的；仅在与当前问题相关时参考，不要强行提起，也不要编造额外事实。",
     ]
     for memory in memories[:limit]:
-        lines.append(f"- {memory.content}")
+        lines.append(f"- {memory_type_label(memory.memory_type)}：{memory.content}")
     return "\n".join(lines)

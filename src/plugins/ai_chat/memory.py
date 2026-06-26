@@ -1,4 +1,5 @@
 from .database import connect, ensure_database, utc_now
+from .gap_scene_summaries import clear_all_gap_scene_summaries, clear_gap_scene_summaries, format_gap_scene_context
 from .summaries import format_summary_context, summary_stats
 
 
@@ -9,6 +10,7 @@ def build_history(
     session_key: str,
     max_messages: int,
     max_summaries: int = 0,
+    max_gap_scene_summaries: int = 0,
     system_contexts: list[str] | None = None,
 ) -> list[Message]:
     history: list[Message] = []
@@ -19,6 +21,10 @@ def build_history(
     summary_context = format_summary_context(session_key, max_summaries)
     if summary_context:
         history.append({"role": "system", "content": summary_context})
+
+    gap_scene_context = format_gap_scene_context(session_key, max_gap_scene_summaries)
+    if gap_scene_context:
+        history.append({"role": "system", "content": gap_scene_context})
 
     if max_messages <= 0:
         return history
@@ -72,12 +78,14 @@ def clear_session(session_key: str) -> None:
     ensure_database()
     with connect() as connection:
         connection.execute("DELETE FROM messages WHERE session_key = ?", (session_key,))
+    clear_gap_scene_summaries(session_key)
 
 
 def clear_all_sessions() -> None:
     ensure_database()
     with connect() as connection:
         connection.execute("DELETE FROM messages")
+    clear_all_gap_scene_summaries()
 
 
 def session_message_count(session_key: str) -> int:
