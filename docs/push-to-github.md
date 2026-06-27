@@ -75,3 +75,27 @@ git push -u origin main
 - 私密日志
 
 这些内容已经在 `.gitignore` 中默认忽略。
+
+## 待补推送记录
+
+2026-06-28 已完成本地提交，但 GitHub 推送失败，原因是当前网络无法连接
+`github.com:443`。
+
+当前待推送提交：
+
+```text
+541b203 Clean up voice runtime and manual memory
+```
+
+本地 `main` 分支存在尚未推送到 `origin/main` 的提交；本日志记录本身也应随
+后续推送一起上传。
+
+网络恢复后，在项目目录执行：
+
+```powershell
+cd D:\AIchatbot
+git push
+```
+
+推送前仍需确认真实角色卡、数据库、`.env`、日志、语音样本等私密文件没有进入
+Git。

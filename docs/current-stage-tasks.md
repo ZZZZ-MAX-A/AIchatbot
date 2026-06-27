@@ -539,3 +539,16 @@ D:\AIchatbot\tools\PortableGit\cmd\git.exe add .env.example README.md config\.en
 D:\AIchatbot\tools\PortableGit\cmd\git.exe commit -m "Simplify long term memory summaries"
 D:\AIchatbot\tools\PortableGit\cmd\git.exe push
 ```
+
+## 当前 GitHub 同步状态
+
+2026-06-28 已完成本地提交 `541b203 Clean up voice runtime and manual memory`，
+但 GitHub 推送因网络无法连接 `github.com:443` 失败。
+
+当前 `main` 分支存在尚未推送到 `origin/main` 的提交；本日志记录本身也应随
+后续推送一起上传。网络恢复后需要补执行：
+
+```powershell
+cd D:\AIchatbot
+git push
+```
