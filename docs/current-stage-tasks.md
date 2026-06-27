@@ -9,7 +9,7 @@
 ```text
 短期记忆：保存最近对话原文
 会话摘要：压缩较旧的聊天记录
-长期回忆摘要：暂时停用，后续有明确需求再恢复
+主人手动长期记忆：由主人明确命令添加，不由 AI 自动提取
 ```
 
 当前阶段重点：
@@ -18,7 +18,7 @@
 让 AI 稳定参考短期原文和会话摘要
 提升会话摘要对主人发言、决定和待办的保留质量
 提供单条摘要删除能力
-长期回忆摘要暂时不参与上下文
+旧长期回忆摘要不参与上下文
 暂不做 AI 自动提取长期记忆或长期记忆候选
 暂不做偏好、性格、设定等细分类管理
 暂不做语义向量索引
@@ -114,16 +114,16 @@ session_summaries 表
 每累计 40 条会话消息，AI 回复前会注入短版底层规则提醒
 ```
 
-### v0.5 长期回忆摘要
+### v0.5 主人手动长期记忆
 
-当前暂停使用。
+当前保留主人手动维护的事实/偏好长期记忆。旧的长期回忆摘要模块代码已退出正式运行链路。
 
 保留内容：
 
 ```text
-数据库表 long_term_memories 暂时保留
-数据库表 memory_embeddings 暂时保留
-src/plugins/ai_chat/long_term.py 暂时保留为休眠代码
+数据库表 long_term_memories 继续保存主人手动长期记忆
+数据库表 memory_embeddings 暂时仅作为历史兼容结构保留
+src/plugins/ai_chat/manual_memory.py 负责当前手动长期记忆读写
 ```
 
 当前停用内容：
@@ -134,7 +134,7 @@ src/plugins/ai_chat/long_term.py 暂时保留为休眠代码
 /查看记忆
 /删除记忆 记忆ID
 /清空当前记忆
-长期回忆摘要上下文注入
+旧长期回忆摘要上下文注入
 ```
 
 ### v0.6 人格表达提示词
@@ -258,10 +258,10 @@ AI 改写、润色或摘要转告内容
 当前决定：
 
 ```text
-长期回忆摘要暂时停用
+旧长期回忆摘要已退出正式运行链路
 不再提供添加、查看、删除长期记忆命令
 不再把长期回忆摘要注入 AI 上下文
-保留数据库表和 long_term.py 作为后续恢复基础
+保留数据库表，当前读写由 manual_memory.py 负责
 ```
 
 ### 2. 摘要必须客观
@@ -535,7 +535,7 @@ v0.6 第一批已经实现，后续重点是 QQ 端测试：
 ```powershell
 cd D:\AIchatbot
 D:\AIchatbot\tools\PortableGit\cmd\git.exe status
-D:\AIchatbot\tools\PortableGit\cmd\git.exe add .env.example README.md config\.env.example docs\architecture.md docs\runbook.md docs\v0.3-sqlite-memory.md docs\v0.4-memory-compression.md docs\v0.5-long-term-memory.md docs\current-stage-tasks.md src\plugins\ai_chat\__init__.py src\plugins\ai_chat\config.py src\plugins\ai_chat\llm.py src\plugins\ai_chat\long_term.py src\plugins\ai_chat\memory.py
+D:\AIchatbot\tools\PortableGit\cmd\git.exe add .env.example README.md config\.env.example docs\architecture.md docs\runbook.md docs\v0.3-sqlite-memory.md docs\v0.4-memory-compression.md docs\v0.5-long-term-memory.md docs\current-stage-tasks.md src\plugins\ai_chat\__init__.py src\plugins\ai_chat\config.py src\plugins\ai_chat\llm.py src\plugins\ai_chat\manual_memory.py src\plugins\ai_chat\memory.py
 D:\AIchatbot\tools\PortableGit\cmd\git.exe commit -m "Simplify long term memory summaries"
 D:\AIchatbot\tools\PortableGit\cmd\git.exe push
 ```

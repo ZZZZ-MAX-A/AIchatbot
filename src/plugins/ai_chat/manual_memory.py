@@ -4,13 +4,13 @@ from typing import Any, Iterable
 from .database import connect, ensure_database, utc_now
 
 
-LONG_TERM_FACT_TYPE = "fact_summary"
-LONG_TERM_PREFERENCE_TYPE = "preference_summary"
-LONG_TERM_MEMORY_TYPES = {LONG_TERM_FACT_TYPE, LONG_TERM_PREFERENCE_TYPE}
+MANUAL_FACT_TYPE = "fact_summary"
+MANUAL_PREFERENCE_TYPE = "preference_summary"
+MANUAL_MEMORY_TYPES = {MANUAL_FACT_TYPE, MANUAL_PREFERENCE_TYPE}
 
 
 @dataclass(frozen=True)
-class LongTermMemory:
+class ManualMemory:
     id: int
     subject_type: str
     subject_id: str
@@ -24,30 +24,30 @@ class LongTermMemory:
 def normalize_memory_type(value: str) -> str:
     normalized = value.strip().lower()
     aliases = {
-        "fact": LONG_TERM_FACT_TYPE,
-        "facts": LONG_TERM_FACT_TYPE,
-        "fact_summary": LONG_TERM_FACT_TYPE,
-        "事实": LONG_TERM_FACT_TYPE,
-        "事实摘要": LONG_TERM_FACT_TYPE,
-        "preference": LONG_TERM_PREFERENCE_TYPE,
-        "preferences": LONG_TERM_PREFERENCE_TYPE,
-        "preference_summary": LONG_TERM_PREFERENCE_TYPE,
-        "偏好": LONG_TERM_PREFERENCE_TYPE,
-        "偏好摘要": LONG_TERM_PREFERENCE_TYPE,
+        "fact": MANUAL_FACT_TYPE,
+        "facts": MANUAL_FACT_TYPE,
+        "fact_summary": MANUAL_FACT_TYPE,
+        "事实": MANUAL_FACT_TYPE,
+        "事实摘要": MANUAL_FACT_TYPE,
+        "preference": MANUAL_PREFERENCE_TYPE,
+        "preferences": MANUAL_PREFERENCE_TYPE,
+        "preference_summary": MANUAL_PREFERENCE_TYPE,
+        "偏好": MANUAL_PREFERENCE_TYPE,
+        "偏好摘要": MANUAL_PREFERENCE_TYPE,
     }
-    return aliases.get(normalized, LONG_TERM_FACT_TYPE)
+    return aliases.get(normalized, MANUAL_FACT_TYPE)
 
 
 def memory_type_label(value: str) -> str:
     labels = {
-        LONG_TERM_FACT_TYPE: "事实摘要",
-        LONG_TERM_PREFERENCE_TYPE: "偏好摘要",
+        MANUAL_FACT_TYPE: "事实摘要",
+        MANUAL_PREFERENCE_TYPE: "偏好摘要",
     }
     return labels.get(value, "事实摘要")
 
 
-def _memory_from_row(row: Any) -> LongTermMemory:
-    return LongTermMemory(
+def _memory_from_row(row: Any) -> ManualMemory:
+    return ManualMemory(
         id=int(row["id"]),
         subject_type=str(row["subject_type"]),
         subject_id=str(row["subject_id"]),
@@ -59,11 +59,11 @@ def _memory_from_row(row: Any) -> LongTermMemory:
     )
 
 
-def add_long_term_memory(
+def add_manual_memory(
     subject_type: str,
     subject_id: str,
     content: str,
-    memory_type: str = LONG_TERM_FACT_TYPE,
+    memory_type: str = MANUAL_FACT_TYPE,
     source_session_key: str | None = None,
     confidence: float = 1.0,
 ) -> int:
@@ -98,11 +98,11 @@ def add_long_term_memory(
         return int(cursor.lastrowid)
 
 
-def list_long_term_memories(
+def list_manual_memories(
     subject_type: str | None = None,
     subject_id: str | None = None,
     limit: int = 20,
-) -> list[LongTermMemory]:
+) -> list[ManualMemory]:
     ensure_database()
     clauses: list[str] = []
     params: list[object] = []
@@ -137,7 +137,7 @@ def list_long_term_memories(
     return [_memory_from_row(row) for row in rows]
 
 
-def delete_long_term_memory(memory_id: int) -> bool:
+def delete_manual_memory(memory_id: int) -> bool:
     ensure_database()
     with connect() as connection:
         cursor = connection.execute(
@@ -147,36 +147,7 @@ def delete_long_term_memory(memory_id: int) -> bool:
         return int(cursor.rowcount) > 0
 
 
-def clear_long_term_memories(subject_type: str, subject_id: str) -> int:
-    ensure_database()
-    with connect() as connection:
-        cursor = connection.execute(
-            """
-            DELETE FROM long_term_memories
-            WHERE subject_type = ?
-              AND subject_id = ?
-            """,
-            (subject_type, subject_id),
-        )
-        return int(cursor.rowcount)
-
-
-def count_long_term_memories(subject_type: str, subject_id: str) -> int:
-    ensure_database()
-    with connect() as connection:
-        row = connection.execute(
-            """
-            SELECT COUNT(*) AS memory_count
-            FROM long_term_memories
-            WHERE subject_type = ?
-              AND subject_id = ?
-            """,
-            (subject_type, subject_id),
-        ).fetchone()
-    return int(row["memory_count"])
-
-
-def long_term_memory_stats() -> dict[str, int]:
+def manual_memory_stats() -> dict[str, int]:
     ensure_database()
     with connect() as connection:
         row = connection.execute(
@@ -193,7 +164,7 @@ def long_term_memory_stats() -> dict[str, int]:
     }
 
 
-def format_long_term_context(
+def format_manual_memory_context(
     subjects: Iterable[tuple[str, str]],
     limit: int,
 ) -> str:
@@ -201,7 +172,7 @@ def format_long_term_context(
         return ""
 
     seen: set[tuple[str, str]] = set()
-    memories: list[LongTermMemory] = []
+    memories: list[ManualMemory] = []
     for subject_type, subject_id in subjects:
         key = (subject_type, subject_id)
         if key in seen:
@@ -210,7 +181,7 @@ def format_long_term_context(
         remaining = limit - len(memories)
         if remaining <= 0:
             break
-        memories.extend(list_long_term_memories(subject_type, subject_id, remaining))
+        memories.extend(list_manual_memories(subject_type, subject_id, remaining))
 
     if not memories:
         return ""

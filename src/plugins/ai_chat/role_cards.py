@@ -5,6 +5,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ROLE_CARD_DIR = PROJECT_ROOT / "prompts" / "persona-cards"
+PRIVATE_ROLE_CARD_DIR = ROLE_CARD_DIR / "private"
+PUBLIC_ROLE_CARD_DIR = ROLE_CARD_DIR / "public"
 ACTIVE_ROLE_CARD_PATH = PROJECT_ROOT / "data" / "active-role-card.json"
 
 
@@ -31,17 +33,22 @@ def _title_from_content(content: str, fallback: str) -> str:
 
 def list_role_cards() -> list[RoleCard]:
     cards: list[RoleCard] = []
-    if ROLE_CARD_DIR.exists():
-        for path in sorted(ROLE_CARD_DIR.glob("*.md")):
+    seen: set[str] = set()
+    for directory in (PRIVATE_ROLE_CARD_DIR, ROLE_CARD_DIR, PUBLIC_ROLE_CARD_DIR):
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.md")):
             content = _read_text(path)
-            if content:
-                cards.append(
-                    RoleCard(
-                        key=path.stem,
-                        title=_title_from_content(content, path.stem),
-                        path=path,
-                    )
+            if not content or path.stem in seen:
+                continue
+            seen.add(path.stem)
+            cards.append(
+                RoleCard(
+                    key=path.stem,
+                    title=_title_from_content(content, path.stem),
+                    path=path,
                 )
+            )
     return cards
 
 

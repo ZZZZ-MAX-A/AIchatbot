@@ -167,7 +167,7 @@ def format_config_status(config: AiChatConfig) -> str:
         f"空窗场景摘要：{_on_off(config.enable_gap_scene_summaries)}",
         f"空窗阈值：>{config.gap_scene_summary_1_threshold} / >{config.gap_scene_summary_2_threshold}",
         f"空窗摘要上下文：{config.max_gap_scene_summaries_in_context}",
-        f"手动长期记忆上下文：{_on_off(config.enable_long_term_memory_context)}",
+        f"主人手动长期记忆上下文：{_on_off(config.enable_long_term_memory_context)}",
         f"长期记忆上下文：{config.max_long_term_memories_in_context}",
     ]
     warnings = config_warnings(config)

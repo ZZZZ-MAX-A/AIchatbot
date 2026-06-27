@@ -9,6 +9,8 @@ from .config import AiChatConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ROLE_CARD_DIR = PROJECT_ROOT / "prompts" / "persona-cards"
+PRIVATE_ROLE_CARD_DIR = ROLE_CARD_DIR / "private"
+PUBLIC_ROLE_CARD_DIR = ROLE_CARD_DIR / "public"
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,18 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
 def _load_profile_data(role_key: str) -> dict[str, Any]:
     if not role_key:
         return {}
-    path = ROLE_CARD_DIR / f"{role_key}.auto-reply.json"
+    path = next(
+        (
+            candidate
+            for candidate in (
+                PRIVATE_ROLE_CARD_DIR / f"{role_key}.auto-reply.json",
+                ROLE_CARD_DIR / f"{role_key}.auto-reply.json",
+                PUBLIC_ROLE_CARD_DIR / f"{role_key}.auto-reply.json",
+            )
+            if candidate.exists()
+        ),
+        ROLE_CARD_DIR / f"{role_key}.auto-reply.json",
+    )
     if not path.exists():
         return {}
     try:

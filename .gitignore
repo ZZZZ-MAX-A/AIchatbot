@@ -23,14 +23,21 @@ logs/*
 data/*
 !data/.gitkeep
 
-# Local persona cards
-prompts/persona-cards/
+# Persona cards
+prompts/persona-cards/*.md
+prompts/persona-cards/*.json
+prompts/persona-cards/private/*
+!prompts/persona-cards/README.md
+!prompts/persona-cards/public/
+!prompts/persona-cards/public/**
+!prompts/persona-cards/private/.gitkeep
 
 # Local tools
 tools/
 
 # Local backups
 backups/
+docs-archive/
 
 # Local validation artifacts
 tts-validation/

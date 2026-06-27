@@ -6,6 +6,10 @@ from .summaries import format_summary_context, summary_stats
 Message = dict[str, str]
 
 
+def sanitize_history_content(content: str, *, role: str = "") -> str:
+    return content.strip()
+
+
 def build_history(
     session_key: str,
     max_messages: int,
@@ -41,7 +45,10 @@ def build_history(
             (session_key, max_messages),
         ).fetchall()
     history.extend(
-        {"role": str(row["role"]), "content": str(row["content"])}
+        {
+            "role": str(row["role"]),
+            "content": sanitize_history_content(str(row["content"]), role=str(row["role"])),
+        }
         for row in reversed(rows)
     )
     return history

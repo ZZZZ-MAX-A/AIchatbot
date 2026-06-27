@@ -39,14 +39,14 @@ from .diagnostics import (
     format_vision_status,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
-from .long_term import (
-    LONG_TERM_FACT_TYPE,
-    LONG_TERM_PREFERENCE_TYPE,
-    add_long_term_memory,
-    delete_long_term_memory,
-    format_long_term_context,
-    list_long_term_memories,
-    long_term_memory_stats,
+from .manual_memory import (
+    MANUAL_FACT_TYPE,
+    MANUAL_PREFERENCE_TYPE,
+    add_manual_memory,
+    delete_manual_memory,
+    format_manual_memory_context,
+    list_manual_memories,
+    manual_memory_stats,
     memory_type_label,
 )
 from .llm import (
@@ -183,7 +183,7 @@ async def reject_or_silent(matcher: Matcher, reason: str | None) -> None:
 
 
 def tts_status_lines() -> list[str]:
-    return [
+    lines = [
         f"语音输出：{'开启' if config.enable_tts else '关闭'}",
         f"TTS 服务：{config.tts_service_url}",
         f"默认音色：{config.tts_voice}",
@@ -195,6 +195,7 @@ def tts_status_lines() -> list[str]:
         f"总时长上限：{config.tts_max_total_seconds} 秒",
         f"冷却：{config.tts_cooldown_seconds} 秒",
     ]
+    return lines
 
 
 def should_count_private_trial(event: MessageEvent) -> bool:
@@ -394,6 +395,7 @@ def status_lines() -> list[str]:
         f"语音输出：{'开启' if config.enable_tts else '关闭'}",
         f"默认音色：{config.tts_voice}",
         f"默认语音情绪：{config.tts_emotion}",
+        f"语音文本上限：{config.tts_max_chars} 字",
         f"主人：{'已配置' if config.bot_owner_qq else '未配置'}",
         f"私聊白名单：{len(access.private_whitelist)}",
         f"群白名单：{len(access.group_whitelist)}",
@@ -408,7 +410,7 @@ def status_lines() -> list[str]:
 
 def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
     stats = memory_stats()
-    long_term = long_term_memory_stats()
+    manual = manual_memory_stats()
     gap = gap_scene_summary_stats()
     trials = trial_stats()
     lines = [
@@ -418,8 +420,8 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
         f"摘要数量：{stats['summary_count']}",
         f"已压缩消息：{stats['summarized_message_count']}",
         f"手动长期记忆：{'注入上下文' if config.enable_long_term_memory_context else '不注入上下文'}",
-        f"长期记忆数量：{long_term['memory_count']}",
-        f"长期记忆对象：{long_term['subject_count']}",
+        f"长期记忆数量：{manual['memory_count']}",
+        f"长期记忆对象：{manual['subject_count']}",
         f"空窗场景摘要：{'开启' if config.enable_gap_scene_summaries else '关闭'}",
         f"空窗摘要数量：{gap['summary_count']}",
         f"试用用户：{trials['trial_user_count']}",
@@ -509,7 +511,11 @@ def owner_public_context() -> str:
     return "\n".join(lines)
 
 
-def long_term_subjects(event: MessageEvent) -> list[tuple[str, str]]:
+def language_reset_context() -> str:
+    return "语言模式：正式运行链路使用中文回复；语音输出只支持中文。"
+
+
+def manual_memory_subjects(event: MessageEvent) -> list[tuple[str, str]]:
     subjects = [("user", user_id(event))]
     if isinstance(event, GroupMessageEvent):
         subjects.append(("group", group_id(event)))
@@ -537,18 +543,18 @@ def subject_label(subject_type: str, subject_id: str) -> str:
 def manual_long_term_context(event: MessageEvent) -> str:
     if not config.enable_long_term_memory_context:
         return ""
-    return format_long_term_context(
-        long_term_subjects(event),
+    return format_manual_memory_context(
+        manual_memory_subjects(event),
         config.max_long_term_memories_in_context,
     )
 
 
 def format_current_long_term_memories(event: MessageEvent) -> str:
-    subjects = long_term_subjects(event)
+    subjects = manual_memory_subjects(event)
     lines = ["当前相关手动长期记忆："]
     found = False
     for subject_type, subject_id in subjects:
-        memories = list_long_term_memories(subject_type, subject_id, 20)
+        memories = list_manual_memories(subject_type, subject_id, 20)
         if not memories:
             continue
         found = True
@@ -645,19 +651,31 @@ def check_tts_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
     return False, "只有主人可以使用语音功能。"
 
 
-async def send_tts_record(bot: Bot, event: MessageEvent, text: str) -> None:
-    adapted = adapt_speech_text(text)
+def tts_text_limit(language: str) -> int:
+    return config.tts_max_chars
+
+
+async def send_tts_record(
+    bot: Bot,
+    event: MessageEvent,
+    text: str,
+    *,
+    refresh_cache: bool = False,
+    force_language: str = "",
+) -> None:
+    adapted = adapt_speech_text(text, force_language="zh")
     if not adapted.text:
         raise RuntimeError("empty speakable text")
-    if config.tts_max_chars > 0 and len(adapted.text) > config.tts_max_chars:
+    max_chars = tts_text_limit(adapted.language)
+    if max_chars > 0 and len(adapted.text) > max_chars:
         raise ValueError("text too long")
-    audio_path = await request_tts(config, adapted)
+    tts_result = await request_tts(config, adapted, refresh_cache=refresh_cache)
     if not isinstance(event, PrivateMessageEvent):
         raise RuntimeError("TTS is private only")
     await bot.call_api(
         "send_private_msg",
         user_id=int(event.user_id),
-        message=MessageSegment.record(str(audio_path)),
+        message=MessageSegment.record(str(tts_result.audio_path)),
     )
 
 
@@ -673,7 +691,6 @@ async def handle_direct_or_last_tts(
         await matcher.finish("语音功能当前未开启。")
     if not is_owner(config, event):
         await matcher.finish("只有主人可以使用语音功能。")
-
     cooldown_ok, cooldown_reason = check_tts_cooldown(event)
     if not cooldown_ok:
         await matcher.finish(cooldown_reason or "语音生成冷却中，请稍后再试。")
@@ -689,9 +706,17 @@ async def handle_direct_or_last_tts(
         return False
 
     try:
-        await send_tts_record(bot, event, text)
+        await send_tts_record(
+            bot,
+            event,
+            text,
+            refresh_cache=intent.refresh_cache,
+            force_language=intent.language,
+        )
     except ValueError:
-        await matcher.finish(f"这段太长了，当前语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。")
+        await matcher.finish(
+            f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
+        )
     except Exception as exc:
         log_ai_event_error(exc, event)
         await matcher.finish("语音生成失败了，请稍后再试。")
@@ -800,6 +825,9 @@ async def handle_chat(
     silent_limit_rejection: bool = False,
     semantic_voice: bool = False,
     semantic_goal: str = "",
+    tts_refresh_cache: bool = False,
+    preserve_original: bool = False,
+    tts_language: str = "zh",
 ) -> None:
     await check_access(event, matcher)
 
@@ -842,6 +870,7 @@ async def handle_chat(
             config.max_session_summaries_in_context,
             config.max_gap_scene_summaries_in_context,
             [
+                language_reset_context(),
                 speaker_identity_context(event),
                 owner_public_context(),
                 manual_long_term_context(event),
@@ -868,9 +897,10 @@ async def handle_chat(
             elif config.enable_vision:
                 image_descriptions = ["无法读取图片地址。"]
 
-        user_content = combine_text_and_images(text, image_descriptions)
+        original_user_content = combine_text_and_images(text, image_descriptions)
+        user_content = original_user_content
         if semantic_voice:
-            user_content = semantic_voice_user_text(text, semantic_goal)
+            user_content = semantic_voice_user_text(text, semantic_goal, preserve_original=preserve_original)
         if not user_content:
             return
 
@@ -883,17 +913,28 @@ async def handle_chat(
 
         if semantic_voice:
             try:
-                await send_tts_record(bot, event, reply)
+                voice_text = reply
+                await send_tts_record(
+                    bot,
+                    event,
+                    voice_text,
+                    refresh_cache=tts_refresh_cache,
+                    force_language="zh",
+                )
             except ValueError:
-                await matcher.finish(f"这段太长了，当前语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。")
+                await matcher.finish(
+                    f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
+                )
             except Exception as exc:
                 log_ai_event_error(exc, event)
                 await matcher.finish("语音生成失败了，请稍后再试。")
 
+        stored_assistant_reply = voice_text if semantic_voice else reply
+        stored_user_reply = original_user_content if semantic_voice and original_user_content else user_content
         append_message(
             key,
             "user",
-            stored_user_content(event, user_content),
+            stored_user_content(event, stored_user_reply),
             event.message_type,
             event_user_id,
             event_group_id,
@@ -901,7 +942,7 @@ async def handle_chat(
         append_message(
             key,
             "assistant",
-            reply,
+            stored_assistant_reply,
             event.message_type,
             event_user_id,
             event_group_id,
@@ -909,7 +950,7 @@ async def handle_chat(
         if should_count_private_trial(event):
             increment_private_trial(event_user_id)
         if semantic_voice:
-            set_last_tts_candidate(reply)
+            set_last_tts_candidate(voice_text, force_language="zh")
             asyncio.create_task(run_auto_compression(key, event))
             await matcher.finish()
         await matcher.send(reply)
@@ -1000,12 +1041,16 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
             cooldown_ok, cooldown_reason = check_tts_cooldown(event)
             if not cooldown_ok:
                 await matcher.finish(cooldown_reason or "语音生成冷却中，请稍后再试。")
+            semantic_goal = intent.semantic_goal
             await handle_chat(
                 bot,
                 event,
                 matcher,
                 semantic_voice=True,
-                semantic_goal=intent.semantic_goal,
+                semantic_goal=semantic_goal,
+                tts_refresh_cache=intent.refresh_cache,
+                preserve_original=intent.preserve_original,
+                tts_language="zh",
             )
             return
     await handle_chat(bot, event, matcher)
@@ -1177,11 +1222,11 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     if not content:
         await matcher.finish("用法：/添加事实记忆 内容")
     subject_type, subject_id = fact_memory_subject(event)
-    memory_id = add_long_term_memory(
+    memory_id = add_manual_memory(
         subject_type=subject_type,
         subject_id=subject_id,
         content=content,
-        memory_type=LONG_TERM_FACT_TYPE,
+        memory_type=MANUAL_FACT_TYPE,
         source_session_key=session_key(event),
     )
     await matcher.finish(
@@ -1196,11 +1241,11 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     if not content:
         await matcher.finish("用法：/添加偏好记忆 内容")
     subject_type, subject_id = preference_memory_subject(event)
-    memory_id = add_long_term_memory(
+    memory_id = add_manual_memory(
         subject_type=subject_type,
         subject_id=subject_id,
         content=content,
-        memory_type=LONG_TERM_PREFERENCE_TYPE,
+        memory_type=MANUAL_PREFERENCE_TYPE,
         source_session_key=session_key(event),
     )
     await matcher.finish(
@@ -1220,7 +1265,7 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     target = parse_single_arg(arg.extract_plain_text())
     if not target or not target.isdigit():
         await matcher.finish("用法：/删除长期记忆 记忆ID")
-    deleted = delete_long_term_memory(int(target))
+    deleted = delete_manual_memory(int(target))
     await matcher.finish(
         f"已删除长期记忆：ID {target}。"
         if deleted
