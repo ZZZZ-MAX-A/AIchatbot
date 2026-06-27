@@ -33,6 +33,9 @@ class VoiceIntent:
     type: VoiceIntentType
     text: str = ""
     semantic_goal: str = ""
+    refresh_cache: bool = False
+    preserve_original: bool = False
+    language: str = "zh"
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,16 @@ class AdaptedSpeech:
     text: str
     segments: tuple[str, ...]
     pauses_ms: tuple[int, ...]
+    language: str = "zh"
+
+
+@dataclass(frozen=True)
+class TtsResult:
+    audio_path: Path
+    language: str
+    duration_seconds: float = 0.0
+    cache_hit: bool = False
+    segments: tuple[dict[str, Any], ...] = ()
 
 
 _last_tts_candidate: TtsCandidate | None = None
@@ -61,8 +74,14 @@ ACTION_BRACKET_PATTERNS = (
 )
 
 DIRECT_TEXT_PATTERNS = (
-    re.compile(r"^(?:用语音说|语音说|念这句|读这句|读这段|这段话用语音|这句话用语音)[:：]\s*(?P<text>.+)$", re.S),
-    re.compile(r"^(?:帮我用语音说|帮我念|帮我读)[:：]\s*(?P<text>.+)$", re.S),
+    re.compile(
+        r"^(?:用中文语音说|中文语音说|用中文说|用语音说|语音说|念这句|读这句|读这段|这段话用语音|这句话用语音)[:：]?\s*(?P<text>.+)$",
+        re.S,
+    ),
+    re.compile(
+        r"^(?:帮我用中文语音说|帮我用语音说|帮我念|帮我读|让爱可用语音说|请爱可用语音说|爱可用语音说)[:：]?\s*(?P<text>.+)$",
+        re.S,
+    ),
 )
 
 LAST_REPLY_MARKERS = (
@@ -109,23 +128,31 @@ VOICE_DISCUSSION_MARKERS = (
     "tts",
 )
 
+TTS_REFRESH_MARKERS = (
+    "重新生成",
+    "重新抽",
+    "重抽一版",
+    "重抽",
+)
+
 
 def parse_voice_intent(text: str) -> VoiceIntent | None:
     normalized = text.strip()
     if not normalized:
         return None
+    refresh_cache = any(marker in normalized for marker in TTS_REFRESH_MARKERS)
 
     for pattern in DIRECT_TEXT_PATTERNS:
         match = pattern.match(normalized)
         if match:
             direct_text = match.group("text").strip()
             if direct_text:
-                return VoiceIntent(VoiceIntentType.DIRECT_TEXT, text=direct_text)
+                return VoiceIntent(VoiceIntentType.DIRECT_TEXT, text=direct_text, refresh_cache=refresh_cache)
 
     if any(marker in normalized for marker in LAST_REPLY_MARKERS) and any(
         action in normalized for action in LAST_REPLY_ACTIONS
     ):
-        return VoiceIntent(VoiceIntentType.LAST_REPLY)
+        return VoiceIntent(VoiceIntentType.LAST_REPLY, refresh_cache=refresh_cache)
 
     if any(marker in normalized.lower() for marker in VOICE_DISCUSSION_MARKERS):
         return None
@@ -137,6 +164,7 @@ def parse_voice_intent(text: str) -> VoiceIntent | None:
         return VoiceIntent(
             VoiceIntentType.SEMANTIC_REPLY,
             semantic_goal=extract_semantic_goal(normalized),
+            refresh_cache=refresh_cache,
         )
 
     return None
@@ -146,6 +174,10 @@ def extract_semantic_goal(text: str) -> str:
     goal = text.strip()
     prefixes = (
         "请",
+        "重新生成",
+        "重新抽",
+        "重抽一版",
+        "重抽",
         "可以",
         "能不能",
         "我想听你",
@@ -168,7 +200,7 @@ def extract_semantic_goal(text: str) -> str:
     return goal or text.strip()
 
 
-def set_last_tts_candidate(raw_text: str, message_id: str = "") -> TtsCandidate | None:
+def set_last_tts_candidate(raw_text: str, message_id: str = "", *, force_language: str = "") -> TtsCandidate | None:
     adapted = adapt_speech_text(raw_text)
     if not adapted.text:
         return None
@@ -187,7 +219,7 @@ def get_last_tts_candidate() -> TtsCandidate | None:
     return _last_tts_candidate
 
 
-def adapt_speech_text(raw_text: str, *, light_stutter: bool = True) -> AdaptedSpeech:
+def adapt_speech_text(raw_text: str, *, light_stutter: bool = True, force_language: str = "") -> AdaptedSpeech:
     text = raw_text.strip()
     for pattern in ACTION_BRACKET_PATTERNS:
         text = pattern.sub("", text)
@@ -300,20 +332,21 @@ def semantic_voice_instruction() -> str:
         "本次主人明确请求语音回复，输出将直接转为语音发送。"
         "请按当前角色卡直接回复主人要听的内容。"
         "不要解释“我会用语音说”、不要描述生成语音的过程。"
-        "回复可以保持角色原有的亲昵、害羞和自然表达，但避免长篇独白。"
+        "回复可以保持角色原有的亲昵、害羞和自然表达。"
+        "如果主人要求较长语音、复述或翻译，不要擅自压缩成短回复。"
     )
 
 
-def semantic_voice_user_text(original_text: str, semantic_goal: str) -> str:
+def semantic_voice_user_text(original_text: str, semantic_goal: str, *, preserve_original: bool = False) -> str:
     goal = semantic_goal.strip() or original_text.strip()
     return (
         "主人明确请求你用语音回复。\n"
         f"语义目标：{goal}\n"
-        "请直接生成要对主人说出口的内容，不要说明你将使用语音。"
+        "请直接生成要对主人说出口的中文内容，不要说明你将使用语音。"
     )
 
 
-async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech) -> Path:
+async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech, *, refresh_cache: bool = False) -> TtsResult:
     if not adapted.segments:
         raise RuntimeError("empty TTS segments")
 
@@ -323,8 +356,10 @@ async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech) -> Path:
         "segments": list(adapted.segments),
         "pauses_ms": list(adapted.pauses_ms),
         "voice_id": config.tts_voice,
+        "language": "zh",
         "emotion": config.tts_emotion,
         "max_total_seconds": config.tts_max_total_seconds,
+        "bypass_cache": refresh_cache,
     }
     async with httpx.AsyncClient(timeout=config.tts_timeout_seconds) as client:
         response = await client.post(f"{config.tts_service_url.rstrip('/')}/tts", json=payload)
@@ -335,7 +370,13 @@ async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech) -> Path:
     audio_path = Path(str(data.get("audio_path") or ""))
     if not audio_path.exists():
         raise RuntimeError(f"TTS output not found: {audio_path}")
-    return audio_path
+    return TtsResult(
+        audio_path=audio_path,
+        language=str(data.get("language") or "zh"),
+        duration_seconds=float(data.get("duration_seconds") or 0.0),
+        cache_hit=bool(data.get("cache_hit")),
+        segments=tuple(data.get("segments") or ()),
+    )
 
 
 async def ensure_tts_service(config: AiChatConfig) -> None:
@@ -391,11 +432,16 @@ def start_local_tts_service() -> None:
     if not TTS_SERVICE_SCRIPT.exists():
         raise FileNotFoundError(f"TTS service script was not found: {TTS_SERVICE_SCRIPT}")
 
-    TTS_SERVICE_STDOUT.parent.mkdir(parents=True, exist_ok=True)
-    creationflags = 0
     if sys.platform.startswith("win"):
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(
+            [str(INDEXTTS_PYTHON), str(TTS_SERVICE_SCRIPT)],
+            cwd=str(INDEXTTS_ROOT),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+            close_fds=False,
+        )
+        return
 
+    TTS_SERVICE_STDOUT.parent.mkdir(parents=True, exist_ok=True)
     stdout = TTS_SERVICE_STDOUT.open("a", encoding="utf-8")
     stderr = TTS_SERVICE_STDERR.open("a", encoding="utf-8")
     try:
@@ -405,7 +451,6 @@ def start_local_tts_service() -> None:
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
-            creationflags=creationflags,
             close_fds=False,
         )
     finally:

@@ -196,7 +196,7 @@ RULE_REMINDER_INTERVAL_MESSAGES=40
 
 `BOT_OWNER_PUBLIC_NAME` 是可选项，用于填写允许机器人对外说明的主人公开称呼或 QQ 名字；不填则只公开 `BOT_OWNER_QQ`。
 
-`BOT_ALIASES` 是全局追加别名，可留空。角色卡专属主动回复别名优先写在 `prompts/persona-cards/*.auto-reply.json`。
+`BOT_ALIASES` 是全局追加别名，可留空。角色卡专属主动回复别名优先写在 `prompts/persona-cards/private/*.auto-reply.json`；公开仓库只提交 `prompts/persona-cards/public/` 下的脱敏模板。
 
 `ENABLE_GROUP_AUTO_REPLY` 控制非 @ 群消息主动回复，默认关闭。开启后仅对白名单群生效，并受评分阈值和冷却限制。
 
@@ -420,13 +420,20 @@ RULE_REMINDER_INTERVAL_MESSAGES=40
 已转告主人。
 ```
 
-## 长期回忆摘要
+## 主人手动长期记忆
 
-长期回忆摘要模块当前暂停使用。
+运行时保留主人手动维护的长期记忆。系统不会让 AI 自动提取长期记忆，也不会把会话摘要当作长期记忆。
 
-运行时不再提供 `/添加记忆`、`/重写当前记忆`、`/查看记忆`、`/删除记忆` 和 `/清空当前记忆`，AI 上下文也不再注入长期回忆摘要。
+当前命令：
 
-数据库中的 `long_term_memories` 和 `memory_embeddings` 表暂时保留，作为后续需要恢复长期记忆模块时的兼容结构。
+```text
+/添加事实记忆 内容
+/添加偏好记忆 内容
+/查看长期记忆
+/删除长期记忆 记忆ID
+```
+
+数据库表仍使用 `long_term_memories`，用于兼容已有手动记忆数据。旧的“长期回忆摘要”模块代码已退出正式运行链路；`memory_embeddings` 表仍作为历史兼容结构保留，但当前不参与运行。
 
 ## 人格表达提示词
 
@@ -446,11 +453,14 @@ prompts/base/chat-core.json
 prompts/persona-cards/
 ```
 
-当前第一张角色卡：
+推荐结构：
 
 ```text
-prompts/persona-cards/moyan.md
+prompts/persona-cards/public/      脱敏模板，可提交到 Git
+prompts/persona-cards/private/     真实角色卡，不提交到 Git
 ```
+
+兼容旧路径：如果本地已经有 `prompts/persona-cards/*.md`，仍会被加载，但不会被 Git 跟踪。
 
 当前用途：
 
@@ -463,7 +473,7 @@ prompts/persona-cards/moyan.md
 避免旧人设和旧偏好被强行提起
 群聊更克制
 私聊更连续
-长期回忆摘要模块暂时停用
+长期记忆只读取主人手动维护的事实/偏好摘要
 ```
 
 AI 调用时会额外注入当前发言者身份：
@@ -523,8 +533,8 @@ data/chatbot.db
 messages: 私聊和群聊上下文
 private_trials: 陌生人私聊试用次数
 session_summaries: 会话摘要
-long_term_memories: 长期记忆归档，当前暂停使用
-memory_embeddings: 长期记忆的语义索引，当前暂停使用
+long_term_memories: 主人手动长期记忆
+memory_embeddings: 历史兼容表，当前不参与运行
 schema_meta: 数据库版本
 ```
 
@@ -535,8 +545,8 @@ schema_meta: 数据库版本
 ```text
 第一层：短期对话缓存，已启用
 第二层：会话摘要压缩，已启用
-第三层：长期回忆摘要，当前暂停使用
-第四层：语义索引，当前暂停使用
+第三层：主人手动长期记忆，已启用
+第四层：语义索引，当前不参与运行
 ```
 
 摘要压缩规则：
@@ -820,6 +830,7 @@ ENABLE_TTS=true
 TTS_SERVICE_URL=http://127.0.0.1:7861
 TTS_VOICE=zh_kelin_raw_20260625_222137
 TTS_EMOTION=affection
+TTS_MAX_CHARS=180
 TTS_MAX_TOTAL_SECONDS=60
 TTS_AUTO_START=true
 TTS_STARTUP_WAIT_SECONDS=45
@@ -839,6 +850,26 @@ QQ 私聊触发方式：
 直接文本语音：不调用聊天 AI，直接朗读冒号后的文本。
 上一条回复语音：朗读最近一条主人私聊中机器人生成的可朗读回复。
 语义语音回复：聊天 AI 按角色卡生成要说出口的内容，TTS 只负责朗读该回复。
+```
+
+日语语音已退出正式运行链路：
+
+```text
+当前正式 TTS 服务只加载中文 IndexTTS2。
+历史日语验证材料已归档到本地 docs-archive/，该目录默认不提交到 Git。
+```
+
+如需检查旧日语测试是否污染 `data/chatbot.db`，先运行 dry-run：
+
+```powershell
+cd D:\AIchatbot
+.\.venv\Scripts\python.exe scripts\clean_japanese_history.py
+```
+
+确认数量后再执行删除：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\clean_japanese_history.py --apply
 ```
 
 语音文本会在合成前做轻量清理：

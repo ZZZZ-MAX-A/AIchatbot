@@ -5,6 +5,7 @@ import sys
 import time
 import uuid
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,7 @@ from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 INDEXTTS_ROOT = PROJECT_ROOT / "tts-validation" / "index-tts-main"
-MODEL_DIR = INDEXTTS_ROOT / "checkpoints"
-CONFIG_PATH = MODEL_DIR / "config.yaml"
 TEMP_DIR = PROJECT_ROOT / "temp_audio"
-VOICE_DIR = PROJECT_ROOT / "voice-samples" / "reference" / "zh"
 
 if str(INDEXTTS_ROOT) not in sys.path:
     sys.path.insert(0, str(INDEXTTS_ROOT))
@@ -39,12 +37,38 @@ DEFAULT_MAX_MEL_TOKENS = 700
 DEFAULT_SILENCE_MS = 550
 
 
+@dataclass(frozen=True)
+class EngineConfig:
+    language: str
+    root: Path
+    model_dir: Path
+    config_path: Path
+    voice_dir: Path
+    default_voice_id: str
+    default_silence_ms: int
+    max_mel_tokens: int
+
+
+ENGINE_CONFIG = EngineConfig(
+    language="zh",
+    root=INDEXTTS_ROOT,
+    model_dir=INDEXTTS_ROOT / "checkpoints",
+    config_path=INDEXTTS_ROOT / "checkpoints" / "config.yaml",
+    voice_dir=PROJECT_ROOT / "voice-samples" / "reference" / "zh",
+    default_voice_id="zh_kelin_raw_20260625_222137",
+    default_silence_ms=DEFAULT_SILENCE_MS,
+    max_mel_tokens=DEFAULT_MAX_MEL_TOKENS,
+)
+
+
 class TtsRequest(BaseModel):
     segments: list[str]
     pauses_ms: list[int] | None = None
     voice_id: str = "zh_kelin_raw_20260625_222137"
+    language: str = "zh"
     emotion: str = "affection"
     max_total_seconds: int = 60
+    bypass_cache: bool = False
 
 
 class ModelState:
@@ -61,13 +85,13 @@ class ModelState:
             if self.tts is None:
                 started = time.perf_counter()
                 self.tts = IndexTTS2(
-                    cfg_path=str(CONFIG_PATH),
-                    model_dir=str(MODEL_DIR),
+                    cfg_path=str(ENGINE_CONFIG.config_path),
+                    model_dir=str(ENGINE_CONFIG.model_dir),
                     use_fp16=True,
                     use_cuda_kernel=False,
                     use_deepspeed=False,
                 )
-                print(f"model_loaded seconds={time.perf_counter() - started:.3f}", flush=True)
+                print(f"model_loaded language=zh seconds={time.perf_counter() - started:.3f}", flush=True)
             self.last_used_at = time.monotonic()
             return self.tts
 
@@ -81,7 +105,7 @@ class ModelState:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            print("model_unloaded idle=true", flush=True)
+            print("model_unloaded language=zh reason=idle", flush=True)
 
 
 state = ModelState()
@@ -89,11 +113,21 @@ app = FastAPI(title="AI Chatbot Local TTS Service")
 
 
 def voice_path(voice_id: str) -> Path:
+    if not voice_id.strip():
+        voice_id = ENGINE_CONFIG.default_voice_id
     safe_id = "".join(char for char in voice_id if char.isalnum() or char in {"_", "-"})
-    path = VOICE_DIR / f"{safe_id}.wav"
+    path = ENGINE_CONFIG.voice_dir / f"{safe_id}.wav"
     if not path.exists():
         raise FileNotFoundError(f"voice not found: {safe_id}")
     return path
+
+
+def emotion_preset(emotion: str) -> dict[str, float]:
+    selected = EMOTION_PRESETS.get(emotion, EMOTION_PRESETS["affection"])
+    return {
+        "emo_last": float(selected["emo_last"]),
+        "emo_alpha": float(selected["emo_alpha"]),
+    }
 
 
 def concat_wavs(paths: list[Path], output_path: Path, pauses_ms: list[int]) -> float:
@@ -161,6 +195,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "loaded": state.loaded(),
+        "language": "zh",
         "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
         "gpu_memory_mb": gpu_memory_mb(),
     }
@@ -174,7 +209,7 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
         if not segments:
             raise ValueError("segments is empty")
         prompt = voice_path(request.voice_id)
-        preset = EMOTION_PRESETS.get(request.emotion, EMOTION_PRESETS["affection"])
+        preset = emotion_preset(request.emotion)
         pauses_ms = request.pauses_ms or [DEFAULT_SILENCE_MS for _ in range(max(len(segments) - 1, 0))]
 
         tts_model = await state.ensure_loaded()
@@ -195,7 +230,7 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
                 emo_vector=[0, 0, 0, 0, 0, 0, 0, float(preset["emo_last"])],
                 emo_alpha=float(preset["emo_alpha"]),
                 use_random=False,
-                max_mel_tokens=DEFAULT_MAX_MEL_TOKENS,
+                max_mel_tokens=ENGINE_CONFIG.max_mel_tokens,
                 num_beams=1,
                 verbose=False,
             )
@@ -203,6 +238,8 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
             results.append(
                 {
                     "index": index,
+                    "text": text,
+                    "max_mel_tokens": ENGINE_CONFIG.max_mel_tokens,
                     "seconds": round(time.perf_counter() - infer_started, 3),
                     "bytes": segment_path.stat().st_size,
                 }
@@ -216,9 +253,12 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
         return {
             "ok": True,
             "audio_path": str(output_path),
+            "language": "zh",
             "duration_seconds": round(duration, 3),
             "total_seconds": round(time.perf_counter() - started, 3),
             "segments": results,
+            "pauses_ms": pauses_ms,
+            "cache_hit": False,
         }
     except Exception as exc:
         return {
@@ -235,6 +275,7 @@ if __name__ == "__main__":
                 "service": "tts",
                 "host": "127.0.0.1",
                 "port": 7861,
+                "languages": ["zh"],
                 "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
             },
             ensure_ascii=False,
