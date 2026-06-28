@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AI_CHAT_ROOT = REPO_ROOT / "src" / "plugins" / "ai_chat"
+
+
+def ensure_package(name: str, path: Path) -> None:
+    module = sys.modules.get(name)
+    if module is None:
+        module = types.ModuleType(name)
+        module.__package__ = name
+        sys.modules[name] = module
+    module.__path__ = [str(path)]
+
+
+def load_module(name: str, path: Path):
+    existing = sys.modules.get(name)
+    if existing is not None and getattr(existing, "__file__", None) == str(path):
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {name} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def ensure_ai_chat_packages() -> None:
+    # The plugin package __init__ starts NoneBot and SQLite setup, so tests load
+    # only the pure contract/graph/policy modules needed for state validation.
+    ensure_package("src", REPO_ROOT / "src")
+    ensure_package("src.plugins", REPO_ROOT / "src" / "plugins")
+    ensure_package("src.plugins.ai_chat", AI_CHAT_ROOT)
+
+
+def load_pure_graph_modules():
+    ensure_ai_chat_packages()
+    ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
+
+    modules = {
+        "contracts": load_module(
+            "src.plugins.ai_chat.chat_contracts",
+            AI_CHAT_ROOT / "chat_contracts.py",
+        ),
+        "memory": load_module(
+            "src.plugins.ai_chat.graph.memory",
+            AI_CHAT_ROOT / "graph" / "memory.py",
+        ),
+        "state": load_module(
+            "src.plugins.ai_chat.graph.state",
+            AI_CHAT_ROOT / "graph" / "state.py",
+        ),
+        "vision": load_module(
+            "src.plugins.ai_chat.graph.vision",
+            AI_CHAT_ROOT / "graph" / "vision.py",
+        ),
+    }
+    modules["chat"] = load_module(
+        "src.plugins.ai_chat.graph.chat",
+        AI_CHAT_ROOT / "graph" / "chat.py",
+    )
+    modules["adapters"] = load_module(
+        "src.plugins.ai_chat.graph.adapters",
+        AI_CHAT_ROOT / "graph" / "adapters.py",
+    )
+    modules["root"] = load_module(
+        "src.plugins.ai_chat.graph.root",
+        AI_CHAT_ROOT / "graph" / "root.py",
+    )
+    modules["runtime"] = load_module(
+        "src.plugins.ai_chat.graph.runtime",
+        AI_CHAT_ROOT / "graph" / "runtime.py",
+    )
+    modules["shadow"] = load_module(
+        "src.plugins.ai_chat.graph.shadow",
+        AI_CHAT_ROOT / "graph" / "shadow.py",
+    )
+    return modules
+
+
+def load_pure_policy_modules():
+    ensure_ai_chat_packages()
+    ensure_package("src.plugins.ai_chat.policy", AI_CHAT_ROOT / "policy")
+
+    modules = {
+        "risk": load_module(
+            "src.plugins.ai_chat.policy.risk",
+            AI_CHAT_ROOT / "policy" / "risk.py",
+        )
+    }
+    modules["engine"] = load_module(
+        "src.plugins.ai_chat.policy.engine",
+        AI_CHAT_ROOT / "policy" / "engine.py",
+    )
+    return modules

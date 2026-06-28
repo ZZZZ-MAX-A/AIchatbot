@@ -83,7 +83,7 @@ cd D:\AIchatbot
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-当前测试优先覆盖 LangGraph adapter / shadow state / snapshot validation，不启动 NoneBot、不连接 QQ、不调用模型 API。
+当前测试优先覆盖 LangGraph adapter / shadow state / snapshot validation / policy / runtime skeleton，不启动 NoneBot、不连接 QQ、不调用模型 API。
 
 ## 常用命令
 
