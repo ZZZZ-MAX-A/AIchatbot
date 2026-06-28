@@ -83,7 +83,7 @@ cd D:\AIchatbot
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-当前测试优先覆盖 config loading / LangGraph adapter / shadow state / snapshot validation / graph contracts / policy / runtime skeleton / LangChain model factories / access rules / owner notification / rate limit / group auto-reply / vision and voice pure units / memory pure units，不启动 NoneBot、不连接 QQ、不调用模型 API。
+当前测试优先覆盖 config loading / LangGraph adapter / shadow state / snapshot validation / graph contracts / policy / runtime skeleton / LangChain model factories / access rules / owner notification / rate limit / group auto-reply / vision and voice pure units / memory pure units / operation pure units，不启动 NoneBot、不连接 QQ、不调用模型 API。
 
 ## 常用命令
 

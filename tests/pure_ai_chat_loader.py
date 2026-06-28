@@ -271,3 +271,40 @@ def load_legacy_memory_modules():
         AI_CHAT_ROOT / "memory.py",
     )
     return modules
+
+
+def load_legacy_operation_modules():
+    install_openai_stub()
+    ensure_ai_chat_packages()
+
+    modules = {
+        "base_prompt": load_module(
+            "src.plugins.ai_chat.base_prompt",
+            AI_CHAT_ROOT / "base_prompt.py",
+        ),
+        "role_cards": load_module(
+            "src.plugins.ai_chat.role_cards",
+            AI_CHAT_ROOT / "role_cards.py",
+        ),
+        "trials": load_module(
+            "src.plugins.ai_chat.trials",
+            AI_CHAT_ROOT / "trials.py",
+        ),
+        "summaries": load_module(
+            "src.plugins.ai_chat.summaries",
+            AI_CHAT_ROOT / "summaries.py",
+        ),
+        "gap_scene_summaries": load_module(
+            "src.plugins.ai_chat.gap_scene_summaries",
+            AI_CHAT_ROOT / "gap_scene_summaries.py",
+        ),
+    }
+    modules["llm"] = load_module(
+        "src.plugins.ai_chat.llm",
+        AI_CHAT_ROOT / "llm.py",
+    )
+    modules["compressor"] = load_module(
+        "src.plugins.ai_chat.compressor",
+        AI_CHAT_ROOT / "compressor.py",
+    )
+    return modules
