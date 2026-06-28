@@ -1172,13 +1172,11 @@ async def prepare_chat_request(
     )
 
 
-async def generate_legacy_chat_response(
-    bot: Bot,
+async def generate_chat_text_response(
     event: MessageEvent,
     matcher: Matcher,
     prompt_context: ChatPromptContext,
     user_content: ChatUserContent,
-    options: ChatOptions,
 ) -> ChatRuntimeResult | None:
     try:
         reply = await ask_llm(
@@ -1190,6 +1188,22 @@ async def generate_legacy_chat_response(
         log_ai_event_error(exc, event)
         await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
         return None
+
+    return ChatRuntimeResult(reply=reply, stored_assistant=reply)
+
+
+async def generate_legacy_chat_response(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    prompt_context: ChatPromptContext,
+    user_content: ChatUserContent,
+    options: ChatOptions,
+) -> ChatRuntimeResult | None:
+    result = await generate_chat_text_response(event, matcher, prompt_context, user_content)
+    if result is None:
+        return None
+    reply = result.reply
 
     if options.semantic_voice:
         try:
@@ -1216,8 +1230,42 @@ async def generate_legacy_chat_response(
             voice_text=voice_text,
         )
 
-    return ChatRuntimeResult(reply=reply, stored_assistant=reply)
+    return result
 
+
+async def send_semantic_voice_response(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    result: ChatRuntimeResult,
+    options: ChatOptions,
+) -> ChatRuntimeResult | None:
+    if not options.semantic_voice:
+        return result
+
+    try:
+        voice_text = result.reply
+        await send_tts_record(
+            bot,
+            event,
+            voice_text,
+            refresh_cache=options.tts_refresh_cache,
+            force_language="zh",
+        )
+    except ValueError:
+        await matcher.finish(
+            f"语音文本太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
+        )
+        return None
+    except Exception as exc:
+        log_ai_event_error(exc, event)
+        await matcher.finish("语音生成失败了，请稍后再试。")
+        return None
+    return ChatRuntimeResult(
+        reply=result.reply,
+        stored_assistant=voice_text,
+        voice_text=voice_text,
+    )
 
 async def render_chat_result(
     matcher: Matcher,
@@ -1314,12 +1362,23 @@ async def run_chat_graph_session_runtime(
         prompt_context: ChatPromptContext,
         user_content: ChatUserContent,
     ) -> ChatRuntimeResult | None:
-        return await generate_legacy_chat_response(
-            bot,
+        return await generate_chat_text_response(
             event,
             matcher,
             prompt_context,
             user_content,
+        )
+
+    async def maybe_voice_response_node(
+        _: ChatState,
+        __: ChatGraphPromptBundle,
+        result: ChatRuntimeResult,
+    ) -> ChatRuntimeResult | None:
+        return await send_semantic_voice_response(
+            bot,
+            event,
+            matcher,
+            result,
             options,
         )
 
@@ -1371,6 +1430,7 @@ async def run_chat_graph_session_runtime(
         call_chat_agent=call_chat_agent,
         build_prompt_context=build_prompt_context_node,
         resolve_image_context=resolve_image_context,
+        maybe_voice_response=maybe_voice_response_node,
         persist_chat_turn=persist_turn_node,
         update_trial_accounting=update_trial_accounting_node,
         update_tts_candidate=update_tts_candidate_node,

@@ -95,6 +95,10 @@ ChatRuntimeStateHandler: TypeAlias = Callable[
     [ChatState, ChatRuntimeResult],
     ChatState | Awaitable[ChatState],
 ]
+ChatRuntimeResultHandler: TypeAlias = Callable[
+    [ChatState, ChatRuntimeResult],
+    ChatRuntimeResult | None | Awaitable[ChatRuntimeResult | None],
+]
 
 
 def initial_chat_state(
@@ -139,6 +143,7 @@ class ChatGraphRunner:
         *,
         resolve_image_context: ChatStateHandler | None = None,
         build_prompt_context: ChatStateHandler | None = None,
+        maybe_voice_response: ChatRuntimeResultHandler | None = None,
         persist_turn: ChatPersistHandler | None = None,
         update_trial_accounting: ChatRuntimeStateHandler | None = None,
         update_tts_candidate: ChatRuntimeStateHandler | None = None,
@@ -147,6 +152,7 @@ class ChatGraphRunner:
         self.call_chat_agent = call_chat_agent
         self.resolve_image_context = resolve_image_context
         self.build_prompt_context = build_prompt_context
+        self.maybe_voice_response = maybe_voice_response
         self.persist_turn = persist_turn
         self.update_trial_accounting = update_trial_accounting
         self.update_tts_candidate = update_tts_candidate
@@ -179,6 +185,9 @@ class ChatGraphRunner:
                     current = await _maybe_await(self.build_prompt_context(current))
             elif node == ChatNode.CALL_CHAT_AGENT:
                 runtime_result = await _maybe_await(self.call_chat_agent(current))
+            elif node == ChatNode.MAYBE_VOICE_RESPONSE:
+                if runtime_result is not None and self.maybe_voice_response is not None:
+                    runtime_result = await _maybe_await(self.maybe_voice_response(current, runtime_result))
             elif node == ChatNode.PERSIST_TURN:
                 if runtime_result is not None and self.persist_turn is not None:
                     persisted_turn = await _maybe_await(self.persist_turn(current, runtime_result))

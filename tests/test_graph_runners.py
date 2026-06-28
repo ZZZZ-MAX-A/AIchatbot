@@ -174,6 +174,37 @@ class ChatGraphRunnerTests(unittest.TestCase):
         self.assertEqual(execution.result.voice_text, "spoken reply")
         self.assertEqual(execution.state.voice_text, "spoken reply")
 
+    def test_chat_graph_runner_allows_voice_node_to_add_voice_text(self):
+        state = self.make_chat_state(semantic_voice=True)
+        calls = []
+
+        async def call_chat_agent(chat_state):
+            calls.append(("agent", chat_state.text))
+            return self.contracts.ChatRuntimeResult(
+                reply="spoken reply",
+                stored_assistant="spoken reply",
+            )
+
+        async def maybe_voice_response(chat_state, runtime_result):
+            calls.append(("voice", chat_state.text, runtime_result.reply))
+            return self.contracts.ChatRuntimeResult(
+                reply=runtime_result.reply,
+                stored_assistant=runtime_result.stored_assistant,
+                voice_text=runtime_result.reply,
+            )
+
+        execution = asyncio.run(
+            self.chat.ChatGraphRunner(
+                call_chat_agent,
+                maybe_voice_response=maybe_voice_response,
+            ).run(state)
+        )
+
+        self.assertEqual(calls, [("agent", "hello"), ("voice", "hello", "spoken reply")])
+        self.assertFalse(execution.result.should_reply_text)
+        self.assertEqual(execution.result.voice_text, "spoken reply")
+        self.assertEqual(execution.state.voice_text, "spoken reply")
+
     def test_chat_graph_runner_runs_image_and_prompt_hooks_before_agent(self):
         state = self.make_chat_state()
         calls = []
