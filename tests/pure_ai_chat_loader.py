@@ -208,3 +208,25 @@ def load_legacy_business_modules():
     )
     modules["events"] = events
     return modules
+
+
+def load_legacy_media_modules():
+    events = install_nonebot_event_stubs()
+    ensure_ai_chat_packages()
+
+    modules = {
+        "config": load_module(
+            "src.plugins.ai_chat.config",
+            AI_CHAT_ROOT / "config.py",
+        ),
+        "vision": load_module(
+            "src.plugins.ai_chat.vision",
+            AI_CHAT_ROOT / "vision.py",
+        ),
+        "voice": load_module(
+            "src.plugins.ai_chat.voice",
+            AI_CHAT_ROOT / "voice.py",
+        ),
+        "events": events,
+    }
+    return modules
