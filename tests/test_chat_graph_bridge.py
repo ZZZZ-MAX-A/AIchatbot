@@ -202,6 +202,87 @@ class ChatGraphBridgeTests(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.assistant_content, "stored reply")
 
+    def test_run_chat_graph_session_runs_postprocess_callbacks(self):
+        request, options, state, _, _ = self.make_inputs()
+        calls = []
+
+        async def build_prompt_context(chat_state):
+            prompt_context = self.contracts.ChatPromptContext(
+                history=[{"role": "system", "content": "policy"}],
+                user_id="10001",
+                group_id=None,
+            )
+            user_content = self.contracts.ChatUserContent(
+                original="hello",
+                for_llm="hello for llm",
+                stored="hello stored",
+            )
+            prompted = self.adapters.chat_state_with_prompt_context(
+                chat_state,
+                prompt_context,
+                user_content,
+                llm_user_content="wrapped user",
+            )
+            return self.bridge.ChatGraphPromptBundle(
+                state=prompted,
+                prompt_context=prompt_context,
+                user_content=user_content,
+            )
+
+        async def call_chat_agent(chat_state, prompt_context, user_content):
+            calls.append(("agent", chat_state.llm_user_content, prompt_context.user_id, user_content.stored))
+            return self.contracts.ChatRuntimeResult(
+                reply="reply",
+                stored_assistant="stored reply",
+            )
+
+        async def persist_chat_turn(chat_state, prompt_bundle, runtime_result, persisted_turn):
+            calls.append(
+                (
+                    "persist",
+                    chat_state.llm_user_content,
+                    prompt_bundle.user_content.stored,
+                    runtime_result.stored_assistant,
+                    persisted_turn.assistant_content,
+                )
+            )
+
+        async def update_trial_accounting(chat_state, prompt_bundle, runtime_result):
+            calls.append(("trial", chat_state.llm_user_content, prompt_bundle.prompt_context.user_id, runtime_result.reply))
+
+        async def update_tts_candidate(chat_state, prompt_bundle, runtime_result):
+            calls.append(("tts", chat_state.llm_user_content, prompt_bundle.user_content.stored, runtime_result.reply))
+
+        async def schedule_compression(chat_state, prompt_bundle, runtime_result):
+            calls.append(("compression", chat_state.llm_user_content, prompt_bundle.prompt_context.user_id, runtime_result.reply))
+
+        result = asyncio.run(
+            self.bridge.run_chat_graph_session(
+                state,
+                request=request,
+                options=options,
+                message_type="private",
+                call_chat_agent=call_chat_agent,
+                build_prompt_context=build_prompt_context,
+                persist_chat_turn=persist_chat_turn,
+                update_trial_accounting=update_trial_accounting,
+                update_tts_candidate=update_tts_candidate,
+                schedule_compression=schedule_compression,
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            calls,
+            [
+                ("agent", "wrapped user", "10001", "hello stored"),
+                ("persist", "wrapped user", "hello stored", "stored reply", "stored reply"),
+                ("trial", "wrapped user", "10001", "reply"),
+                ("tts", "wrapped user", "hello stored", "reply"),
+                ("compression", "wrapped user", "10001", "reply"),
+            ],
+        )
+
     def test_run_chat_graph_session_returns_none_when_prompt_build_stops(self):
         request, options, state, _, _ = self.make_inputs()
         agent_called = False

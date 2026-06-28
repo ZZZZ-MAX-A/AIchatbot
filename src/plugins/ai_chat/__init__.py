@@ -1219,6 +1219,17 @@ async def generate_legacy_chat_response(
     return ChatRuntimeResult(reply=reply, stored_assistant=reply)
 
 
+async def render_chat_result(
+    matcher: Matcher,
+    result: ChatRuntimeResult,
+    options: ChatOptions,
+) -> None:
+    if options.semantic_voice:
+        await matcher.finish()
+        return
+    await matcher.send(result.reply)
+
+
 async def finalize_chat_result(
     event: MessageEvent,
     matcher: Matcher,
@@ -1312,6 +1323,46 @@ async def run_chat_graph_session_runtime(
             options,
         )
 
+    def persist_turn_node(
+        _: ChatState,
+        prompt_bundle: ChatGraphPromptBundle,
+        result: ChatRuntimeResult,
+        __,
+    ) -> None:
+        turn = build_chat_turn(prompt_bundle.user_content.stored, result.stored_assistant)
+        persist_chat_turn(
+            request.key,
+            event,
+            prompt_bundle.prompt_context,
+            turn,
+        )
+
+    def update_trial_accounting_node(
+        _: ChatState,
+        prompt_bundle: ChatGraphPromptBundle,
+        __: ChatRuntimeResult,
+    ) -> None:
+        if should_count_private_trial(event):
+            increment_private_trial(prompt_bundle.prompt_context.user_id)
+
+    def update_tts_candidate_node(
+        _: ChatState,
+        __: ChatGraphPromptBundle,
+        result: ChatRuntimeResult,
+    ) -> None:
+        if options.semantic_voice:
+            voice_text = result.voice_text if result.voice_text is not None else result.reply
+            set_last_tts_candidate(voice_text, force_language="zh")
+        elif isinstance(event, PrivateMessageEvent) and is_owner(config, event):
+            set_last_tts_candidate(result.reply)
+
+    def schedule_compression_node(
+        _: ChatState,
+        __: ChatGraphPromptBundle,
+        ___: ChatRuntimeResult,
+    ) -> None:
+        schedule_chat_compression(request.key, event)
+
     return await run_chat_graph_session(
         shadow_state,
         request=request,
@@ -1320,6 +1371,10 @@ async def run_chat_graph_session_runtime(
         call_chat_agent=call_chat_agent,
         build_prompt_context=build_prompt_context_node,
         resolve_image_context=resolve_image_context,
+        persist_chat_turn=persist_turn_node,
+        update_trial_accounting=update_trial_accounting_node,
+        update_tts_candidate=update_tts_candidate_node,
+        schedule_compression=schedule_compression_node,
     )
 
 
@@ -1369,12 +1424,8 @@ async def run_legacy_chat_session(
                 safe_record_shadow_chat_snapshot(event, shadow_state)
                 mark_shadow_chat_stage(shadow_state, "finalizing")
                 safe_record_shadow_chat_snapshot(event, shadow_state)
-                await finalize_chat_result(
-                    event,
+                await render_chat_result(
                     matcher,
-                    request.key,
-                    graph_session.prompt_context,
-                    graph_session.user_content,
                     result,
                     options,
                 )
