@@ -28,6 +28,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertFalse(config.enable_agent_local_write)
         self.assertFalse(config.enable_agent_external_write)
         self.assertFalse(config.enable_agent_shell)
+        self.assertFalse(config.enable_chat_graph_runtime)
         self.assertEqual(config.main_llm_base_url, "https://api.openai.com/v1")
         self.assertEqual(config.main_llm_model, "gpt-4.1-mini")
         self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
@@ -84,6 +85,7 @@ class ConfigLoadingTests(unittest.TestCase):
                 "ENABLE_AGENT_LOCAL_WRITE": "1",
                 "ENABLE_AGENT_EXTERNAL_WRITE": "yes",
                 "ENABLE_AGENT_SHELL": "on",
+                "ENABLE_CHAT_GRAPH_RUNTIME": "true",
                 "AI_TEMPERATURE": "0.25",
                 "PRIVATE_WHITELIST": "10001, 10002,10001,,",
                 "GROUP_WHITELIST": "42, 43",
@@ -100,6 +102,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertTrue(config.enable_agent_local_write)
         self.assertTrue(config.enable_agent_external_write)
         self.assertTrue(config.enable_agent_shell)
+        self.assertTrue(config.enable_chat_graph_runtime)
         self.assertEqual(config.ai_temperature, 0.25)
         self.assertEqual(config.private_whitelist, frozenset({"10001", "10002"}))
         self.assertEqual(config.group_whitelist, frozenset({"42", "43"}))

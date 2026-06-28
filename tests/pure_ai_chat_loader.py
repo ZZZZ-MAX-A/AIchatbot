@@ -151,6 +151,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.graph.shadow",
         AI_CHAT_ROOT / "graph" / "shadow.py",
     )
+    modules["bridge"] = load_module(
+        "src.plugins.ai_chat.chat_graph_bridge",
+        AI_CHAT_ROOT / "chat_graph_bridge.py",
+    )
     return modules
 
 

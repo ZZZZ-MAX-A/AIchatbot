@@ -64,6 +64,7 @@ class AiChatConfig:
     chat_llm_base_url: str
     chat_llm_model: str
     chat_llm_timeout_seconds: int
+    enable_chat_graph_runtime: bool
     enable_vision: bool
     vision_ollama_base_url: str
     vision_model: str
@@ -147,6 +148,7 @@ def load_config() -> AiChatConfig:
         chat_llm_base_url=os.getenv("CHAT_LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
         chat_llm_model=os.getenv("CHAT_LLM_MODEL", os.getenv("OPENAI_MODEL", "deepseek-v4-flash")),
         chat_llm_timeout_seconds=_int_env("CHAT_LLM_TIMEOUT_SECONDS", _int_env("AI_TIMEOUT_SECONDS", 60)),
+        enable_chat_graph_runtime=_bool_env("ENABLE_CHAT_GRAPH_RUNTIME", False),
         enable_vision=_bool_env("ENABLE_VISION", True),
         vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         vision_model=os.getenv("VISION_MODEL", "qwen2.5vl:3b"),
