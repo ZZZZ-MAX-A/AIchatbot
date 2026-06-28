@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import inspect
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from typing import TypeAlias
 
+from ..chat_contracts import ChatOptions, ChatRuntimeResult
 from .memory import MemoryContext, PersistedTurn
 from .state import RuntimeState
 from .vision import VisionContext
@@ -71,6 +75,20 @@ class ChatGraphResult:
     persisted_turn: PersistedTurn | None = None
 
 
+@dataclass(frozen=True)
+class ChatGraphExecution:
+    state: ChatState
+    result: ChatGraphResult
+    node_trace: tuple[ChatNode, ...]
+
+
+ChatAgentHandler: TypeAlias = Callable[[ChatState], ChatRuntimeResult | Awaitable[ChatRuntimeResult]]
+ChatPersistHandler: TypeAlias = Callable[
+    [ChatState, ChatRuntimeResult],
+    PersistedTurn | None | Awaitable[PersistedTurn | None],
+]
+
+
 def initial_chat_state(
     runtime: RuntimeState,
     *,
@@ -87,3 +105,119 @@ def initial_chat_state(
         preserve_original=preserve_original,
         tts_refresh_cache=tts_refresh_cache,
     )
+
+
+def chat_options_from_state(state: ChatState) -> ChatOptions:
+    return ChatOptions(
+        semantic_voice=state.mode == ChatMode.SEMANTIC_VOICE,
+        semantic_goal=state.semantic_goal,
+        tts_refresh_cache=state.tts_refresh_cache,
+        preserve_original=state.preserve_original,
+    )
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+class ChatGraphRunner:
+    """Executable chat graph boundary with injected side-effect handlers."""
+
+    def __init__(
+        self,
+        call_chat_agent: ChatAgentHandler,
+        *,
+        persist_turn: ChatPersistHandler | None = None,
+    ) -> None:
+        self.call_chat_agent = call_chat_agent
+        self.persist_turn = persist_turn
+
+    async def run(self, state: ChatState) -> ChatGraphExecution:
+        node_trace: list[ChatNode] = []
+        current = state
+        runtime_result: ChatRuntimeResult | None = None
+        persisted_turn = state.persisted_turn
+        options = chat_options_from_state(state)
+
+        for node in CHAT_NODE_SEQUENCE:
+            node_trace.append(node)
+            if node == ChatNode.VALIDATE_INPUT:
+                if not (current.text or current.user_content or current.llm_user_content or current.vision.has_image):
+                    current = self._with_graph_artifact(
+                        current,
+                        node_trace,
+                        status="invalid",
+                        error="chat input is empty",
+                    )
+                    result = ChatGraphResult(reply="", should_reply_text=False)
+                    return ChatGraphExecution(current, result, tuple(node_trace))
+            elif node == ChatNode.CALL_CHAT_AGENT:
+                runtime_result = await _maybe_await(self.call_chat_agent(current))
+            elif node == ChatNode.PERSIST_TURN:
+                if runtime_result is not None and self.persist_turn is not None:
+                    persisted_turn = await _maybe_await(self.persist_turn(current, runtime_result))
+            elif node == ChatNode.RENDER_RESPONSE:
+                if runtime_result is None:
+                    current = self._with_graph_artifact(
+                        current,
+                        node_trace,
+                        status="error",
+                        error="chat agent did not return a result",
+                    )
+                    result = ChatGraphResult(reply="", should_reply_text=False)
+                    return ChatGraphExecution(current, result, tuple(node_trace))
+                current = self._apply_runtime_result(
+                    current,
+                    runtime_result,
+                    options,
+                    persisted_turn=persisted_turn,
+                )
+
+        current = self._with_graph_artifact(current, node_trace, status="complete")
+        result = ChatGraphResult(
+            reply=current.reply,
+            should_reply_text=current.should_reply_text,
+            voice_text=current.voice_text,
+            persisted_turn=current.persisted_turn,
+        )
+        return ChatGraphExecution(current, result, tuple(node_trace))
+
+    def _apply_runtime_result(
+        self,
+        state: ChatState,
+        result: ChatRuntimeResult,
+        options: ChatOptions,
+        *,
+        persisted_turn: PersistedTurn | None,
+    ) -> ChatState:
+        runtime = replace(state.runtime, response=result.reply)
+        return replace(
+            state,
+            runtime=runtime,
+            reply=result.reply,
+            voice_text=result.voice_text or "",
+            persisted_turn=persisted_turn,
+            should_reply_text=not options.semantic_voice,
+        )
+
+    def _with_graph_artifact(
+        self,
+        state: ChatState,
+        node_trace: list[ChatNode],
+        *,
+        status: str,
+        error: str = "",
+    ) -> ChatState:
+        artifacts = dict(state.runtime.artifacts)
+        artifacts["chat_graph"] = {
+            "node_trace": tuple(node.value for node in node_trace),
+            "status": status,
+        }
+        runtime = replace(
+            state.runtime,
+            artifacts=artifacts,
+            error=error or state.runtime.error,
+        )
+        return replace(state, runtime=runtime)

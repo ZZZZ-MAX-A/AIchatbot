@@ -11,10 +11,19 @@ from .adapters import (
     runtime_state_from_chat_request,
     vision_context_from_image_context,
 )
-from .chat import CHAT_NODE_SEQUENCE, ChatGraphResult, ChatMode, ChatState, initial_chat_state
+from .chat import (
+    CHAT_NODE_SEQUENCE,
+    ChatGraphExecution,
+    ChatGraphResult,
+    ChatGraphRunner,
+    ChatMode,
+    ChatState,
+    chat_options_from_state,
+    initial_chat_state,
+)
 from .memory import MEMORY_CONTEXT_NODE_SEQUENCE, MEMORY_PERSIST_NODE_SEQUENCE, MemoryContext, PersistedTurn
 from .root import ROOT_NODE_SEQUENCE, RouteDecision, route_from_explicit_intent
-from .runtime import AgentRuntime, RuntimeResponse
+from .runtime import AgentRuntime, RootGraphRunner, RuntimeResponse
 from .shadow import (
     ShadowChatSnapshot,
     ShadowChatValidation,
@@ -30,7 +39,9 @@ __all__ = [
     "ActorRole",
     "AgentRuntime",
     "CHAT_NODE_SEQUENCE",
+    "ChatGraphExecution",
     "ChatGraphResult",
+    "ChatGraphRunner",
     "ChatMode",
     "ChatState",
     "EventContext",
@@ -40,6 +51,7 @@ __all__ = [
     "PersistedTurn",
     "ROOT_NODE_SEQUENCE",
     "RouteDecision",
+    "RootGraphRunner",
     "RuntimeIntent",
     "RuntimeResponse",
     "RuntimeState",
@@ -56,6 +68,7 @@ __all__ = [
     "VoiceState",
     "chat_graph_result_from_runtime_result",
     "chat_mode_from_options",
+    "chat_options_from_state",
     "chat_state_from_chat_request",
     "chat_state_with_prompt_context",
     "chat_state_with_runtime_result",
