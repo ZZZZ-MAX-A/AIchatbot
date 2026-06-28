@@ -120,6 +120,22 @@ def chat_state_with_prompt_context(
     )
 
 
+def chat_state_with_vision_result(
+    state: ChatState,
+    *,
+    descriptions: list[str],
+    context_text: str = "",
+    error: str = "",
+) -> ChatState:
+    vision = replace(
+        state.vision,
+        descriptions=list(descriptions),
+        context_text=context_text,
+        error=error,
+    )
+    return replace(state, vision=vision)
+
+
 def persisted_turn_from_chat_turn(
     request: ChatRequest,
     prompt_context: ChatPromptContext,
