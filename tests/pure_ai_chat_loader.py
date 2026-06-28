@@ -78,6 +78,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.graph.runtime",
         AI_CHAT_ROOT / "graph" / "runtime.py",
     )
+    modules["voice"] = load_module(
+        "src.plugins.ai_chat.graph.voice",
+        AI_CHAT_ROOT / "graph" / "voice.py",
+    )
     modules["shadow"] = load_module(
         "src.plugins.ai_chat.graph.shadow",
         AI_CHAT_ROOT / "graph" / "shadow.py",
@@ -98,5 +102,22 @@ def load_pure_policy_modules():
     modules["engine"] = load_module(
         "src.plugins.ai_chat.policy.engine",
         AI_CHAT_ROOT / "policy" / "engine.py",
+    )
+    return modules
+
+
+def load_pure_lc_modules():
+    ensure_ai_chat_packages()
+    ensure_package("src.plugins.ai_chat.lc", AI_CHAT_ROOT / "lc")
+
+    modules = {
+        "config": load_module(
+            "src.plugins.ai_chat.config",
+            AI_CHAT_ROOT / "config.py",
+        )
+    }
+    modules["models"] = load_module(
+        "src.plugins.ai_chat.lc.models",
+        AI_CHAT_ROOT / "lc" / "models.py",
     )
     return modules
