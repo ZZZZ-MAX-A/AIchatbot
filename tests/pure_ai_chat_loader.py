@@ -40,6 +40,50 @@ def ensure_ai_chat_packages() -> None:
     ensure_package("src.plugins.ai_chat", AI_CHAT_ROOT)
 
 
+def install_nonebot_event_stubs():
+    existing = sys.modules.get("nonebot.adapters.onebot.v11")
+    if (
+        existing is not None
+        and hasattr(existing, "MessageEvent")
+        and hasattr(existing, "PrivateMessageEvent")
+        and hasattr(existing, "GroupMessageEvent")
+    ):
+        return types.SimpleNamespace(
+            MessageEvent=existing.MessageEvent,
+            PrivateMessageEvent=existing.PrivateMessageEvent,
+            GroupMessageEvent=existing.GroupMessageEvent,
+        )
+
+    class MessageEvent:
+        def __init__(self, user_id: int | str = "", group_id: int | str | None = None):
+            self.user_id = user_id
+            if group_id is not None:
+                self.group_id = group_id
+
+    class PrivateMessageEvent(MessageEvent):
+        pass
+
+    class GroupMessageEvent(MessageEvent):
+        pass
+
+    nonebot_module = sys.modules.setdefault("nonebot", types.ModuleType("nonebot"))
+    adapters_module = sys.modules.setdefault("nonebot.adapters", types.ModuleType("nonebot.adapters"))
+    onebot_module = sys.modules.setdefault("nonebot.adapters.onebot", types.ModuleType("nonebot.adapters.onebot"))
+    v11_module = types.ModuleType("nonebot.adapters.onebot.v11")
+    v11_module.MessageEvent = MessageEvent
+    v11_module.PrivateMessageEvent = PrivateMessageEvent
+    v11_module.GroupMessageEvent = GroupMessageEvent
+    sys.modules["nonebot.adapters.onebot.v11"] = v11_module
+    nonebot_module.adapters = adapters_module
+    adapters_module.onebot = onebot_module
+    onebot_module.v11 = v11_module
+    return types.SimpleNamespace(
+        MessageEvent=MessageEvent,
+        PrivateMessageEvent=PrivateMessageEvent,
+        GroupMessageEvent=GroupMessageEvent,
+    )
+
+
 def load_pure_graph_modules():
     ensure_ai_chat_packages()
     ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
@@ -120,4 +164,38 @@ def load_pure_lc_modules():
         "src.plugins.ai_chat.lc.models",
         AI_CHAT_ROOT / "lc" / "models.py",
     )
+    return modules
+
+
+def load_legacy_business_modules():
+    events = install_nonebot_event_stubs()
+    ensure_ai_chat_packages()
+
+    modules = {
+        "config": load_module(
+            "src.plugins.ai_chat.config",
+            AI_CHAT_ROOT / "config.py",
+        ),
+        "access_store": load_module(
+            "src.plugins.ai_chat.access_store",
+            AI_CHAT_ROOT / "access_store.py",
+        ),
+        "rate_limit": load_module(
+            "src.plugins.ai_chat.rate_limit",
+            AI_CHAT_ROOT / "rate_limit.py",
+        ),
+        "reply_decider": load_module(
+            "src.plugins.ai_chat.reply_decider",
+            AI_CHAT_ROOT / "reply_decider.py",
+        ),
+        "owner_notify": load_module(
+            "src.plugins.ai_chat.owner_notify",
+            AI_CHAT_ROOT / "owner_notify.py",
+        ),
+    }
+    modules["access"] = load_module(
+        "src.plugins.ai_chat.access",
+        AI_CHAT_ROOT / "access.py",
+    )
+    modules["events"] = events
     return modules
