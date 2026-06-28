@@ -49,6 +49,18 @@ def install_dotenv_stub() -> None:
     sys.modules["dotenv"] = dotenv_module
 
 
+def install_openai_stub() -> None:
+    if "openai" in sys.modules:
+        return
+    openai_module = types.ModuleType("openai")
+
+    class AsyncOpenAI:
+        pass
+
+    openai_module.AsyncOpenAI = AsyncOpenAI
+    sys.modules["openai"] = openai_module
+
+
 def install_nonebot_event_stubs():
     existing = sys.modules.get("nonebot.adapters.onebot.v11")
     if (
@@ -229,4 +241,33 @@ def load_legacy_media_modules():
         ),
         "events": events,
     }
+    return modules
+
+
+def load_legacy_memory_modules():
+    install_openai_stub()
+    ensure_ai_chat_packages()
+
+    modules = {
+        "database": load_module(
+            "src.plugins.ai_chat.database",
+            AI_CHAT_ROOT / "database.py",
+        ),
+        "summaries": load_module(
+            "src.plugins.ai_chat.summaries",
+            AI_CHAT_ROOT / "summaries.py",
+        ),
+        "manual_memory": load_module(
+            "src.plugins.ai_chat.manual_memory",
+            AI_CHAT_ROOT / "manual_memory.py",
+        ),
+        "gap_scene_summaries": load_module(
+            "src.plugins.ai_chat.gap_scene_summaries",
+            AI_CHAT_ROOT / "gap_scene_summaries.py",
+        ),
+    }
+    modules["memory"] = load_module(
+        "src.plugins.ai_chat.memory",
+        AI_CHAT_ROOT / "memory.py",
+    )
     return modules
