@@ -82,7 +82,10 @@ class ChatGraphExecution:
     node_trace: tuple[ChatNode, ...]
 
 
-ChatAgentHandler: TypeAlias = Callable[[ChatState], ChatRuntimeResult | Awaitable[ChatRuntimeResult]]
+ChatAgentHandler: TypeAlias = Callable[
+    [ChatState],
+    ChatRuntimeResult | None | Awaitable[ChatRuntimeResult | None],
+]
 ChatPersistHandler: TypeAlias = Callable[
     [ChatState, ChatRuntimeResult],
     PersistedTurn | None | Awaitable[PersistedTurn | None],
