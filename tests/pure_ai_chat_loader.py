@@ -33,11 +33,20 @@ def load_module(name: str, path: Path):
 
 
 def ensure_ai_chat_packages() -> None:
+    install_dotenv_stub()
     # The plugin package __init__ starts NoneBot and SQLite setup, so tests load
     # only the pure contract/graph/policy modules needed for state validation.
     ensure_package("src", REPO_ROOT / "src")
     ensure_package("src.plugins", REPO_ROOT / "src" / "plugins")
     ensure_package("src.plugins.ai_chat", AI_CHAT_ROOT)
+
+
+def install_dotenv_stub() -> None:
+    if "dotenv" in sys.modules:
+        return
+    dotenv_module = types.ModuleType("dotenv")
+    dotenv_module.load_dotenv = lambda *args, **kwargs: False
+    sys.modules["dotenv"] = dotenv_module
 
 
 def install_nonebot_event_stubs():
