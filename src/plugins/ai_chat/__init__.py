@@ -52,6 +52,7 @@ from .graph import (
     ActorRole,
     ChatState,
     SessionType,
+    ShadowChatSnapshot,
     chat_graph_result_from_runtime_result,
     chat_state_from_chat_request,
     chat_state_with_prompt_context,
@@ -59,6 +60,7 @@ from .graph import (
     chat_state_with_vision_result,
     persisted_turn_from_chat_turn,
     runtime_state_from_chat_request,
+    shadow_chat_snapshot_from_state,
 )
 from .manual_memory import (
     MANUAL_FACT_TYPE,
@@ -131,6 +133,7 @@ ensure_database()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
+_last_shadow_chat_snapshot: ShadowChatSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -1024,6 +1027,23 @@ def mark_shadow_chat_stage(state: ChatState | None, stage: str) -> None:
         shadow_artifact["stage"] = stage
 
 
+def record_shadow_chat_snapshot(state: ChatState | None) -> None:
+    global _last_shadow_chat_snapshot
+    if state is not None:
+        _last_shadow_chat_snapshot = shadow_chat_snapshot_from_state(state)
+
+
+def safe_record_shadow_chat_snapshot(event: MessageEvent, state: ChatState | None) -> None:
+    try:
+        record_shadow_chat_snapshot(state)
+    except Exception as exc:
+        log_background_error(exc, event)
+
+
+def last_shadow_chat_snapshot() -> ShadowChatSnapshot | None:
+    return _last_shadow_chat_snapshot
+
+
 def safe_apply_shadow_vision_result(
     event: MessageEvent,
     state: ChatState | None,
@@ -1222,6 +1242,7 @@ async def run_legacy_chat_session(
     options: ChatOptions,
 ) -> None:
     shadow_state = safe_build_shadow_chat_state(event, request, options)
+    safe_record_shadow_chat_snapshot(event, shadow_state)
     async with session_lock(request.key):
         try:
             await ensure_gap_scene_summaries(config, request.key)
@@ -1235,6 +1256,7 @@ async def run_legacy_chat_session(
         )
         image_descriptions = await describe_chat_images(event, request.image_context)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
+        safe_record_shadow_chat_snapshot(event, shadow_state)
         user_content = build_chat_user_content(
             request.text,
             image_descriptions,
@@ -1250,6 +1272,7 @@ async def run_legacy_chat_session(
             prompt_context,
             user_content,
         )
+        safe_record_shadow_chat_snapshot(event, shadow_state)
 
         result = await generate_legacy_chat_response(
             bot,
@@ -1270,7 +1293,9 @@ async def run_legacy_chat_session(
             result,
             options,
         )
+        safe_record_shadow_chat_snapshot(event, shadow_state)
         mark_shadow_chat_stage(shadow_state, "finalizing")
+        safe_record_shadow_chat_snapshot(event, shadow_state)
 
         await finalize_chat_result(
             event,
