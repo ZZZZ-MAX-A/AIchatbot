@@ -53,6 +53,7 @@ from .graph import (
     ChatState,
     SessionType,
     ShadowChatSnapshot,
+    ShadowChatValidation,
     chat_graph_result_from_runtime_result,
     chat_state_from_chat_request,
     chat_state_with_prompt_context,
@@ -61,6 +62,7 @@ from .graph import (
     persisted_turn_from_chat_turn,
     runtime_state_from_chat_request,
     shadow_chat_snapshot_from_state,
+    validate_shadow_chat_snapshot,
 )
 from .manual_memory import (
     MANUAL_FACT_TYPE,
@@ -134,6 +136,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
 _last_shadow_chat_snapshot: ShadowChatSnapshot | None = None
+_last_shadow_chat_validation: ShadowChatValidation | None = None
 
 
 @dataclass(frozen=True)
@@ -1028,9 +1031,11 @@ def mark_shadow_chat_stage(state: ChatState | None, stage: str) -> None:
 
 
 def record_shadow_chat_snapshot(state: ChatState | None) -> None:
-    global _last_shadow_chat_snapshot
+    global _last_shadow_chat_snapshot, _last_shadow_chat_validation
     if state is not None:
-        _last_shadow_chat_snapshot = shadow_chat_snapshot_from_state(state)
+        snapshot = shadow_chat_snapshot_from_state(state)
+        _last_shadow_chat_snapshot = snapshot
+        _last_shadow_chat_validation = validate_shadow_chat_snapshot(snapshot)
 
 
 def safe_record_shadow_chat_snapshot(event: MessageEvent, state: ChatState | None) -> None:
@@ -1042,6 +1047,10 @@ def safe_record_shadow_chat_snapshot(event: MessageEvent, state: ChatState | Non
 
 def last_shadow_chat_snapshot() -> ShadowChatSnapshot | None:
     return _last_shadow_chat_snapshot
+
+
+def last_shadow_chat_validation() -> ShadowChatValidation | None:
+    return _last_shadow_chat_validation
 
 
 def safe_apply_shadow_vision_result(

@@ -6,6 +6,17 @@ from typing import Any
 from .chat import ChatState
 
 
+SHADOW_CHAT_STAGES: tuple[str, ...] = (
+    "request",
+    "vision",
+    "prompt",
+    "result",
+    "finalizing",
+)
+PROMPT_READY_STAGES = frozenset({"prompt", "result", "finalizing"})
+RESULT_READY_STAGES = frozenset({"result", "finalizing"})
+
+
 @dataclass(frozen=True)
 class ShadowChatSnapshot:
     stage: str
@@ -34,6 +45,17 @@ class ShadowChatSnapshot:
     has_persisted_turn: bool
     has_error: bool
     tool_event_count: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ShadowChatValidation:
+    stage: str
+    is_valid: bool
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -70,4 +92,59 @@ def shadow_chat_snapshot_from_state(state: ChatState) -> ShadowChatSnapshot:
         has_persisted_turn=state.persisted_turn is not None,
         has_error=bool(runtime.error),
         tool_event_count=len(runtime.tool_events),
+    )
+
+
+def validate_shadow_chat_snapshot(snapshot: ShadowChatSnapshot) -> ShadowChatValidation:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if snapshot.stage not in SHADOW_CHAT_STAGES:
+        errors.append("unknown shadow stage")
+    if not snapshot.production_route:
+        errors.append("missing production route")
+    elif snapshot.production_route != "legacy_chat_runtime":
+        warnings.append("unexpected production route")
+    if not snapshot.session_key:
+        errors.append("missing session key")
+    if snapshot.session_type not in {"private", "group"}:
+        errors.append("invalid session type")
+    if snapshot.session_type == "group" and not snapshot.group_id:
+        errors.append("missing group id for group session")
+    if not snapshot.user_id:
+        errors.append("missing user id")
+    if not snapshot.actor_role:
+        errors.append("missing actor role")
+    if snapshot.intent != "chat":
+        warnings.append("unexpected runtime intent")
+    if snapshot.has_error:
+        warnings.append("runtime state has error")
+    if snapshot.tool_event_count:
+        warnings.append("shadow chat unexpectedly contains tool events")
+    if snapshot.has_image_context and snapshot.image_url_count == 0 and snapshot.image_description_count == 0:
+        warnings.append("image context has no urls or descriptions")
+
+    if snapshot.stage in PROMPT_READY_STAGES:
+        if snapshot.history_count <= 0:
+            errors.append("prompt-ready stage has no history")
+        if not snapshot.has_user_content:
+            errors.append("prompt-ready stage has no user content")
+        if snapshot.llm_user_content_chars <= 0:
+            errors.append("prompt-ready stage has no llm user content")
+
+    if snapshot.stage in RESULT_READY_STAGES:
+        if not snapshot.has_reply:
+            errors.append("result-ready stage has no reply")
+        if snapshot.reply_chars <= 0:
+            errors.append("result-ready stage has empty reply")
+        if not snapshot.has_persisted_turn:
+            errors.append("result-ready stage has no persisted turn")
+        if not snapshot.should_reply_text and not snapshot.has_voice_text:
+            errors.append("non-text result has no voice text")
+
+    return ShadowChatValidation(
+        stage=snapshot.stage,
+        is_valid=not errors,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
     )

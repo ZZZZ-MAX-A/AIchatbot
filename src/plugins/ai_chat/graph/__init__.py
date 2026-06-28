@@ -15,7 +15,12 @@ from .chat import CHAT_NODE_SEQUENCE, ChatGraphResult, ChatMode, ChatState, init
 from .memory import MEMORY_CONTEXT_NODE_SEQUENCE, MEMORY_PERSIST_NODE_SEQUENCE, MemoryContext, PersistedTurn
 from .root import ROOT_NODE_SEQUENCE, RouteDecision, route_from_explicit_intent
 from .runtime import AgentRuntime, RuntimeResponse
-from .shadow import ShadowChatSnapshot, shadow_chat_snapshot_from_state
+from .shadow import (
+    ShadowChatSnapshot,
+    ShadowChatValidation,
+    shadow_chat_snapshot_from_state,
+    validate_shadow_chat_snapshot,
+)
 from .state import ActorContext, ActorRole, EventContext, RuntimeIntent, RuntimeState, SessionContext, SessionType
 from .vision import VISION_NODE_SEQUENCE, VisionArtifact, VisionContext
 from .voice import VOICE_NODE_SEQUENCE, VoiceArtifact, VoiceMode, VoiceState
@@ -41,6 +46,7 @@ __all__ = [
     "SessionContext",
     "SessionType",
     "ShadowChatSnapshot",
+    "ShadowChatValidation",
     "VISION_NODE_SEQUENCE",
     "VisionArtifact",
     "VisionContext",
@@ -59,5 +65,6 @@ __all__ = [
     "route_from_explicit_intent",
     "runtime_state_from_chat_request",
     "shadow_chat_snapshot_from_state",
+    "validate_shadow_chat_snapshot",
     "vision_context_from_image_context",
 ]
