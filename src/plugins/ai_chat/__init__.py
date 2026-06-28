@@ -145,6 +145,30 @@ class ChatTurn:
     stored_assistant: str
 
 
+@dataclass(frozen=True)
+class ChatOptions:
+    silent_limit_rejection: bool = False
+    semantic_voice: bool = False
+    semantic_goal: str = ""
+    tts_refresh_cache: bool = False
+    preserve_original: bool = False
+    tts_language: str = "zh"
+
+
+@dataclass(frozen=True)
+class ChatRequest:
+    key: str
+    text: str
+    image_context: ChatImageContext
+
+
+@dataclass(frozen=True)
+class ChatRuntimeResult:
+    reply: str
+    stored_assistant: str
+    voice_text: str | None = None
+
+
 _recent_images: dict[str, CachedImages] = {}
 
 
@@ -968,6 +992,162 @@ def schedule_chat_compression(key: str, event: MessageEvent) -> None:
     asyncio.create_task(run_auto_compression(key, event))
 
 
+async def prepare_chat_request(
+    event: MessageEvent,
+    matcher: Matcher,
+    options: ChatOptions,
+) -> ChatRequest | None:
+    await check_access(event, matcher)
+
+    if is_command_message(event):
+        return None
+
+    text = clean_text(event)
+    has_image = event_has_image(event)
+    if not text and not has_image:
+        return None
+
+    await check_message_limits(event, matcher, text, options.silent_limit_rejection)
+
+    image_context = await resolve_chat_image_context(event, text, has_image)
+    if not image_context.should_continue:
+        return None
+
+    return ChatRequest(
+        key=session_key(event),
+        text=text,
+        image_context=image_context,
+    )
+
+
+async def generate_legacy_chat_response(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    prompt_context: ChatPromptContext,
+    user_content: ChatUserContent,
+    options: ChatOptions,
+) -> ChatRuntimeResult | None:
+    try:
+        reply = await ask_llm(
+            config,
+            prompt_context.history,
+            llm_user_text(event, user_content.for_llm),
+        )
+    except Exception as exc:
+        log_ai_event_error(exc, event)
+        await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
+        return None
+
+    if options.semantic_voice:
+        try:
+            voice_text = reply
+            await send_tts_record(
+                bot,
+                event,
+                voice_text,
+                refresh_cache=options.tts_refresh_cache,
+                force_language="zh",
+            )
+        except ValueError:
+            await matcher.finish(
+                f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
+            )
+            return None
+        except Exception as exc:
+            log_ai_event_error(exc, event)
+            await matcher.finish("语音生成失败了，请稍后再试。")
+            return None
+        return ChatRuntimeResult(
+            reply=reply,
+            stored_assistant=voice_text,
+            voice_text=voice_text,
+        )
+
+    return ChatRuntimeResult(reply=reply, stored_assistant=reply)
+
+
+async def finalize_chat_result(
+    event: MessageEvent,
+    matcher: Matcher,
+    key: str,
+    prompt_context: ChatPromptContext,
+    user_content: ChatUserContent,
+    result: ChatRuntimeResult,
+    options: ChatOptions,
+) -> None:
+    turn = build_chat_turn(user_content.stored, result.stored_assistant)
+    persist_chat_turn(
+        key,
+        event,
+        prompt_context,
+        turn,
+    )
+    if should_count_private_trial(event):
+        increment_private_trial(prompt_context.user_id)
+    if options.semantic_voice:
+        voice_text = result.voice_text if result.voice_text is not None else result.reply
+        set_last_tts_candidate(voice_text, force_language="zh")
+        schedule_chat_compression(key, event)
+        await matcher.finish()
+        return
+    await matcher.send(result.reply)
+    if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
+        set_last_tts_candidate(result.reply)
+    schedule_chat_compression(key, event)
+
+
+async def run_legacy_chat_session(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    request: ChatRequest,
+    options: ChatOptions,
+) -> None:
+    async with session_lock(request.key):
+        try:
+            await ensure_gap_scene_summaries(config, request.key)
+        except Exception as exc:
+            log_background_error(exc, event)
+        prompt_context = build_chat_prompt_context(
+            event,
+            request.key,
+            semantic_voice=options.semantic_voice,
+            has_image_context=request.image_context.has_context,
+        )
+        image_descriptions = await describe_chat_images(event, request.image_context)
+        user_content = build_chat_user_content(
+            request.text,
+            image_descriptions,
+            semantic_voice=options.semantic_voice,
+            semantic_goal=options.semantic_goal,
+            preserve_original=options.preserve_original,
+        )
+        if not user_content.for_llm:
+            return
+
+        result = await generate_legacy_chat_response(
+            bot,
+            event,
+            matcher,
+            prompt_context,
+            user_content,
+            options,
+        )
+        if result is None:
+            return
+
+        await finalize_chat_result(
+            event,
+            matcher,
+            request.key,
+            prompt_context,
+            user_content,
+            result,
+            options,
+        )
+
+
 async def handle_chat(
     bot: Bot,
     event: MessageEvent,
@@ -979,92 +1159,18 @@ async def handle_chat(
     preserve_original: bool = False,
     tts_language: str = "zh",
 ) -> None:
-    await check_access(event, matcher)
-
-    if is_command_message(event):
+    options = ChatOptions(
+        silent_limit_rejection=silent_limit_rejection,
+        semantic_voice=semantic_voice,
+        semantic_goal=semantic_goal,
+        tts_refresh_cache=tts_refresh_cache,
+        preserve_original=preserve_original,
+        tts_language=tts_language,
+    )
+    request = await prepare_chat_request(event, matcher, options)
+    if request is None:
         return
-
-    text = clean_text(event)
-    has_image = event_has_image(event)
-    if not text and not has_image:
-        return
-
-    await check_message_limits(event, matcher, text, silent_limit_rejection)
-
-    image_context = await resolve_chat_image_context(event, text, has_image)
-    if not image_context.should_continue:
-        return
-
-    key = session_key(event)
-    async with session_lock(key):
-        try:
-            await ensure_gap_scene_summaries(config, key)
-        except Exception as exc:
-            log_background_error(exc, event)
-        prompt_context = build_chat_prompt_context(
-            event,
-            key,
-            semantic_voice=semantic_voice,
-            has_image_context=image_context.has_context,
-        )
-        image_descriptions = await describe_chat_images(event, image_context)
-        user_content = build_chat_user_content(
-            text,
-            image_descriptions,
-            semantic_voice=semantic_voice,
-            semantic_goal=semantic_goal,
-            preserve_original=preserve_original,
-        )
-        if not user_content.for_llm:
-            return
-
-        try:
-            reply = await ask_llm(
-                config,
-                prompt_context.history,
-                llm_user_text(event, user_content.for_llm),
-            )
-        except Exception as exc:
-            log_ai_event_error(exc, event)
-            await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
-            return
-
-        if semantic_voice:
-            try:
-                voice_text = reply
-                await send_tts_record(
-                    bot,
-                    event,
-                    voice_text,
-                    refresh_cache=tts_refresh_cache,
-                    force_language="zh",
-                )
-            except ValueError:
-                await matcher.finish(
-                    f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
-                )
-            except Exception as exc:
-                log_ai_event_error(exc, event)
-                await matcher.finish("语音生成失败了，请稍后再试。")
-
-        stored_assistant_reply = voice_text if semantic_voice else reply
-        turn = build_chat_turn(user_content.stored, stored_assistant_reply)
-        persist_chat_turn(
-            key,
-            event,
-            prompt_context,
-            turn,
-        )
-        if should_count_private_trial(event):
-            increment_private_trial(prompt_context.user_id)
-        if semantic_voice:
-            set_last_tts_candidate(voice_text, force_language="zh")
-            schedule_chat_compression(key, event)
-            await matcher.finish()
-        await matcher.send(reply)
-        if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
-            set_last_tts_candidate(reply)
-        schedule_chat_compression(key, event)
+    await run_legacy_chat_session(bot, event, matcher, request, options)
 
 
 def group_auto_reply_decision(event: GroupMessageEvent, text: str) -> ReplyDecision:
