@@ -74,6 +74,17 @@ cd D:\AIchatbot
 .\scripts\start-napcat-shell.ps1 2700318954
 ```
 
+## 测试
+
+运行纯本地单元测试：
+
+```powershell
+cd D:\AIchatbot
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+当前测试优先覆盖 LangGraph adapter / shadow state / snapshot validation，不启动 NoneBot、不连接 QQ、不调用模型 API。
+
 ## 常用命令
 
 普通命令：
