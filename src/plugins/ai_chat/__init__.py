@@ -118,6 +118,33 @@ class CachedImages:
     created_at: float
 
 
+@dataclass(frozen=True)
+class ChatImageContext:
+    urls: list[str]
+    has_context: bool
+    should_continue: bool = True
+
+
+@dataclass(frozen=True)
+class ChatPromptContext:
+    history: list[dict[str, str]]
+    user_id: str
+    group_id: str | None
+
+
+@dataclass(frozen=True)
+class ChatUserContent:
+    original: str
+    for_llm: str
+    stored: str
+
+
+@dataclass(frozen=True)
+class ChatTurn:
+    stored_user: str
+    stored_assistant: str
+
+
 _recent_images: dict[str, CachedImages] = {}
 
 
@@ -367,6 +394,97 @@ def combine_text_and_images(text: str, image_descriptions: list[str]) -> str:
     image_context = format_image_descriptions(image_descriptions)
     parts = [part for part in (text, image_context) if part]
     return "\n\n".join(parts)
+
+
+async def resolve_chat_image_context(event: MessageEvent, text: str, has_image: bool) -> ChatImageContext:
+    image_urls = image_urls_from_event(event) if has_image else []
+    if isinstance(event, PrivateMessageEvent) and image_urls and not text:
+        wait_seconds = max(config.vision_private_image_wait_seconds, 0)
+        if wait_seconds > 0:
+            cache_image_urls(event, image_urls)
+            await asyncio.sleep(wait_seconds)
+            if not cached_image_is_current(event, image_urls):
+                return ChatImageContext([], False, should_continue=False)
+            pop_cached_image_urls(event)
+    elif not image_urls and text:
+        if isinstance(event, PrivateMessageEvent) or (
+            isinstance(event, GroupMessageEvent) and is_image_followup_text(text)
+        ):
+            image_urls = pop_cached_image_urls(event)
+    return ChatImageContext(image_urls, bool(image_urls) or has_image)
+
+
+def build_chat_prompt_context(
+    event: MessageEvent,
+    key: str,
+    *,
+    semantic_voice: bool,
+    has_image_context: bool,
+) -> ChatPromptContext:
+    history = build_history(
+        key,
+        config.max_context_messages,
+        config.max_session_summaries_in_context,
+        config.max_gap_scene_summaries_in_context,
+        [
+            language_reset_context(),
+            speaker_identity_context(event),
+            owner_public_context(),
+            manual_long_term_context(event),
+        ],
+    )
+    reminder = rule_reminder_context(key)
+    if reminder:
+        history.append({"role": "system", "content": reminder})
+    if semantic_voice:
+        history.append({"role": "system", "content": semantic_voice_instruction()})
+    if has_image_context:
+        history.append({"role": "system", "content": vision_safety_context()})
+    history.append({"role": "system", "content": current_message_identity_context(event)})
+    event_user_id = user_id(event)
+    event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
+    return ChatPromptContext(history=history, user_id=event_user_id, group_id=event_group_id)
+
+
+async def describe_chat_images(
+    event: MessageEvent,
+    image_context: ChatImageContext,
+) -> list[str]:
+    if not image_context.has_context:
+        return []
+    if image_context.urls:
+        try:
+            return await describe_images(config, image_context.urls)
+        except Exception as exc:
+            log_ai_event_error(exc, event)
+            return [f"图片识别失败：{type(exc).__name__}"]
+    if config.enable_vision:
+        return ["无法读取图片地址。"]
+    return []
+
+
+def build_chat_user_content(
+    text: str,
+    image_descriptions: list[str],
+    *,
+    semantic_voice: bool,
+    semantic_goal: str,
+    preserve_original: bool,
+) -> ChatUserContent:
+    original_user_content = combine_text_and_images(text, image_descriptions)
+    user_content = original_user_content
+    if semantic_voice:
+        user_content = semantic_voice_user_text(
+            text,
+            semantic_goal,
+            preserve_original=preserve_original,
+        )
+    stored_user = original_user_content if semantic_voice and original_user_content else user_content
+    return ChatUserContent(
+        original=original_user_content,
+        for_llm=user_content,
+        stored=stored_user,
+    )
 
 
 def parse_single_arg(arg_text: str) -> str:
@@ -818,6 +936,38 @@ async def run_auto_compression(key: str, event: MessageEvent) -> None:
         log_background_error(exc, event)
 
 
+def build_chat_turn(user_content: str, assistant_content: str) -> ChatTurn:
+    return ChatTurn(stored_user=user_content, stored_assistant=assistant_content)
+
+
+def persist_chat_turn(
+    key: str,
+    event: MessageEvent,
+    prompt_context: ChatPromptContext,
+    turn: ChatTurn,
+) -> None:
+    append_message(
+        key,
+        "user",
+        stored_user_content(event, turn.stored_user),
+        event.message_type,
+        prompt_context.user_id,
+        prompt_context.group_id,
+    )
+    append_message(
+        key,
+        "assistant",
+        turn.stored_assistant,
+        event.message_type,
+        prompt_context.user_id,
+        prompt_context.group_id,
+    )
+
+
+def schedule_chat_compression(key: str, event: MessageEvent) -> None:
+    asyncio.create_task(run_auto_compression(key, event))
+
+
 async def handle_chat(
     bot: Bot,
     event: MessageEvent,
@@ -841,22 +991,9 @@ async def handle_chat(
 
     await check_message_limits(event, matcher, text, silent_limit_rejection)
 
-    image_urls = image_urls_from_event(event) if has_image else []
-    if isinstance(event, PrivateMessageEvent) and image_urls and not text:
-        wait_seconds = max(config.vision_private_image_wait_seconds, 0)
-        if wait_seconds > 0:
-            cache_image_urls(event, image_urls)
-            await asyncio.sleep(wait_seconds)
-            if not cached_image_is_current(event, image_urls):
-                return
-            pop_cached_image_urls(event)
-    elif not image_urls and text:
-        if isinstance(event, PrivateMessageEvent) or (
-            isinstance(event, GroupMessageEvent) and is_image_followup_text(text)
-        ):
-            image_urls = pop_cached_image_urls(event)
-
-    has_image_context = bool(image_urls) or has_image
+    image_context = await resolve_chat_image_context(event, text, has_image)
+    if not image_context.should_continue:
+        return
 
     key = session_key(event)
     async with session_lock(key):
@@ -864,48 +1001,29 @@ async def handle_chat(
             await ensure_gap_scene_summaries(config, key)
         except Exception as exc:
             log_background_error(exc, event)
-        history = build_history(
+        prompt_context = build_chat_prompt_context(
+            event,
             key,
-            config.max_context_messages,
-            config.max_session_summaries_in_context,
-            config.max_gap_scene_summaries_in_context,
-            [
-                language_reset_context(),
-                speaker_identity_context(event),
-                owner_public_context(),
-                manual_long_term_context(event),
-            ],
+            semantic_voice=semantic_voice,
+            has_image_context=image_context.has_context,
         )
-        reminder = rule_reminder_context(key)
-        if reminder:
-            history.append({"role": "system", "content": reminder})
-        if semantic_voice:
-            history.append({"role": "system", "content": semantic_voice_instruction()})
-        if has_image_context:
-            history.append({"role": "system", "content": vision_safety_context()})
-        history.append({"role": "system", "content": current_message_identity_context(event)})
-        event_user_id = user_id(event)
-        event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
-        image_descriptions: list[str] = []
-        if has_image_context:
-            if image_urls:
-                try:
-                    image_descriptions = await describe_images(config, image_urls)
-                except Exception as exc:
-                    log_ai_event_error(exc, event)
-                    image_descriptions = [f"图片识别失败：{type(exc).__name__}"]
-            elif config.enable_vision:
-                image_descriptions = ["无法读取图片地址。"]
-
-        original_user_content = combine_text_and_images(text, image_descriptions)
-        user_content = original_user_content
-        if semantic_voice:
-            user_content = semantic_voice_user_text(text, semantic_goal, preserve_original=preserve_original)
-        if not user_content:
+        image_descriptions = await describe_chat_images(event, image_context)
+        user_content = build_chat_user_content(
+            text,
+            image_descriptions,
+            semantic_voice=semantic_voice,
+            semantic_goal=semantic_goal,
+            preserve_original=preserve_original,
+        )
+        if not user_content.for_llm:
             return
 
         try:
-            reply = await ask_llm(config, history, llm_user_text(event, user_content))
+            reply = await ask_llm(
+                config,
+                prompt_context.history,
+                llm_user_text(event, user_content.for_llm),
+            )
         except Exception as exc:
             log_ai_event_error(exc, event)
             await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
@@ -930,33 +1048,23 @@ async def handle_chat(
                 await matcher.finish("语音生成失败了，请稍后再试。")
 
         stored_assistant_reply = voice_text if semantic_voice else reply
-        stored_user_reply = original_user_content if semantic_voice and original_user_content else user_content
-        append_message(
+        turn = build_chat_turn(user_content.stored, stored_assistant_reply)
+        persist_chat_turn(
             key,
-            "user",
-            stored_user_content(event, stored_user_reply),
-            event.message_type,
-            event_user_id,
-            event_group_id,
-        )
-        append_message(
-            key,
-            "assistant",
-            stored_assistant_reply,
-            event.message_type,
-            event_user_id,
-            event_group_id,
+            event,
+            prompt_context,
+            turn,
         )
         if should_count_private_trial(event):
-            increment_private_trial(event_user_id)
+            increment_private_trial(prompt_context.user_id)
         if semantic_voice:
             set_last_tts_candidate(voice_text, force_language="zh")
-            asyncio.create_task(run_auto_compression(key, event))
+            schedule_chat_compression(key, event)
             await matcher.finish()
         await matcher.send(reply)
         if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
             set_last_tts_candidate(reply)
-        asyncio.create_task(run_auto_compression(key, event))
+        schedule_chat_compression(key, event)
 
 
 def group_auto_reply_decision(event: GroupMessageEvent, text: str) -> ReplyDecision:
