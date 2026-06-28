@@ -283,6 +283,83 @@ class ChatGraphBridgeTests(unittest.TestCase):
             ],
         )
 
+    def test_run_chat_graph_session_applies_voice_result_before_persist(self):
+        request, options, state, _, _ = self.make_inputs(semantic_voice=True)
+        calls = []
+
+        async def build_prompt_context(chat_state):
+            prompt_context = self.contracts.ChatPromptContext(
+                history=[{"role": "system", "content": "policy"}],
+                user_id="10001",
+                group_id=None,
+            )
+            user_content = self.contracts.ChatUserContent(
+                original="hello",
+                for_llm="hello for llm",
+                stored="hello stored",
+            )
+            prompted = self.adapters.chat_state_with_prompt_context(
+                chat_state,
+                prompt_context,
+                user_content,
+                llm_user_content="wrapped user",
+            )
+            return self.bridge.ChatGraphPromptBundle(
+                state=prompted,
+                prompt_context=prompt_context,
+                user_content=user_content,
+            )
+
+        async def call_chat_agent(chat_state, prompt_context, user_content):
+            calls.append(("agent", chat_state.llm_user_content, prompt_context.user_id, user_content.stored))
+            return self.contracts.ChatRuntimeResult(
+                reply="text reply",
+                stored_assistant="text reply",
+            )
+
+        async def maybe_voice_response(chat_state, prompt_bundle, runtime_result):
+            calls.append(("voice", chat_state.llm_user_content, prompt_bundle.user_content.stored, runtime_result.reply))
+            return self.contracts.ChatRuntimeResult(
+                reply=runtime_result.reply,
+                stored_assistant="spoken reply",
+                voice_text="spoken reply",
+            )
+
+        async def persist_chat_turn(chat_state, prompt_bundle, runtime_result, persisted_turn):
+            calls.append(
+                (
+                    "persist",
+                    chat_state.llm_user_content,
+                    runtime_result.stored_assistant,
+                    persisted_turn.assistant_content,
+                )
+            )
+
+        result = asyncio.run(
+            self.bridge.run_chat_graph_session(
+                state,
+                request=request,
+                options=options,
+                message_type="private",
+                call_chat_agent=call_chat_agent,
+                build_prompt_context=build_prompt_context,
+                maybe_voice_response=maybe_voice_response,
+                persist_chat_turn=persist_chat_turn,
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.runtime_result.voice_text, "spoken reply")
+        self.assertEqual(result.execution.result.voice_text, "spoken reply")
+        self.assertEqual(
+            calls,
+            [
+                ("agent", "wrapped user", "10001", "hello stored"),
+                ("voice", "wrapped user", "hello stored", "text reply"),
+                ("persist", "wrapped user", "spoken reply", "spoken reply"),
+            ],
+        )
+
     def test_run_chat_graph_session_returns_none_when_prompt_build_stops(self):
         request, options, state, _, _ = self.make_inputs()
         agent_called = False

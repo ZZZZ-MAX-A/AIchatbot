@@ -35,6 +35,10 @@ class GraphContractTests(unittest.TestCase):
         )
         self.assertLess(
             sequence.index(self.chat.ChatNode.CALL_CHAT_AGENT),
+            sequence.index(self.chat.ChatNode.MAYBE_VOICE_RESPONSE),
+        )
+        self.assertLess(
+            sequence.index(self.chat.ChatNode.MAYBE_VOICE_RESPONSE),
             sequence.index(self.chat.ChatNode.PERSIST_TURN),
         )
         self.assertLess(

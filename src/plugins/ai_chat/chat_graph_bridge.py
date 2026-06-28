@@ -32,6 +32,10 @@ ChatGraphPostprocessCall: TypeAlias = Callable[
     [ChatState, "ChatGraphPromptBundle", ChatRuntimeResult],
     None | Awaitable[None],
 ]
+ChatGraphVoiceCall: TypeAlias = Callable[
+    [ChatState, "ChatGraphPromptBundle", ChatRuntimeResult],
+    ChatRuntimeResult | None | Awaitable[ChatRuntimeResult | None],
+]
 
 
 class ChatGraphSessionCommittedError(RuntimeError):
@@ -131,6 +135,7 @@ async def run_chat_graph_session(
     call_chat_agent: ChatGraphSessionAgentCall,
     build_prompt_context: ChatGraphPromptCall,
     resolve_image_context: ChatGraphStateCall | None = None,
+    maybe_voice_response: ChatGraphVoiceCall | None = None,
     persist_chat_turn: ChatGraphPersistSideEffect | None = None,
     update_trial_accounting: ChatGraphPostprocessCall | None = None,
     update_tts_candidate: ChatGraphPostprocessCall | None = None,
@@ -165,6 +170,17 @@ async def run_chat_graph_session(
                 prompt_bundle.user_content,
             )
         )
+        captured_result = result
+        return result
+
+    async def graph_maybe_voice_response(
+        chat_state: ChatState,
+        result: ChatRuntimeResult,
+    ) -> ChatRuntimeResult | None:
+        nonlocal captured_result
+        if prompt_bundle is None or maybe_voice_response is None:
+            return result
+        result = await _maybe_await(maybe_voice_response(chat_state, prompt_bundle, result))
         captured_result = result
         return result
 
@@ -205,6 +221,7 @@ async def run_chat_graph_session(
             graph_call,
             resolve_image_context=graph_resolve_image_context,
             build_prompt_context=graph_build_prompt_context,
+            maybe_voice_response=graph_maybe_voice_response,
             persist_turn=graph_persist,
             update_trial_accounting=graph_update_trial_accounting,
             update_tts_candidate=graph_update_tts_candidate,
