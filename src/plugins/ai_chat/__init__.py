@@ -48,6 +48,18 @@ from .diagnostics import (
     format_vision_status,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
+from .graph import (
+    ActorRole,
+    ChatState,
+    SessionType,
+    chat_graph_result_from_runtime_result,
+    chat_state_from_chat_request,
+    chat_state_with_prompt_context,
+    chat_state_with_runtime_result,
+    chat_state_with_vision_result,
+    persisted_turn_from_chat_turn,
+    runtime_state_from_chat_request,
+)
 from .manual_memory import (
     MANUAL_FACT_TYPE,
     MANUAL_PREFERENCE_TYPE,
@@ -950,6 +962,153 @@ def schedule_chat_compression(key: str, event: MessageEvent) -> None:
     asyncio.create_task(run_auto_compression(key, event))
 
 
+def graph_actor_role_for_event(event: MessageEvent) -> ActorRole:
+    access = current_access()
+    event_user_id = user_id(event)
+    if event_user_id in access.user_blacklist:
+        return ActorRole.BLOCKED
+    if is_owner(config, event):
+        return ActorRole.OWNER
+    if event_user_id in access.private_whitelist:
+        return ActorRole.WHITELISTED
+    return ActorRole.USER
+
+
+def graph_session_type_for_event(event: MessageEvent) -> SessionType:
+    if isinstance(event, GroupMessageEvent):
+        return SessionType.GROUP
+    return SessionType.PRIVATE
+
+
+def event_message_id(event: MessageEvent) -> str:
+    return str(getattr(event, "message_id", ""))
+
+
+def build_shadow_chat_state(
+    event: MessageEvent,
+    request: ChatRequest,
+    options: ChatOptions,
+) -> ChatState:
+    runtime = runtime_state_from_chat_request(
+        request,
+        user_id=user_id(event),
+        actor_role=graph_actor_role_for_event(event),
+        session_type=graph_session_type_for_event(event),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
+        message_id=event_message_id(event),
+        raw_text=command_text(event),
+    )
+    runtime.artifacts["shadow_chat"] = {
+        "enabled": True,
+        "stage": "request",
+        "production_route": "legacy_chat_runtime",
+    }
+    return chat_state_from_chat_request(runtime, request, options)
+
+
+def safe_build_shadow_chat_state(
+    event: MessageEvent,
+    request: ChatRequest,
+    options: ChatOptions,
+) -> ChatState | None:
+    try:
+        return build_shadow_chat_state(event, request, options)
+    except Exception as exc:
+        log_background_error(exc, event)
+        return None
+
+
+def mark_shadow_chat_stage(state: ChatState | None, stage: str) -> None:
+    if state is not None:
+        shadow_artifact = state.runtime.artifacts.setdefault("shadow_chat", {})
+        shadow_artifact["stage"] = stage
+
+
+def safe_apply_shadow_vision_result(
+    event: MessageEvent,
+    state: ChatState | None,
+    image_descriptions: list[str],
+) -> ChatState | None:
+    if state is None:
+        return None
+    try:
+        updated = chat_state_with_vision_result(
+            state,
+            descriptions=image_descriptions,
+            context_text=format_image_descriptions(image_descriptions),
+        )
+        mark_shadow_chat_stage(updated, "vision")
+        return updated
+    except Exception as exc:
+        log_background_error(exc, event)
+        return None
+
+
+def safe_apply_shadow_prompt_context(
+    event: MessageEvent,
+    state: ChatState | None,
+    prompt_context: ChatPromptContext,
+    user_content: ChatUserContent,
+) -> ChatState | None:
+    if state is None:
+        return None
+    try:
+        updated = chat_state_with_prompt_context(
+            state,
+            prompt_context,
+            user_content,
+            llm_user_content=llm_user_text(event, user_content.for_llm),
+        )
+        mark_shadow_chat_stage(updated, "prompt")
+        return updated
+    except Exception as exc:
+        log_background_error(exc, event)
+        return None
+
+
+def safe_apply_shadow_runtime_result(
+    event: MessageEvent,
+    state: ChatState | None,
+    request: ChatRequest,
+    prompt_context: ChatPromptContext,
+    user_content: ChatUserContent,
+    result: ChatRuntimeResult,
+    options: ChatOptions,
+) -> ChatState | None:
+    if state is None:
+        return None
+    try:
+        turn = build_chat_turn(user_content.stored, result.stored_assistant)
+        persisted_turn = persisted_turn_from_chat_turn(
+            request,
+            prompt_context,
+            turn,
+            message_type=event.message_type,
+        )
+        graph_result = chat_graph_result_from_runtime_result(
+            result,
+            options,
+            persisted_turn=persisted_turn,
+        )
+        updated = chat_state_with_runtime_result(
+            state,
+            result,
+            options,
+            persisted_turn=persisted_turn,
+        )
+        shadow_artifact = updated.runtime.artifacts.setdefault("shadow_chat", {})
+        shadow_artifact["graph_result"] = {
+            "should_reply_text": graph_result.should_reply_text,
+            "has_voice_text": bool(graph_result.voice_text),
+            "has_persisted_turn": graph_result.persisted_turn is not None,
+        }
+        mark_shadow_chat_stage(updated, "result")
+        return updated
+    except Exception as exc:
+        log_background_error(exc, event)
+        return None
+
+
 async def prepare_chat_request(
     event: MessageEvent,
     matcher: Matcher,
@@ -1062,6 +1221,7 @@ async def run_legacy_chat_session(
     request: ChatRequest,
     options: ChatOptions,
 ) -> None:
+    shadow_state = safe_build_shadow_chat_state(event, request, options)
     async with session_lock(request.key):
         try:
             await ensure_gap_scene_summaries(config, request.key)
@@ -1074,6 +1234,7 @@ async def run_legacy_chat_session(
             has_image_context=request.image_context.has_context,
         )
         image_descriptions = await describe_chat_images(event, request.image_context)
+        shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         user_content = build_chat_user_content(
             request.text,
             image_descriptions,
@@ -1083,6 +1244,12 @@ async def run_legacy_chat_session(
         )
         if not user_content.for_llm:
             return
+        shadow_state = safe_apply_shadow_prompt_context(
+            event,
+            shadow_state,
+            prompt_context,
+            user_content,
+        )
 
         result = await generate_legacy_chat_response(
             bot,
@@ -1094,6 +1261,16 @@ async def run_legacy_chat_session(
         )
         if result is None:
             return
+        shadow_state = safe_apply_shadow_runtime_result(
+            event,
+            shadow_state,
+            request,
+            prompt_context,
+            user_content,
+            result,
+            options,
+        )
+        mark_shadow_chat_stage(shadow_state, "finalizing")
 
         await finalize_chat_result(
             event,
