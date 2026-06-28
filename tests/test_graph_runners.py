@@ -174,6 +174,63 @@ class ChatGraphRunnerTests(unittest.TestCase):
         self.assertEqual(execution.result.voice_text, "spoken reply")
         self.assertEqual(execution.state.voice_text, "spoken reply")
 
+    def test_chat_graph_runner_runs_image_and_prompt_hooks_before_agent(self):
+        state = self.make_chat_state()
+        calls = []
+
+        async def resolve_image_context(chat_state):
+            calls.append(("resolve", chat_state.text))
+            return self.adapters.chat_state_with_vision_result(
+                chat_state,
+                descriptions=["image description"],
+                context_text="image context",
+            )
+
+        async def build_prompt_context(chat_state):
+            calls.append(("prompt", tuple(chat_state.vision.descriptions)))
+            prompt_context = self.contracts.ChatPromptContext(
+                history=[{"role": "system", "content": "ctx"}],
+                user_id="10001",
+                group_id=None,
+            )
+            user_content = self.contracts.ChatUserContent(
+                original="hello",
+                for_llm="hello for llm",
+                stored="hello",
+            )
+            return self.adapters.chat_state_with_prompt_context(
+                chat_state,
+                prompt_context,
+                user_content,
+                llm_user_content="wrapped",
+            )
+
+        async def call_chat_agent(chat_state):
+            calls.append(("agent", chat_state.llm_user_content))
+            return self.contracts.ChatRuntimeResult(
+                reply="reply",
+                stored_assistant="reply",
+            )
+
+        execution = asyncio.run(
+            self.chat.ChatGraphRunner(
+                call_chat_agent,
+                resolve_image_context=resolve_image_context,
+                build_prompt_context=build_prompt_context,
+            ).run(state)
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("resolve", "hello"),
+                ("prompt", ("image description",)),
+                ("agent", "wrapped"),
+            ],
+        )
+        self.assertEqual(execution.state.vision.context_text, "image context")
+        self.assertEqual(execution.state.history, [{"role": "system", "content": "ctx"}])
+
     def test_chat_graph_runner_rejects_empty_input_before_agent_call(self):
         state = self.make_chat_state(text="")
 

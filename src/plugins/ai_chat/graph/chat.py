@@ -90,6 +90,7 @@ ChatPersistHandler: TypeAlias = Callable[
     [ChatState, ChatRuntimeResult],
     PersistedTurn | None | Awaitable[PersistedTurn | None],
 ]
+ChatStateHandler: TypeAlias = Callable[[ChatState], ChatState | Awaitable[ChatState]]
 
 
 def initial_chat_state(
@@ -132,9 +133,13 @@ class ChatGraphRunner:
         self,
         call_chat_agent: ChatAgentHandler,
         *,
+        resolve_image_context: ChatStateHandler | None = None,
+        build_prompt_context: ChatStateHandler | None = None,
         persist_turn: ChatPersistHandler | None = None,
     ) -> None:
         self.call_chat_agent = call_chat_agent
+        self.resolve_image_context = resolve_image_context
+        self.build_prompt_context = build_prompt_context
         self.persist_turn = persist_turn
 
     async def run(self, state: ChatState) -> ChatGraphExecution:
@@ -156,6 +161,12 @@ class ChatGraphRunner:
                     )
                     result = ChatGraphResult(reply="", should_reply_text=False)
                     return ChatGraphExecution(current, result, tuple(node_trace))
+            elif node == ChatNode.RESOLVE_IMAGE_CONTEXT:
+                if self.resolve_image_context is not None:
+                    current = await _maybe_await(self.resolve_image_context(current))
+            elif node == ChatNode.BUILD_PROMPT_CONTEXT:
+                if self.build_prompt_context is not None:
+                    current = await _maybe_await(self.build_prompt_context(current))
             elif node == ChatNode.CALL_CHAT_AGENT:
                 runtime_result = await _maybe_await(self.call_chat_agent(current))
             elif node == ChatNode.PERSIST_TURN:

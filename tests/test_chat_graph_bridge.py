@@ -131,6 +131,147 @@ class ChatGraphBridgeTests(unittest.TestCase):
         self.assertFalse(result.execution.result.should_reply_text)
         self.assertEqual(result.execution.result.voice_text, "spoken")
 
+    def test_run_chat_graph_session_builds_prompt_inside_graph(self):
+        request, options, state, _, _ = self.make_inputs()
+        calls = []
+
+        async def resolve_image_context(chat_state):
+            calls.append(("resolve", chat_state.text))
+            return self.adapters.chat_state_with_vision_result(
+                chat_state,
+                descriptions=["image description"],
+                context_text="image context",
+            )
+
+        async def build_prompt_context(chat_state):
+            calls.append(("prompt", tuple(chat_state.vision.descriptions)))
+            prompt_context = self.contracts.ChatPromptContext(
+                history=[{"role": "system", "content": "policy"}],
+                user_id="10001",
+                group_id=None,
+            )
+            user_content = self.contracts.ChatUserContent(
+                original="hello",
+                for_llm="hello for llm",
+                stored="hello stored",
+            )
+            prompted = self.adapters.chat_state_with_prompt_context(
+                chat_state,
+                prompt_context,
+                user_content,
+                llm_user_content="wrapped user",
+            )
+            return self.bridge.ChatGraphPromptBundle(
+                state=prompted,
+                prompt_context=prompt_context,
+                user_content=user_content,
+            )
+
+        async def call_chat_agent(chat_state, prompt_context, user_content):
+            calls.append(("agent", chat_state.llm_user_content, prompt_context.user_id, user_content.stored))
+            return self.contracts.ChatRuntimeResult(
+                reply="reply",
+                stored_assistant="stored reply",
+            )
+
+        result = asyncio.run(
+            self.bridge.run_chat_graph_session(
+                state,
+                request=request,
+                options=options,
+                message_type="private",
+                call_chat_agent=call_chat_agent,
+                build_prompt_context=build_prompt_context,
+                resolve_image_context=resolve_image_context,
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            calls,
+            [
+                ("resolve", "hello"),
+                ("prompt", ("image description",)),
+                ("agent", "wrapped user", "10001", "hello stored"),
+            ],
+        )
+        self.assertEqual(result.runtime_result.reply, "reply")
+        self.assertEqual(result.prompt_context.user_id, "10001")
+        self.assertEqual(result.user_content.stored, "hello stored")
+        persisted = result.execution.result.persisted_turn
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.assistant_content, "stored reply")
+
+    def test_run_chat_graph_session_returns_none_when_prompt_build_stops(self):
+        request, options, state, _, _ = self.make_inputs()
+        agent_called = False
+
+        async def build_prompt_context(_):
+            return None
+
+        async def call_chat_agent(*_):
+            nonlocal agent_called
+            agent_called = True
+            return self.contracts.ChatRuntimeResult("reply", "reply")
+
+        result = asyncio.run(
+            self.bridge.run_chat_graph_session(
+                state,
+                request=request,
+                options=options,
+                message_type="private",
+                call_chat_agent=call_chat_agent,
+                build_prompt_context=build_prompt_context,
+            )
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(agent_called)
+
+    def test_run_chat_graph_session_marks_agent_exception_committed(self):
+        request, options, state, _, _ = self.make_inputs()
+
+        async def build_prompt_context(chat_state):
+            prompt_context = self.contracts.ChatPromptContext(
+                history=[{"role": "system", "content": "policy"}],
+                user_id="10001",
+                group_id=None,
+            )
+            user_content = self.contracts.ChatUserContent(
+                original="hello",
+                for_llm="hello for llm",
+                stored="hello stored",
+            )
+            prompted = self.adapters.chat_state_with_prompt_context(
+                chat_state,
+                prompt_context,
+                user_content,
+                llm_user_content="wrapped user",
+            )
+            return self.bridge.ChatGraphPromptBundle(
+                state=prompted,
+                prompt_context=prompt_context,
+                user_content=user_content,
+            )
+
+        async def call_chat_agent(*_):
+            raise RuntimeError("agent failed")
+
+        with self.assertRaises(self.bridge.ChatGraphSessionCommittedError) as raised:
+            asyncio.run(
+                self.bridge.run_chat_graph_session(
+                    state,
+                    request=request,
+                    options=options,
+                    message_type="private",
+                    call_chat_agent=call_chat_agent,
+                    build_prompt_context=build_prompt_context,
+                )
+            )
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertEqual(str(raised.exception.__cause__), "agent failed")
+
 
 if __name__ == "__main__":
     unittest.main()

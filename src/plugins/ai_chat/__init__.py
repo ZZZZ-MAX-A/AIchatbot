@@ -36,7 +36,12 @@ from .chat_contracts import (
     ChatTurn,
     ChatUserContent,
 )
-from .chat_graph_bridge import ChatGraphTailResult, run_chat_graph_tail
+from .chat_graph_bridge import (
+    ChatGraphPromptBundle,
+    ChatGraphSessionCommittedError,
+    ChatGraphSessionResult,
+    run_chat_graph_session,
+)
 from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, ensure_database
@@ -1244,20 +1249,60 @@ async def finalize_chat_result(
     schedule_chat_compression(key, event)
 
 
-async def run_chat_graph_session_tail(
+async def run_chat_graph_session_runtime(
     bot: Bot,
     event: MessageEvent,
     matcher: Matcher,
     request: ChatRequest,
     options: ChatOptions,
     shadow_state: ChatState | None,
-    prompt_context: ChatPromptContext,
-    user_content: ChatUserContent,
-) -> ChatGraphTailResult | None:
+) -> ChatGraphSessionResult | None:
     if shadow_state is None:
         return None
 
-    async def call_chat_agent(_: ChatState) -> ChatRuntimeResult | None:
+    image_descriptions: list[str] = []
+
+    async def resolve_image_context(chat_state: ChatState) -> ChatState:
+        nonlocal image_descriptions
+        image_descriptions = await describe_chat_images(event, request.image_context)
+        updated = safe_apply_shadow_vision_result(event, chat_state, image_descriptions)
+        safe_record_shadow_chat_snapshot(event, updated)
+        return updated or chat_state
+
+    async def build_prompt_context_node(chat_state: ChatState) -> ChatGraphPromptBundle | None:
+        prompt_context = build_chat_prompt_context(
+            event,
+            request.key,
+            semantic_voice=options.semantic_voice,
+            has_image_context=request.image_context.has_context,
+        )
+        user_content = build_chat_user_content(
+            request.text,
+            image_descriptions,
+            semantic_voice=options.semantic_voice,
+            semantic_goal=options.semantic_goal,
+            preserve_original=options.preserve_original,
+        )
+        if not user_content.for_llm:
+            return None
+        updated = safe_apply_shadow_prompt_context(
+            event,
+            chat_state,
+            prompt_context,
+            user_content,
+        )
+        safe_record_shadow_chat_snapshot(event, updated)
+        return ChatGraphPromptBundle(
+            state=updated or chat_state,
+            prompt_context=prompt_context,
+            user_content=user_content,
+        )
+
+    async def call_chat_agent(
+        _: ChatState,
+        prompt_context: ChatPromptContext,
+        user_content: ChatUserContent,
+    ) -> ChatRuntimeResult | None:
         return await generate_legacy_chat_response(
             bot,
             event,
@@ -1267,15 +1312,14 @@ async def run_chat_graph_session_tail(
             options,
         )
 
-    return await run_chat_graph_tail(
+    return await run_chat_graph_session(
         shadow_state,
         request=request,
         options=options,
-        prompt_context=prompt_context,
-        user_content=user_content,
         message_type=event.message_type,
         call_chat_agent=call_chat_agent,
-        llm_user_content=llm_user_text(event, user_content.for_llm),
+        build_prompt_context=build_prompt_context_node,
+        resolve_image_context=resolve_image_context,
     )
 
 
@@ -1293,6 +1337,49 @@ async def run_legacy_chat_session(
             await ensure_gap_scene_summaries(config, request.key)
         except Exception as exc:
             log_background_error(exc, event)
+
+        if config.enable_chat_graph_runtime and shadow_state is not None:
+            try:
+                graph_session = await run_chat_graph_session_runtime(
+                    bot,
+                    event,
+                    matcher,
+                    request,
+                    options,
+                    shadow_state,
+                )
+            except ChatGraphSessionCommittedError as exc:
+                log_background_error(exc.__cause__ or exc, event)
+                return
+            except Exception as exc:
+                log_background_error(exc, event)
+            else:
+                if graph_session is None:
+                    return
+                result = graph_session.runtime_result
+                shadow_state = safe_apply_shadow_runtime_result(
+                    event,
+                    graph_session.execution.state,
+                    request,
+                    graph_session.prompt_context,
+                    graph_session.user_content,
+                    result,
+                    options,
+                )
+                safe_record_shadow_chat_snapshot(event, shadow_state)
+                mark_shadow_chat_stage(shadow_state, "finalizing")
+                safe_record_shadow_chat_snapshot(event, shadow_state)
+                await finalize_chat_result(
+                    event,
+                    matcher,
+                    request.key,
+                    graph_session.prompt_context,
+                    graph_session.user_content,
+                    result,
+                    options,
+                )
+                return
+
         prompt_context = build_chat_prompt_context(
             event,
             request.key,
@@ -1318,47 +1405,6 @@ async def run_legacy_chat_session(
             user_content,
         )
         safe_record_shadow_chat_snapshot(event, shadow_state)
-
-        if config.enable_chat_graph_runtime and shadow_state is not None:
-            try:
-                graph_tail = await run_chat_graph_session_tail(
-                    bot,
-                    event,
-                    matcher,
-                    request,
-                    options,
-                    shadow_state,
-                    prompt_context,
-                    user_content,
-                )
-            except Exception as exc:
-                log_background_error(exc, event)
-            else:
-                if graph_tail is None:
-                    return
-                result = graph_tail.runtime_result
-                shadow_state = safe_apply_shadow_runtime_result(
-                    event,
-                    graph_tail.execution.state,
-                    request,
-                    prompt_context,
-                    user_content,
-                    result,
-                    options,
-                )
-                safe_record_shadow_chat_snapshot(event, shadow_state)
-                mark_shadow_chat_stage(shadow_state, "finalizing")
-                safe_record_shadow_chat_snapshot(event, shadow_state)
-                await finalize_chat_result(
-                    event,
-                    matcher,
-                    request.key,
-                    prompt_context,
-                    user_content,
-                    result,
-                    options,
-                )
-                return
 
         result = await generate_legacy_chat_response(
             bot,
