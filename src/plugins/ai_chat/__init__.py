@@ -27,6 +27,15 @@ from .access_store import (
     remove_item,
 )
 from .base_prompt import load_base_chat_reminder
+from .chat_contracts import (
+    ChatImageContext,
+    ChatOptions,
+    ChatPromptContext,
+    ChatRequest,
+    ChatRuntimeResult,
+    ChatTurn,
+    ChatUserContent,
+)
 from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, ensure_database
@@ -116,57 +125,6 @@ _session_locks: dict[str, asyncio.Lock] = {}
 class CachedImages:
     urls: tuple[str, ...]
     created_at: float
-
-
-@dataclass(frozen=True)
-class ChatImageContext:
-    urls: list[str]
-    has_context: bool
-    should_continue: bool = True
-
-
-@dataclass(frozen=True)
-class ChatPromptContext:
-    history: list[dict[str, str]]
-    user_id: str
-    group_id: str | None
-
-
-@dataclass(frozen=True)
-class ChatUserContent:
-    original: str
-    for_llm: str
-    stored: str
-
-
-@dataclass(frozen=True)
-class ChatTurn:
-    stored_user: str
-    stored_assistant: str
-
-
-@dataclass(frozen=True)
-class ChatOptions:
-    silent_limit_rejection: bool = False
-    semantic_voice: bool = False
-    semantic_goal: str = ""
-    tts_refresh_cache: bool = False
-    preserve_original: bool = False
-    tts_language: str = "zh"
-
-
-@dataclass(frozen=True)
-class ChatRequest:
-    key: str
-    text: str
-    image_context: ChatImageContext
-
-
-@dataclass(frozen=True)
-class ChatRuntimeResult:
-    reply: str
-    stored_assistant: str
-    voice_text: str | None = None
 
 
 _recent_images: dict[str, CachedImages] = {}

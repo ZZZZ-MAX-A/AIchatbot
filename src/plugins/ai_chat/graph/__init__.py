@@ -1,5 +1,15 @@
 """LangGraph runtime scaffolding for the v1.3 Agent design."""
 
+from .adapters import (
+    chat_graph_result_from_runtime_result,
+    chat_mode_from_options,
+    chat_state_from_chat_request,
+    chat_state_with_prompt_context,
+    chat_state_with_runtime_result,
+    persisted_turn_from_chat_turn,
+    runtime_state_from_chat_request,
+    vision_context_from_image_context,
+)
 from .chat import CHAT_NODE_SEQUENCE, ChatGraphResult, ChatMode, ChatState, initial_chat_state
 from .memory import MEMORY_CONTEXT_NODE_SEQUENCE, MEMORY_PERSIST_NODE_SEQUENCE, MemoryContext, PersistedTurn
 from .root import ROOT_NODE_SEQUENCE, RouteDecision, route_from_explicit_intent
@@ -35,6 +45,14 @@ __all__ = [
     "VoiceArtifact",
     "VoiceMode",
     "VoiceState",
+    "chat_graph_result_from_runtime_result",
+    "chat_mode_from_options",
+    "chat_state_from_chat_request",
+    "chat_state_with_prompt_context",
+    "chat_state_with_runtime_result",
     "initial_chat_state",
+    "persisted_turn_from_chat_turn",
     "route_from_explicit_intent",
+    "runtime_state_from_chat_request",
+    "vision_context_from_image_context",
 ]
