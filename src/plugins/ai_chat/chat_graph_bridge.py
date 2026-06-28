@@ -8,6 +8,7 @@ from typing import TypeAlias
 from .chat_contracts import ChatOptions, ChatPromptContext, ChatRequest, ChatRuntimeResult, ChatTurn, ChatUserContent
 from .graph.adapters import chat_state_with_prompt_context, persisted_turn_from_chat_turn
 from .graph.chat import ChatGraphExecution, ChatGraphRunner, ChatState
+from .graph.memory import PersistedTurn
 
 
 ChatGraphAgentCall: TypeAlias = Callable[
@@ -22,6 +23,14 @@ ChatGraphStateCall: TypeAlias = Callable[[ChatState], ChatState | Awaitable[Chat
 ChatGraphPromptCall: TypeAlias = Callable[
     [ChatState],
     "ChatGraphPromptBundle | None | Awaitable[ChatGraphPromptBundle | None]",
+]
+ChatGraphPersistSideEffect: TypeAlias = Callable[
+    [ChatState, "ChatGraphPromptBundle", ChatRuntimeResult, PersistedTurn],
+    None | Awaitable[None],
+]
+ChatGraphPostprocessCall: TypeAlias = Callable[
+    [ChatState, "ChatGraphPromptBundle", ChatRuntimeResult],
+    None | Awaitable[None],
 ]
 
 
@@ -84,7 +93,7 @@ async def run_chat_graph_tail(
         captured_result = result
         return result
 
-    async def graph_persist(_: ChatState, result: ChatRuntimeResult):
+    async def graph_persist(chat_state: ChatState, result: ChatRuntimeResult):
         turn = ChatTurn(
             stored_user=user_content.stored,
             stored_assistant=result.stored_assistant,
@@ -122,6 +131,10 @@ async def run_chat_graph_session(
     call_chat_agent: ChatGraphSessionAgentCall,
     build_prompt_context: ChatGraphPromptCall,
     resolve_image_context: ChatGraphStateCall | None = None,
+    persist_chat_turn: ChatGraphPersistSideEffect | None = None,
+    update_trial_accounting: ChatGraphPostprocessCall | None = None,
+    update_tts_candidate: ChatGraphPostprocessCall | None = None,
+    schedule_compression: ChatGraphPostprocessCall | None = None,
 ) -> ChatGraphSessionResult | None:
     prompt_bundle: ChatGraphPromptBundle | None = None
     agent_started = False
@@ -155,19 +168,37 @@ async def run_chat_graph_session(
         captured_result = result
         return result
 
-    async def graph_persist(_: ChatState, result: ChatRuntimeResult):
+    async def graph_persist(chat_state: ChatState, result: ChatRuntimeResult):
         if prompt_bundle is None:
             return None
         turn = ChatTurn(
             stored_user=prompt_bundle.user_content.stored,
             stored_assistant=result.stored_assistant,
         )
-        return persisted_turn_from_chat_turn(
+        persisted_turn = persisted_turn_from_chat_turn(
             request,
             prompt_bundle.prompt_context,
             turn,
             message_type=message_type,
         )
+        if persist_chat_turn is not None:
+            await _maybe_await(persist_chat_turn(chat_state, prompt_bundle, result, persisted_turn))
+        return persisted_turn
+
+    async def graph_update_trial_accounting(chat_state: ChatState, result: ChatRuntimeResult) -> ChatState:
+        if prompt_bundle is not None and update_trial_accounting is not None:
+            await _maybe_await(update_trial_accounting(chat_state, prompt_bundle, result))
+        return chat_state
+
+    async def graph_update_tts_candidate(chat_state: ChatState, result: ChatRuntimeResult) -> ChatState:
+        if prompt_bundle is not None and update_tts_candidate is not None:
+            await _maybe_await(update_tts_candidate(chat_state, prompt_bundle, result))
+        return chat_state
+
+    async def graph_schedule_compression(chat_state: ChatState, result: ChatRuntimeResult) -> ChatState:
+        if prompt_bundle is not None and schedule_compression is not None:
+            await _maybe_await(schedule_compression(chat_state, prompt_bundle, result))
+        return chat_state
 
     try:
         execution = await ChatGraphRunner(
@@ -175,6 +206,9 @@ async def run_chat_graph_session(
             resolve_image_context=graph_resolve_image_context,
             build_prompt_context=graph_build_prompt_context,
             persist_turn=graph_persist,
+            update_trial_accounting=graph_update_trial_accounting,
+            update_tts_candidate=graph_update_tts_candidate,
+            schedule_compression=graph_schedule_compression,
         ).run(state)
     except Exception as exc:
         if agent_started:

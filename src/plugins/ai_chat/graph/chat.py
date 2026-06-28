@@ -91,6 +91,10 @@ ChatPersistHandler: TypeAlias = Callable[
     PersistedTurn | None | Awaitable[PersistedTurn | None],
 ]
 ChatStateHandler: TypeAlias = Callable[[ChatState], ChatState | Awaitable[ChatState]]
+ChatRuntimeStateHandler: TypeAlias = Callable[
+    [ChatState, ChatRuntimeResult],
+    ChatState | Awaitable[ChatState],
+]
 
 
 def initial_chat_state(
@@ -136,11 +140,17 @@ class ChatGraphRunner:
         resolve_image_context: ChatStateHandler | None = None,
         build_prompt_context: ChatStateHandler | None = None,
         persist_turn: ChatPersistHandler | None = None,
+        update_trial_accounting: ChatRuntimeStateHandler | None = None,
+        update_tts_candidate: ChatRuntimeStateHandler | None = None,
+        schedule_compression: ChatRuntimeStateHandler | None = None,
     ) -> None:
         self.call_chat_agent = call_chat_agent
         self.resolve_image_context = resolve_image_context
         self.build_prompt_context = build_prompt_context
         self.persist_turn = persist_turn
+        self.update_trial_accounting = update_trial_accounting
+        self.update_tts_candidate = update_tts_candidate
+        self.schedule_compression = schedule_compression
 
     async def run(self, state: ChatState) -> ChatGraphExecution:
         node_trace: list[ChatNode] = []
@@ -172,6 +182,15 @@ class ChatGraphRunner:
             elif node == ChatNode.PERSIST_TURN:
                 if runtime_result is not None and self.persist_turn is not None:
                     persisted_turn = await _maybe_await(self.persist_turn(current, runtime_result))
+            elif node == ChatNode.UPDATE_TRIAL_ACCOUNTING:
+                if runtime_result is not None and self.update_trial_accounting is not None:
+                    current = await _maybe_await(self.update_trial_accounting(current, runtime_result))
+            elif node == ChatNode.UPDATE_TTS_CANDIDATE:
+                if runtime_result is not None and self.update_tts_candidate is not None:
+                    current = await _maybe_await(self.update_tts_candidate(current, runtime_result))
+            elif node == ChatNode.SCHEDULE_COMPRESSION:
+                if runtime_result is not None and self.schedule_compression is not None:
+                    current = await _maybe_await(self.schedule_compression(current, runtime_result))
             elif node == ChatNode.RENDER_RESPONSE:
                 if runtime_result is None:
                     current = self._with_graph_artifact(

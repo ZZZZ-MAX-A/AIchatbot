@@ -39,6 +39,18 @@ class GraphContractTests(unittest.TestCase):
         )
         self.assertLess(
             sequence.index(self.chat.ChatNode.PERSIST_TURN),
+            sequence.index(self.chat.ChatNode.UPDATE_TRIAL_ACCOUNTING),
+        )
+        self.assertLess(
+            sequence.index(self.chat.ChatNode.UPDATE_TRIAL_ACCOUNTING),
+            sequence.index(self.chat.ChatNode.UPDATE_TTS_CANDIDATE),
+        )
+        self.assertLess(
+            sequence.index(self.chat.ChatNode.UPDATE_TTS_CANDIDATE),
+            sequence.index(self.chat.ChatNode.SCHEDULE_COMPRESSION),
+        )
+        self.assertLess(
+            sequence.index(self.chat.ChatNode.SCHEDULE_COMPRESSION),
             sequence.index(self.chat.ChatNode.RENDER_RESPONSE),
         )
 

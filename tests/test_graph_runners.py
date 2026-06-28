@@ -231,6 +231,63 @@ class ChatGraphRunnerTests(unittest.TestCase):
         self.assertEqual(execution.state.vision.context_text, "image context")
         self.assertEqual(execution.state.history, [{"role": "system", "content": "ctx"}])
 
+    def test_chat_graph_runner_runs_postprocess_hooks_after_agent(self):
+        state = self.make_chat_state()
+        calls = []
+        persisted = self.modules["memory"].PersistedTurn(
+            session_key="private:10001",
+            user_content="hello",
+            assistant_content="reply",
+            message_type="private",
+            user_id="10001",
+            group_id=None,
+        )
+
+        async def call_chat_agent(chat_state):
+            calls.append(("agent", chat_state.text))
+            return self.contracts.ChatRuntimeResult(
+                reply="reply",
+                stored_assistant="reply",
+            )
+
+        async def persist_turn(chat_state, runtime_result):
+            calls.append(("persist", chat_state.text, runtime_result.reply))
+            return persisted
+
+        async def update_trial_accounting(chat_state, runtime_result):
+            calls.append(("trial", chat_state.text, runtime_result.reply))
+            return chat_state
+
+        async def update_tts_candidate(chat_state, runtime_result):
+            calls.append(("tts", chat_state.text, runtime_result.reply))
+            return chat_state
+
+        async def schedule_compression(chat_state, runtime_result):
+            calls.append(("compression", chat_state.text, runtime_result.reply))
+            return chat_state
+
+        execution = asyncio.run(
+            self.chat.ChatGraphRunner(
+                call_chat_agent,
+                persist_turn=persist_turn,
+                update_trial_accounting=update_trial_accounting,
+                update_tts_candidate=update_tts_candidate,
+                schedule_compression=schedule_compression,
+            ).run(state)
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("agent", "hello"),
+                ("persist", "hello", "reply"),
+                ("trial", "hello", "reply"),
+                ("tts", "hello", "reply"),
+                ("compression", "hello", "reply"),
+            ],
+        )
+        self.assertIs(execution.result.persisted_turn, persisted)
+
     def test_chat_graph_runner_rejects_empty_input_before_agent_call(self):
         state = self.make_chat_state(text="")
 
