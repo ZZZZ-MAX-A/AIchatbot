@@ -137,6 +137,7 @@ cd D:\AIchatbot
 - `v0.9`: 视觉识图与图片上下文，已实现第一批。
 - `v1.0`: 稳定性与双通道诊断，已实现第一批。
 - `v1.2`: 记忆系统运行结构，短时 40 条、正式压缩 80/40、空窗场景摘要和手动长期记忆。
+- `v1.3`: LangGraph Agent Runtime 设计，规划主 Agent / 聊天 Agent 分离、权限图、工具风险分级和主人审批。
 
 ## 文档
 
@@ -150,6 +151,7 @@ cd D:\AIchatbot
 - [v0.7 群聊主动回复方案](docs/v0.7-group-auto-reply.md)
 - [v0.8 主人通知与转告方案](docs/v0.8-owner-notifications.md)
 - [v1.2 记忆系统运行设计](docs/v1.2-memory-runtime.md)
+- [v1.3 LangGraph Agent Runtime 设计](docs/v1.3-langgraph-agent-runtime.md)
 - [v0.9 视觉识图与图片上下文方案](docs/v0.9-vision-image-context.md)
 - [v1.0 稳定性与双通道诊断方案](docs/v1.0-diagnostics-and-operations.md)
 - [运行维护手册](docs/runbook.md)
