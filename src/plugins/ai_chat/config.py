@@ -47,6 +47,23 @@ class AiChatConfig:
     openai_model: str
     ai_temperature: float
     ai_timeout_seconds: int
+    enable_main_agent: bool
+    main_agent_owner_only: bool
+    main_agent_allow_group: bool
+    main_agent_max_steps: int
+    main_agent_require_approval_for_writes: bool
+    enable_agent_web: bool
+    enable_agent_local_write: bool
+    enable_agent_external_write: bool
+    enable_agent_shell: bool
+    main_llm_api_key: str
+    main_llm_base_url: str
+    main_llm_model: str
+    main_llm_timeout_seconds: int
+    chat_llm_api_key: str
+    chat_llm_base_url: str
+    chat_llm_model: str
+    chat_llm_timeout_seconds: int
     enable_vision: bool
     vision_ollama_base_url: str
     vision_model: str
@@ -113,6 +130,23 @@ def load_config() -> AiChatConfig:
         openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
         ai_temperature=_float_env("AI_TEMPERATURE", 0.7),
         ai_timeout_seconds=_int_env("AI_TIMEOUT_SECONDS", 60),
+        enable_main_agent=_bool_env("ENABLE_MAIN_AGENT", False),
+        main_agent_owner_only=_bool_env("MAIN_AGENT_OWNER_ONLY", True),
+        main_agent_allow_group=_bool_env("MAIN_AGENT_ALLOW_GROUP", False),
+        main_agent_max_steps=_int_env("MAIN_AGENT_MAX_STEPS", 5),
+        main_agent_require_approval_for_writes=_bool_env("MAIN_AGENT_REQUIRE_APPROVAL_FOR_WRITES", True),
+        enable_agent_web=_bool_env("ENABLE_AGENT_WEB", False),
+        enable_agent_local_write=_bool_env("ENABLE_AGENT_LOCAL_WRITE", False),
+        enable_agent_external_write=_bool_env("ENABLE_AGENT_EXTERNAL_WRITE", False),
+        enable_agent_shell=_bool_env("ENABLE_AGENT_SHELL", False),
+        main_llm_api_key=os.getenv("MAIN_LLM_API_KEY", ""),
+        main_llm_base_url=os.getenv("MAIN_LLM_BASE_URL", "https://api.openai.com/v1"),
+        main_llm_model=os.getenv("MAIN_LLM_MODEL", "gpt-4.1-mini"),
+        main_llm_timeout_seconds=_int_env("MAIN_LLM_TIMEOUT_SECONDS", 60),
+        chat_llm_api_key=os.getenv("CHAT_LLM_API_KEY", os.getenv("OPENAI_API_KEY", "")),
+        chat_llm_base_url=os.getenv("CHAT_LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
+        chat_llm_model=os.getenv("CHAT_LLM_MODEL", os.getenv("OPENAI_MODEL", "deepseek-v4-flash")),
+        chat_llm_timeout_seconds=_int_env("CHAT_LLM_TIMEOUT_SECONDS", _int_env("AI_TIMEOUT_SECONDS", 60)),
         enable_vision=_bool_env("ENABLE_VISION", True),
         vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         vision_model=os.getenv("VISION_MODEL", "qwen2.5vl:3b"),

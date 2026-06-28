@@ -5,6 +5,9 @@ description = "A QQ AI chatbot powered by NoneBot2, OneBot, and DeepSeek."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "langchain>=1.0.0",
+    "langchain-openai>=1.0.0",
+    "langgraph>=1.0.0",
     "nonebot2[fastapi,httpx,websockets]>=2.4.0",
     "nonebot-adapter-onebot>=2.4.0",
     "openai>=1.0.0",
