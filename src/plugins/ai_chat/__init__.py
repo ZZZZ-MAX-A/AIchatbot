@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 
+import httpx
 from nonebot import get_driver, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.matcher import Matcher
@@ -52,11 +53,24 @@ from .diagnostics import (
     format_image_cache_status,
     format_recent_errors,
     format_vision_status,
+    recent_error_lines,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
 from .graph import (
     ActorRole,
     ChatState,
+    DiagnosticsGraphRunner,
+    DiagnosticsState,
+    DiagnosticsView,
+    MemoryContext,
+    MemoryContextGraphExecution,
+    MemoryContextGraphRunner,
+    MemoryPersistGraphExecution,
+    MemoryPersistGraphRunner,
+    MemoryPersistState,
+    NotificationGraphExecution,
+    NotificationGraphRunner,
+    NotificationState,
     SessionType,
     ShadowChatSnapshot,
     ShadowChatValidation,
@@ -69,6 +83,12 @@ from .graph import (
     runtime_state_from_chat_request,
     shadow_chat_snapshot_from_state,
     validate_shadow_chat_snapshot,
+    VisionContext,
+    VisionGraphExecution,
+    VisionGraphRunner,
+    VoiceGraphRunner,
+    VoiceMode,
+    VoiceState,
 )
 from .manual_memory import (
     MANUAL_FACT_TYPE,
@@ -113,7 +133,9 @@ from .vision import (
     describe_images,
     event_has_image,
     format_image_descriptions,
-    image_urls_from_event,
+    image_refs_from_event,
+    is_direct_image_source,
+    sanitize_vision_description,
     vision_safety_context,
 )
 from .voice import (
@@ -402,46 +424,242 @@ def combine_text_and_images(text: str, image_descriptions: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-async def resolve_chat_image_context(event: MessageEvent, text: str, has_image: bool) -> ChatImageContext:
-    image_urls = image_urls_from_event(event) if has_image else []
-    if isinstance(event, PrivateMessageEvent) and image_urls and not text:
-        wait_seconds = max(config.vision_private_image_wait_seconds, 0)
-        if wait_seconds > 0:
-            cache_image_urls(event, image_urls)
-            await asyncio.sleep(wait_seconds)
-            if not cached_image_is_current(event, image_urls):
-                return ChatImageContext([], False, should_continue=False)
-            pop_cached_image_urls(event)
-    elif not image_urls and text:
-        if isinstance(event, PrivateMessageEvent) or (
-            isinstance(event, GroupMessageEvent) and is_image_followup_text(text)
-        ):
-            image_urls = pop_cached_image_urls(event)
-    return ChatImageContext(image_urls, bool(image_urls) or has_image)
+def _append_unique_image_source(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
 
 
-def build_chat_prompt_context(
+def _is_local_image_source(value: str) -> bool:
+    return value.startswith("file://") or Path(value).is_absolute() or Path(value).exists()
+
+
+def _is_readable_image_source(value: str) -> bool:
+    return is_direct_image_source(value) or _is_local_image_source(value)
+
+
+def _image_source_from_payload(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for field in ("url", "file", "path", "file_id"):
+        value = str(payload.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def resolve_onebot_image_sources(
+    bot: Bot | None,
+    event: MessageEvent,
+    refs: list[str],
+) -> list[str]:
+    sources: list[str] = []
+    unresolved_refs: list[str] = []
+    for ref in refs:
+        if _is_readable_image_source(ref) or bot is None:
+            _append_unique_image_source(sources, ref)
+            continue
+
+        payload: object | None = None
+        last_error: Exception | None = None
+        for params in ({"file": ref}, {"file_id": ref}):
+            try:
+                payload = await bot.call_api("get_image", **params)
+                break
+            except Exception as exc:
+                last_error = exc
+
+        resolved = _image_source_from_payload(payload)
+        if resolved:
+            _append_unique_image_source(sources, resolved)
+        else:
+            if last_error is not None:
+                log_background_error(last_error, event)
+            _append_unique_image_source(unresolved_refs, ref)
+    for ref in unresolved_refs:
+        _append_unique_image_source(sources, ref)
+    return sources
+
+
+async def run_vision_graph(
+    bot: Bot | None,
+    event: MessageEvent,
+    text: str,
+    has_image: bool,
+    *,
+    initial_urls: list[str] | None = None,
+    apply_cache_policy: bool = True,
+    describe: bool = True,
+    cache_only: bool = False,
+) -> VisionGraphExecution:
+    state = VisionContext(
+        text=text,
+        has_image=has_image,
+        has_image_context=bool(initial_urls) or has_image,
+        image_urls=list(initial_urls or []),
+    )
+
+    async def extract_image_urls_node(current: VisionContext) -> VisionContext:
+        if initial_urls is None:
+            image_refs = image_refs_from_event(event) if current.has_image else []
+        else:
+            image_refs = list(initial_urls)
+        if image_refs:
+            current.image_urls = await resolve_onebot_image_sources(bot, event, image_refs)
+        else:
+            current.image_urls = []
+        current.has_image_context = bool(current.image_urls) or current.has_image_context
+        return current
+
+    async def apply_image_cache_policy_node(current: VisionContext) -> VisionContext:
+        if not apply_cache_policy:
+            return current
+
+        if cache_only:
+            cache_image_urls(event, current.image_urls)
+            current.should_continue = False
+            current.has_image_context = bool(current.image_urls) or current.has_image_context
+            return current
+
+        if isinstance(event, PrivateMessageEvent) and current.image_urls and not current.text:
+            wait_seconds = max(config.vision_private_image_wait_seconds, 0)
+            if wait_seconds > 0:
+                cache_image_urls(event, current.image_urls)
+                await asyncio.sleep(wait_seconds)
+                if not cached_image_is_current(event, current.image_urls):
+                    current.image_urls = []
+                    current.has_image_context = False
+                    current.should_continue = False
+                    return current
+                pop_cached_image_urls(event)
+        elif not current.image_urls and current.text:
+            if isinstance(event, PrivateMessageEvent) or (
+                isinstance(event, GroupMessageEvent) and is_image_followup_text(current.text)
+            ):
+                current.image_urls = pop_cached_image_urls(event)
+
+        current.has_image_context = bool(current.image_urls) or current.has_image
+        return current
+
+    async def check_vision_access_node(current: VisionContext) -> VisionContext:
+        return current
+
+    async def describe_images_node(current: VisionContext) -> VisionContext:
+        if not describe or not current.has_image_context:
+            return current
+        if current.image_urls:
+            try:
+                current.descriptions = await describe_images(config, current.image_urls)
+            except Exception as exc:
+                log_ai_event_error(exc, event)
+                current.descriptions = [f"图片识别失败：{type(exc).__name__}"]
+            return current
+        if config.enable_vision:
+            current.descriptions = ["无法读取图片地址。"]
+        return current
+
+    async def sanitize_image_context_node(current: VisionContext) -> VisionContext:
+        if describe:
+            current.descriptions = [
+                sanitize_vision_description(description)
+                for description in current.descriptions
+            ]
+            current.context_text = format_image_descriptions(current.descriptions)
+        return current
+
+    async def return_image_artifact_node(current: VisionContext) -> VisionContext:
+        return current
+
+    runner = VisionGraphRunner(
+        extract_image_urls=extract_image_urls_node,
+        apply_image_cache_policy=apply_image_cache_policy_node,
+        check_vision_access=check_vision_access_node,
+        describe_images=describe_images_node,
+        sanitize_image_context=sanitize_image_context_node,
+        return_image_artifact=return_image_artifact_node,
+    )
+    return await runner.run(state)
+
+
+async def resolve_chat_image_context(
+    bot: Bot,
+    event: MessageEvent,
+    text: str,
+    has_image: bool,
+) -> ChatImageContext:
+    execution = await run_vision_graph(
+        bot,
+        event,
+        text,
+        has_image,
+        describe=False,
+    )
+    return ChatImageContext(
+        list(execution.result.image_urls),
+        execution.result.has_image_context,
+        should_continue=execution.result.should_continue,
+    )
+
+
+async def run_memory_context_graph(
+    event: MessageEvent,
+    key: str,
+) -> MemoryContextGraphExecution:
+    state = MemoryContext(
+        session_key=key,
+        message_type=event.message_type,
+        user_id=user_id(event),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
+        system_contexts=[
+            language_reset_context(),
+            speaker_identity_context(event),
+            owner_public_context(),
+        ],
+    )
+
+    async def ensure_gap_scene(current: MemoryContext) -> MemoryContext:
+        try:
+            await ensure_gap_scene_summaries(config, current.session_key)
+        except Exception as exc:
+            current.gap_scene_error = f"{type(exc).__name__}: {exc}"
+            log_background_error(exc, event)
+        return current
+
+    def build_manual_memory_context(current: MemoryContext) -> MemoryContext:
+        current.manual_long_term_context = manual_long_term_context(event)
+        if current.manual_long_term_context:
+            current.system_contexts.append(current.manual_long_term_context)
+        return current
+
+    def build_history_node(current: MemoryContext) -> MemoryContext:
+        current.history = build_history(
+            current.session_key,
+            config.max_context_messages,
+            config.max_session_summaries_in_context,
+            config.max_gap_scene_summaries_in_context,
+            current.system_contexts,
+        )
+        current.rule_reminder_context = rule_reminder_context(current.session_key)
+        if current.rule_reminder_context:
+            current.history.append({"role": "system", "content": current.rule_reminder_context})
+        return current
+
+    runner = MemoryContextGraphRunner(
+        ensure_gap_scene=ensure_gap_scene,
+        build_manual_memory_context=build_manual_memory_context,
+        build_history=build_history_node,
+    )
+    return await runner.run(state)
+
+
+async def build_chat_prompt_context(
     event: MessageEvent,
     key: str,
     *,
     semantic_voice: bool,
     has_image_context: bool,
 ) -> ChatPromptContext:
-    history = build_history(
-        key,
-        config.max_context_messages,
-        config.max_session_summaries_in_context,
-        config.max_gap_scene_summaries_in_context,
-        [
-            language_reset_context(),
-            speaker_identity_context(event),
-            owner_public_context(),
-            manual_long_term_context(event),
-        ],
-    )
-    reminder = rule_reminder_context(key)
-    if reminder:
-        history.append({"role": "system", "content": reminder})
+    memory_execution = await run_memory_context_graph(event, key)
+    history = list(memory_execution.result.history)
     if semantic_voice:
         history.append({"role": "system", "content": semantic_voice_instruction()})
     if has_image_context:
@@ -453,20 +671,20 @@ def build_chat_prompt_context(
 
 
 async def describe_chat_images(
+    bot: Bot,
     event: MessageEvent,
     image_context: ChatImageContext,
 ) -> list[str]:
-    if not image_context.has_context:
-        return []
-    if image_context.urls:
-        try:
-            return await describe_images(config, image_context.urls)
-        except Exception as exc:
-            log_ai_event_error(exc, event)
-            return [f"图片识别失败：{type(exc).__name__}"]
-    if config.enable_vision:
-        return ["无法读取图片地址。"]
-    return []
+    execution = await run_vision_graph(
+        bot,
+        event,
+        "",
+        image_context.has_context,
+        initial_urls=list(image_context.urls),
+        apply_cache_policy=False,
+        describe=True,
+    )
+    return list(execution.result.artifact.descriptions)
 
 
 def build_chat_user_content(
@@ -552,6 +770,171 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
         f"试用消息：{trials['trial_message_count']}",
     ]
     return lines
+
+
+async def tts_health_snapshot() -> dict[str, object]:
+    if not config.enable_tts:
+        return {
+            "enabled": False,
+            "ok": False,
+            "loaded": None,
+            "language": "",
+            "detail": "disabled",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            response = await client.get(f"{config.tts_service_url.rstrip('/')}/health")
+        if response.status_code != 200:
+            return {
+                "enabled": True,
+                "ok": False,
+                "loaded": None,
+                "language": "",
+                "detail": f"HTTP {response.status_code}",
+            }
+        payload = response.json()
+        return {
+            "enabled": True,
+            "ok": bool(payload.get("ok")),
+            "loaded": payload.get("loaded"),
+            "language": str(payload.get("language") or ""),
+            "detail": "ok" if payload.get("ok") else "service returned not ok",
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "ok": False,
+            "loaded": None,
+            "language": "",
+            "detail": f"{type(exc).__name__}",
+        }
+
+
+def _diagnostics_bool_label(value: object) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "未知"
+
+
+def diagnostics_graph_runtime_lines(state: DiagnosticsState) -> list[str]:
+    flags = state.runtime_flags
+    tts = state.tts_health
+    return [
+        "",
+        "DiagnosticsGraph：",
+        "图状态：已启用",
+        f"运行环境：{flags.get('driver_env', 'unknown')}",
+        f"ChatGraph：{'开启' if flags.get('enable_chat_graph_runtime') else '关闭'}",
+        f"MainAgent：{'开启' if flags.get('enable_main_agent') else '关闭'}",
+        f"TTS：{'开启' if flags.get('enable_tts') else '关闭'}",
+        f"TTS 服务：{'正常' if tts.get('ok') else '异常'} ({tts.get('detail', 'unknown')})",
+        f"IndexTTS2 已加载：{_diagnostics_bool_label(tts.get('loaded'))}",
+        f"TTS 语言：{tts.get('language') or '未知'}",
+        f"图片缓存：{state.image_cache_stats.get('total', 0)} 条",
+        f"最近错误：{len(state.recent_errors)} 条",
+        f"消息总数：{state.memory_stats.get('message_count', '未知')}",
+        f"摘要总数：{state.memory_stats.get('summary_count', '未知')}",
+    ]
+
+
+def tts_status_reply_lines() -> list[str]:
+    candidate = get_last_tts_candidate()
+    lines = tts_status_lines()
+    if candidate is None:
+        lines.append("上一条可朗读回复：无")
+    else:
+        lines.append(f"上一条可朗读回复：{candidate.created_at.isoformat(timespec='seconds')}")
+        lines.append(f"可朗读长度：{len(candidate.speakable_text)} 字")
+    return lines
+
+
+def recent_errors_reply(errors: tuple[str, ...]) -> str:
+    if not errors:
+        return "最近错误：\n暂无。"
+    lines = ["最近错误："]
+    lines.extend(f"{index}. {line}" for index, line in enumerate(errors, 1))
+    return "\n".join(lines)
+
+
+async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = DiagnosticsView.FULL):
+    state = DiagnosticsState(
+        view=view,
+        requester_id=user_id(event),
+        session_key=session_key(event),
+    )
+
+    async def read_config_snapshot(current: DiagnosticsState) -> DiagnosticsState:
+        current.config_snapshot = {
+            "bot_name": config.bot_name,
+            "chat_model": config.openai_model,
+            "vision_model": config.vision_model,
+            "tts_service_url": config.tts_service_url,
+        }
+        return current
+
+    async def read_runtime_flags(current: DiagnosticsState) -> DiagnosticsState:
+        driver = get_driver()
+        current.runtime_flags = {
+            "driver_env": driver.env,
+            "enable_chat_graph_runtime": config.enable_chat_graph_runtime,
+            "enable_main_agent": config.enable_main_agent,
+            "enable_tts": config.enable_tts,
+            "enable_vision": config.enable_vision,
+            "enable_memory_compression": config.enable_memory_compression,
+        }
+        return current
+
+    async def check_tts_health(current: DiagnosticsState) -> DiagnosticsState:
+        current.tts_health = await tts_health_snapshot()
+        return current
+
+    async def read_recent_errors(current: DiagnosticsState) -> DiagnosticsState:
+        current.recent_errors = tuple(recent_error_lines(5))
+        return current
+
+    async def read_memory_stats(current: DiagnosticsState) -> DiagnosticsState:
+        current.memory_stats = memory_stats()
+        return current
+
+    async def read_image_cache_stats(current: DiagnosticsState) -> DiagnosticsState:
+        current.image_cache_stats = image_cache_stats()
+        return current
+
+    async def render_diagnostic_reply(current: DiagnosticsState) -> DiagnosticsState:
+        if current.view == DiagnosticsView.CONFIG:
+            current.reply_text = format_config_status(config)
+        elif current.view == DiagnosticsView.VISION:
+            current.reply_text = format_vision_status(config, current.image_cache_stats)
+        elif current.view == DiagnosticsView.RECENT_ERRORS:
+            current.reply_text = recent_errors_reply(current.recent_errors)
+        elif current.view == DiagnosticsView.IMAGE_CACHE:
+            current.reply_text = format_image_cache_status(config, current.image_cache_stats)
+        elif current.view == DiagnosticsView.MEMORY:
+            current.reply_text = "\n".join(memory_status_lines(event))
+        elif current.view == DiagnosticsView.TTS:
+            current.reply_text = "\n".join(tts_status_reply_lines())
+        else:
+            base_reply = await format_diagnostics(config, current.image_cache_stats)
+            current.reply_text = "\n".join(
+                [
+                    base_reply,
+                    *diagnostics_graph_runtime_lines(current),
+                ]
+            )
+        return current
+
+    runner = DiagnosticsGraphRunner(
+        read_config_snapshot=read_config_snapshot,
+        read_runtime_flags=read_runtime_flags,
+        check_tts_health=check_tts_health,
+        read_recent_errors=read_recent_errors,
+        read_memory_stats=read_memory_stats,
+        read_image_cache_stats=read_image_cache_stats,
+        render_diagnostic_reply=render_diagnostic_reply,
+    )
+    return await runner.run(state)
 
 
 def summary_status_lines(key: str) -> list[str]:
@@ -765,6 +1148,81 @@ def check_owner_notification_cooldown(event: MessageEvent) -> tuple[bool, str | 
     return (True, None) if ok else (False, "转告过于频繁，请稍后再试。")
 
 
+async def run_notification_graph(
+    bot: Bot,
+    event: MessageEvent,
+    content: str,
+) -> NotificationGraphExecution:
+    state = NotificationState(
+        content=content,
+        requester_id=user_id(event),
+        session_key=session_key(event),
+        owner_user_id=str(config.bot_owner_qq),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
+    )
+
+    async def check_notification_policy(current: NotificationState) -> NotificationState:
+        allowed, reason = can_tell_owner(event)
+        if allowed:
+            return current
+        current.error = "policy_denied"
+        current.deny_reason = reason
+        current.source_reply = reason or ""
+        current.should_reply_source = bool(reason)
+        return current
+
+    async def validate_notification_content(current: NotificationState) -> NotificationState:
+        validation_error = validate_owner_notification_content(
+            current.content,
+            config.owner_notification_max_length,
+        )
+        if validation_error:
+            current.error = "validation_failed"
+            current.source_reply = validation_error
+        return current
+
+    async def check_notification_cooldown(current: NotificationState) -> NotificationState:
+        cooldown_ok, cooldown_reason = check_owner_notification_cooldown(event)
+        if not cooldown_ok:
+            current.error = "cooldown"
+            current.source_reply = cooldown_reason or "转告过于频繁，请稍后再试。"
+        return current
+
+    async def format_owner_notification_node(current: NotificationState) -> NotificationState:
+        current.target_message = format_owner_notification(event, current.content)
+        return current
+
+    async def send_owner_private_message(current: NotificationState) -> NotificationState:
+        try:
+            await bot.call_api(
+                "send_private_msg",
+                user_id=int(config.bot_owner_qq),
+                message=current.target_message,
+            )
+        except Exception as exc:
+            log_ai_event_error(exc, event)
+            current.error = "send_failed"
+            current.source_reply = "转告发送失败，请稍后再试。"
+            return current
+        current.sent = True
+        return current
+
+    async def render_source_reply(current: NotificationState) -> NotificationState:
+        current.source_reply = "已转告主人。"
+        current.should_reply_source = True
+        return current
+
+    runner = NotificationGraphRunner(
+        check_notification_policy=check_notification_policy,
+        validate_notification_content=validate_notification_content,
+        check_notification_cooldown=check_notification_cooldown,
+        format_owner_notification=format_owner_notification_node,
+        send_owner_private_message=send_owner_private_message,
+        render_source_reply=render_source_reply,
+    )
+    return await runner.run(state)
+
+
 def check_tts_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
     if is_owner(config, event):
         ok, wait_seconds = check_rate_limit(
@@ -845,6 +1303,302 @@ async def handle_direct_or_last_tts(
         log_ai_event_error(exc, event)
         await matcher.finish("语音生成失败了，请稍后再试。")
     await matcher.finish()
+    return True
+
+
+def voice_mode_from_intent(intent: VoiceIntent) -> VoiceMode:
+    return VoiceMode(intent.type.value)
+
+
+async def run_voice_graph_intent(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    intent: VoiceIntent,
+) -> bool:
+    mode = voice_mode_from_intent(intent)
+    state = VoiceState(
+        mode=mode,
+        source_text=intent.text if mode == VoiceMode.DIRECT_TEXT else "",
+        refresh_cache=intent.refresh_cache,
+        semantic_goal=intent.semantic_goal,
+        preserve_original=intent.preserve_original,
+        language=intent.language,
+    )
+    adapted_holder: dict[str, object] = {}
+    error_holder: dict[str, Exception] = {}
+    semantic_context: dict[str, object] = {}
+
+    def set_error(current: VoiceState, error: str) -> VoiceState:
+        current.error = error
+        return current
+
+    async def check_voice_policy(current: VoiceState) -> VoiceState:
+        if not isinstance(event, PrivateMessageEvent):
+            return set_error(current, "private_only")
+        if not config.enable_tts:
+            return set_error(current, "tts_disabled")
+        if not is_owner(config, event):
+            return set_error(current, "not_owner")
+        cooldown_ok, cooldown_reason = check_tts_cooldown(event)
+        if not cooldown_ok:
+            return set_error(current, f"cooldown:{cooldown_reason or '语音生成冷却中，请稍后再试。'}")
+        return current
+
+    async def select_text_source(current: VoiceState) -> VoiceState:
+        if current.mode == VoiceMode.LAST_REPLY:
+            candidate = get_last_tts_candidate()
+            if candidate is None:
+                return set_error(current, "no_last_reply")
+            current.source_text = candidate.raw_text
+            current.voice_text = candidate.speakable_text
+        return current
+
+    async def maybe_call_chat_agent(current: VoiceState) -> VoiceState:
+        if current.mode != VoiceMode.SEMANTIC_REPLY:
+            return current
+
+        options = ChatOptions(
+            semantic_voice=True,
+            semantic_goal=current.semantic_goal,
+            tts_refresh_cache=current.refresh_cache,
+            preserve_original=current.preserve_original,
+            tts_language=current.language,
+        )
+        request = await prepare_chat_request(bot, event, matcher, options)
+        if request is None:
+            return set_error(current, "empty_chat_request")
+
+        shadow_state = safe_build_shadow_chat_state(event, request, options)
+        safe_record_shadow_chat_snapshot(event, shadow_state)
+
+        if config.enable_chat_graph_runtime and shadow_state is not None:
+            try:
+                graph_session = await run_chat_graph_session_runtime(
+                    bot,
+                    event,
+                    matcher,
+                    request,
+                    options,
+                    shadow_state,
+                    send_voice=False,
+                    persist_side_effects=False,
+                )
+            except ChatGraphSessionCommittedError as exc:
+                log_background_error(exc.__cause__ or exc, event)
+                return set_error(current, "chat_graph_committed")
+            except Exception as exc:
+                log_background_error(exc, event)
+            else:
+                if graph_session is None:
+                    return set_error(current, "empty_chat_response")
+                result = graph_session.runtime_result
+                voice_text = result.voice_text if result.voice_text is not None else result.reply
+                current.source_text = voice_text
+                current.voice_text = voice_text
+                semantic_context.update(
+                    {
+                        "request": request,
+                        "options": options,
+                        "prompt_context": graph_session.prompt_context,
+                        "user_content": graph_session.user_content,
+                        "result": result,
+                        "shadow_state": graph_session.execution.state,
+                    }
+                )
+                return current
+
+        prompt_context = await build_chat_prompt_context(
+            event,
+            request.key,
+            semantic_voice=True,
+            has_image_context=request.image_context.has_context,
+        )
+        image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
+        safe_record_shadow_chat_snapshot(event, shadow_state)
+        user_content = build_chat_user_content(
+            request.text,
+            image_descriptions,
+            semantic_voice=True,
+            semantic_goal=current.semantic_goal,
+            preserve_original=current.preserve_original,
+        )
+        if not user_content.for_llm:
+            return set_error(current, "empty_chat_request")
+        shadow_state = safe_apply_shadow_prompt_context(
+            event,
+            shadow_state,
+            prompt_context,
+            user_content,
+        )
+        safe_record_shadow_chat_snapshot(event, shadow_state)
+
+        result = await generate_legacy_chat_response(
+            bot,
+            event,
+            matcher,
+            prompt_context,
+            user_content,
+            options,
+            send_voice=False,
+        )
+        if result is None:
+            return set_error(current, "empty_chat_response")
+        voice_text = result.voice_text if result.voice_text is not None else result.reply
+        current.source_text = voice_text
+        current.voice_text = voice_text
+        semantic_context.update(
+            {
+                "request": request,
+                "options": options,
+                "prompt_context": prompt_context,
+                "user_content": user_content,
+                "result": result,
+                "shadow_state": shadow_state,
+            }
+        )
+        return current
+
+    async def adapt_voice_text(current: VoiceState) -> VoiceState:
+        raw_text = current.source_text or current.voice_text
+        adapted = adapt_speech_text(raw_text, force_language=current.language)
+        if not adapted.text:
+            return set_error(current, "empty_speakable_text")
+        max_chars = tts_text_limit(adapted.language)
+        if max_chars > 0 and len(adapted.text) > max_chars:
+            return set_error(current, "text_too_long")
+        adapted_holder["value"] = adapted
+        current.adapted_text = adapted.text
+        current.voice_text = adapted.text
+        return current
+
+    async def check_tts_health_node(current: VoiceState) -> VoiceState:
+        return current
+
+    async def generate_tts_node(current: VoiceState) -> VoiceState:
+        adapted = adapted_holder.get("value")
+        if adapted is None:
+            return set_error(current, "empty_speakable_text")
+        try:
+            tts_result = await request_tts(config, adapted, refresh_cache=current.refresh_cache)
+        except Exception as exc:
+            error_holder["exception"] = exc
+            return set_error(current, "tts_failed")
+        current.audio_path = tts_result.audio_path
+        current.duration_seconds = tts_result.duration_seconds
+        return current
+
+    async def send_private_record_node(current: VoiceState) -> VoiceState:
+        if current.audio_path is None:
+            return set_error(current, "tts_failed")
+        try:
+            await bot.call_api(
+                "send_private_msg",
+                user_id=int(event.user_id),
+                message=MessageSegment.record(str(current.audio_path)),
+            )
+        except Exception as exc:
+            error_holder["exception"] = exc
+            return set_error(current, "send_failed")
+        current.sent = True
+        return current
+
+    async def run_graph():
+        runner = VoiceGraphRunner(
+            check_voice_policy=check_voice_policy,
+            select_text_source=select_text_source,
+            maybe_call_chat_agent=maybe_call_chat_agent,
+            adapt_speech_text=adapt_voice_text,
+            check_tts_health=check_tts_health_node,
+            generate_tts=generate_tts_node,
+            send_private_record=send_private_record_node,
+        )
+        return await runner.run(state)
+
+    if mode == VoiceMode.SEMANTIC_REPLY:
+        async with session_lock(session_key(event)):
+            execution = await run_graph()
+            error = execution.result.error
+            if error:
+                return await finish_voice_graph_error(event, matcher, error, error_holder.get("exception"))
+            request = semantic_context["request"]
+            options = semantic_context["options"]
+            prompt_context = semantic_context["prompt_context"]
+            user_content = semantic_context["user_content"]
+            result = semantic_context["result"]
+            voice_text = execution.result.voice_text
+            committed_result = ChatRuntimeResult(
+                reply=result.reply,
+                stored_assistant=voice_text,
+                voice_text=voice_text,
+            )
+            shadow_state = safe_apply_shadow_runtime_result(
+                event,
+                semantic_context.get("shadow_state"),
+                request,
+                prompt_context,
+                user_content,
+                committed_result,
+                options,
+            )
+            safe_record_shadow_chat_snapshot(event, shadow_state)
+            mark_shadow_chat_stage(shadow_state, "finalizing")
+            safe_record_shadow_chat_snapshot(event, shadow_state)
+            await finalize_chat_result(
+                event,
+                matcher,
+                request.key,
+                prompt_context,
+                user_content,
+                committed_result,
+                options,
+            )
+            return True
+
+    execution = await run_graph()
+    error = execution.result.error
+    if error:
+        return await finish_voice_graph_error(event, matcher, error, error_holder.get("exception"))
+    await matcher.finish()
+    return True
+
+
+async def finish_voice_graph_error(
+    event: MessageEvent,
+    matcher: Matcher,
+    error: str,
+    exc: Exception | None = None,
+) -> bool:
+    if error == "private_only":
+        return False
+    if error == "tts_disabled":
+        await matcher.finish("语音功能当前未开启。")
+        return True
+    if error == "not_owner":
+        await matcher.finish("只有主人可以使用语音功能。")
+        return True
+    if error.startswith("cooldown:"):
+        await matcher.finish(error.removeprefix("cooldown:"))
+        return True
+    if error == "no_last_reply":
+        await matcher.finish("我现在没有可朗读的上一条回复。")
+        return True
+    if error == "text_too_long":
+        await matcher.finish(
+            f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
+        )
+        return True
+    if error in {"empty_chat_request", "empty_chat_response", "chat_graph_committed"}:
+        return True
+    if error in {"tts_failed", "send_failed"}:
+        if exc is not None:
+            log_ai_event_error(exc, event)
+        await matcher.finish("语音生成失败了，请稍后再试。")
+        return True
+    if exc is not None:
+        log_ai_event_error(exc, event)
+    await matcher.finish("语音生成失败了，请稍后再试。")
     return True
 
 
@@ -946,32 +1700,88 @@ def build_chat_turn(user_content: str, assistant_content: str) -> ChatTurn:
     return ChatTurn(stored_user=user_content, stored_assistant=assistant_content)
 
 
-def persist_chat_turn(
+async def run_memory_persist_graph(
+    key: str,
+    event: MessageEvent,
+    *,
+    prompt_context: ChatPromptContext | None = None,
+    turn: ChatTurn | None = None,
+    save_messages: bool = True,
+    schedule_compression: bool = False,
+) -> MemoryPersistGraphExecution:
+    state = MemoryPersistState(
+        session_key=key,
+        user_content=stored_user_content(event, turn.stored_user) if turn is not None else "",
+        assistant_content=turn.stored_assistant if turn is not None else "",
+        message_type=event.message_type,
+        user_id=prompt_context.user_id if prompt_context is not None else user_id(event),
+        group_id=(
+            prompt_context.group_id
+            if prompt_context is not None
+            else group_id(event) if isinstance(event, GroupMessageEvent) else None
+        ),
+    )
+
+    def save_user_message(current: MemoryPersistState) -> MemoryPersistState:
+        append_message(
+            current.session_key,
+            "user",
+            current.user_content,
+            current.message_type,
+            current.user_id,
+            current.group_id,
+        )
+        current.user_saved = True
+        return current
+
+    def save_assistant_message(current: MemoryPersistState) -> MemoryPersistState:
+        append_message(
+            current.session_key,
+            "assistant",
+            current.assistant_content,
+            current.message_type,
+            current.user_id,
+            current.group_id,
+        )
+        current.assistant_saved = True
+        return current
+
+    def schedule_compression_node(current: MemoryPersistState) -> MemoryPersistState:
+        asyncio.create_task(run_auto_compression(current.session_key, event))
+        current.compression_scheduled = True
+        return current
+
+    runner = MemoryPersistGraphRunner(
+        save_user_message=save_user_message if save_messages and turn is not None else None,
+        save_assistant_message=save_assistant_message if save_messages and turn is not None else None,
+        schedule_compression=schedule_compression_node if schedule_compression else None,
+    )
+    return await runner.run(state)
+
+
+async def persist_chat_turn(
     key: str,
     event: MessageEvent,
     prompt_context: ChatPromptContext,
     turn: ChatTurn,
-) -> None:
-    append_message(
+) -> MemoryPersistGraphExecution:
+    return await run_memory_persist_graph(
         key,
-        "user",
-        stored_user_content(event, turn.stored_user),
-        event.message_type,
-        prompt_context.user_id,
-        prompt_context.group_id,
-    )
-    append_message(
-        key,
-        "assistant",
-        turn.stored_assistant,
-        event.message_type,
-        prompt_context.user_id,
-        prompt_context.group_id,
+        event,
+        prompt_context=prompt_context,
+        turn=turn,
+        save_messages=True,
+        schedule_compression=False,
     )
 
 
-def schedule_chat_compression(key: str, event: MessageEvent) -> None:
-    asyncio.create_task(run_auto_compression(key, event))
+async def schedule_chat_compression(key: str, event: MessageEvent) -> MemoryPersistGraphExecution:
+    return await run_memory_persist_graph(
+        key,
+        event,
+        save_messages=False,
+        schedule_compression=True,
+    )
 
 
 def graph_actor_role_for_event(event: MessageEvent) -> ActorRole:
@@ -1145,6 +1955,7 @@ def safe_apply_shadow_runtime_result(
 
 
 async def prepare_chat_request(
+    bot: Bot,
     event: MessageEvent,
     matcher: Matcher,
     options: ChatOptions,
@@ -1161,7 +1972,7 @@ async def prepare_chat_request(
 
     await check_message_limits(event, matcher, text, options.silent_limit_rejection)
 
-    image_context = await resolve_chat_image_context(event, text, has_image)
+    image_context = await resolve_chat_image_context(bot, event, text, has_image)
     if not image_context.should_continue:
         return None
 
@@ -1199,6 +2010,8 @@ async def generate_legacy_chat_response(
     prompt_context: ChatPromptContext,
     user_content: ChatUserContent,
     options: ChatOptions,
+    *,
+    send_voice: bool = True,
 ) -> ChatRuntimeResult | None:
     result = await generate_chat_text_response(event, matcher, prompt_context, user_content)
     if result is None:
@@ -1208,13 +2021,14 @@ async def generate_legacy_chat_response(
     if options.semantic_voice:
         try:
             voice_text = reply
-            await send_tts_record(
-                bot,
-                event,
-                voice_text,
-                refresh_cache=options.tts_refresh_cache,
-                force_language="zh",
-            )
+            if send_voice:
+                await send_tts_record(
+                    bot,
+                    event,
+                    voice_text,
+                    refresh_cache=options.tts_refresh_cache,
+                    force_language="zh",
+                )
         except ValueError:
             await matcher.finish(
                 f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
@@ -1288,7 +2102,7 @@ async def finalize_chat_result(
     options: ChatOptions,
 ) -> None:
     turn = build_chat_turn(user_content.stored, result.stored_assistant)
-    persist_chat_turn(
+    await persist_chat_turn(
         key,
         event,
         prompt_context,
@@ -1299,13 +2113,13 @@ async def finalize_chat_result(
     if options.semantic_voice:
         voice_text = result.voice_text if result.voice_text is not None else result.reply
         set_last_tts_candidate(voice_text, force_language="zh")
-        schedule_chat_compression(key, event)
+        await schedule_chat_compression(key, event)
         await matcher.finish()
         return
     await matcher.send(result.reply)
     if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
         set_last_tts_candidate(result.reply)
-    schedule_chat_compression(key, event)
+    await schedule_chat_compression(key, event)
 
 
 async def run_chat_graph_session_runtime(
@@ -1315,6 +2129,9 @@ async def run_chat_graph_session_runtime(
     request: ChatRequest,
     options: ChatOptions,
     shadow_state: ChatState | None,
+    *,
+    send_voice: bool = True,
+    persist_side_effects: bool = True,
 ) -> ChatGraphSessionResult | None:
     if shadow_state is None:
         return None
@@ -1323,13 +2140,13 @@ async def run_chat_graph_session_runtime(
 
     async def resolve_image_context(chat_state: ChatState) -> ChatState:
         nonlocal image_descriptions
-        image_descriptions = await describe_chat_images(event, request.image_context)
+        image_descriptions = await describe_chat_images(bot, event, request.image_context)
         updated = safe_apply_shadow_vision_result(event, chat_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, updated)
         return updated or chat_state
 
     async def build_prompt_context_node(chat_state: ChatState) -> ChatGraphPromptBundle | None:
-        prompt_context = build_chat_prompt_context(
+        prompt_context = await build_chat_prompt_context(
             event,
             request.key,
             semantic_voice=options.semantic_voice,
@@ -1374,6 +2191,13 @@ async def run_chat_graph_session_runtime(
         __: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
     ) -> ChatRuntimeResult | None:
+        if options.semantic_voice and not send_voice:
+            voice_text = result.voice_text if result.voice_text is not None else result.reply
+            return ChatRuntimeResult(
+                reply=result.reply,
+                stored_assistant=voice_text,
+                voice_text=voice_text,
+            )
         return await send_semantic_voice_response(
             bot,
             event,
@@ -1382,14 +2206,14 @@ async def run_chat_graph_session_runtime(
             options,
         )
 
-    def persist_turn_node(
+    async def persist_turn_node(
         _: ChatState,
         prompt_bundle: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
         __,
     ) -> None:
         turn = build_chat_turn(prompt_bundle.user_content.stored, result.stored_assistant)
-        persist_chat_turn(
+        await persist_chat_turn(
             request.key,
             event,
             prompt_bundle.prompt_context,
@@ -1415,12 +2239,12 @@ async def run_chat_graph_session_runtime(
         elif isinstance(event, PrivateMessageEvent) and is_owner(config, event):
             set_last_tts_candidate(result.reply)
 
-    def schedule_compression_node(
+    async def schedule_compression_node(
         _: ChatState,
         __: ChatGraphPromptBundle,
         ___: ChatRuntimeResult,
     ) -> None:
-        schedule_chat_compression(request.key, event)
+        await schedule_chat_compression(request.key, event)
 
     return await run_chat_graph_session(
         shadow_state,
@@ -1431,10 +2255,10 @@ async def run_chat_graph_session_runtime(
         build_prompt_context=build_prompt_context_node,
         resolve_image_context=resolve_image_context,
         maybe_voice_response=maybe_voice_response_node,
-        persist_chat_turn=persist_turn_node,
-        update_trial_accounting=update_trial_accounting_node,
-        update_tts_candidate=update_tts_candidate_node,
-        schedule_compression=schedule_compression_node,
+        persist_chat_turn=persist_turn_node if persist_side_effects else None,
+        update_trial_accounting=update_trial_accounting_node if persist_side_effects else None,
+        update_tts_candidate=update_tts_candidate_node if persist_side_effects else None,
+        schedule_compression=schedule_compression_node if persist_side_effects else None,
     )
 
 
@@ -1448,11 +2272,6 @@ async def run_legacy_chat_session(
     shadow_state = safe_build_shadow_chat_state(event, request, options)
     safe_record_shadow_chat_snapshot(event, shadow_state)
     async with session_lock(request.key):
-        try:
-            await ensure_gap_scene_summaries(config, request.key)
-        except Exception as exc:
-            log_background_error(exc, event)
-
         if config.enable_chat_graph_runtime and shadow_state is not None:
             try:
                 graph_session = await run_chat_graph_session_runtime(
@@ -1491,13 +2310,13 @@ async def run_legacy_chat_session(
                 )
                 return
 
-        prompt_context = build_chat_prompt_context(
+        prompt_context = await build_chat_prompt_context(
             event,
             request.key,
             semantic_voice=options.semantic_voice,
             has_image_context=request.image_context.has_context,
         )
-        image_descriptions = await describe_chat_images(event, request.image_context)
+        image_descriptions = await describe_chat_images(bot, event, request.image_context)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, shadow_state)
         user_content = build_chat_user_content(
@@ -1570,7 +2389,7 @@ async def handle_chat(
         preserve_original=preserve_original,
         tts_language=tts_language,
     )
-    request = await prepare_chat_request(event, matcher, options)
+    request = await prepare_chat_request(bot, event, matcher, options)
     if request is None:
         return
     await run_legacy_chat_session(bot, event, matcher, request, options)
@@ -1629,16 +2448,21 @@ async def should_group_auto_reply(event: GroupMessageEvent) -> bool:
 
 
 @group_image_cache.handle()
-async def _(event: GroupMessageEvent) -> None:
+async def _(bot: Bot, event: GroupMessageEvent) -> None:
     if is_command_message(event):
         return
     access = current_access()
     allowed, _ = can_group_chat(config, access, event)
     if not allowed:
         return
-    image_urls = image_urls_from_event(event)
-    if image_urls:
-        cache_image_urls(event, image_urls)
+    await run_vision_graph(
+        bot,
+        event,
+        "",
+        True,
+        describe=False,
+        cache_only=True,
+    )
 
 
 @private_chat.handle()
@@ -1646,6 +2470,9 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
     text = clean_text(event)
     intent = parse_voice_intent(text)
     if intent is not None:
+        handled = await run_voice_graph_intent(bot, event, matcher, intent)
+        if handled:
+            return
         if intent.type in {VoiceIntentType.DIRECT_TEXT, VoiceIntentType.LAST_REPLY}:
             handled = await handle_direct_or_last_tts(bot, event, matcher, intent)
             if handled:
@@ -1700,25 +2527,29 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @diagnostics_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(await format_diagnostics(config, image_cache_stats()))
+    execution = await run_diagnostics_graph(event)
+    await matcher.finish(execution.result.reply_text)
 
 
 @config_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(format_config_status(config))
+    execution = await run_diagnostics_graph(event, DiagnosticsView.CONFIG)
+    await matcher.finish(execution.result.reply_text)
 
 
 @vision_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(format_vision_status(config, image_cache_stats()))
+    execution = await run_diagnostics_graph(event, DiagnosticsView.VISION)
+    await matcher.finish(execution.result.reply_text)
 
 
 @recent_errors_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(format_recent_errors())
+    execution = await run_diagnostics_graph(event, DiagnosticsView.RECENT_ERRORS)
+    await matcher.finish(execution.result.reply_text)
 
 
 @clear_error_log_cmd.handle()
@@ -1730,7 +2561,8 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @image_cache_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(format_image_cache_status(config, image_cache_stats()))
+    execution = await run_diagnostics_graph(event, DiagnosticsView.IMAGE_CACHE)
+    await matcher.finish(execution.result.reply_text)
 
 
 @clear_image_cache_cmd.handle()
@@ -1743,7 +2575,8 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @memory_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish("\n".join(memory_status_lines(event)))
+    execution = await run_diagnostics_graph(event, DiagnosticsView.MEMORY)
+    await matcher.finish(execution.result.reply_text)
 
 
 @clear_all_memory_cmd.handle()
@@ -1921,38 +2754,18 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
 
 @tell_owner_cmd.handle()
 async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    allowed, reason = can_tell_owner(event)
-    if not allowed:
-        await reject_or_silent(matcher, reason)
-
     content = arg.extract_plain_text().strip()
-    validation_error = validate_owner_notification_content(
-        content,
-        config.owner_notification_max_length,
-    )
-    if validation_error:
-        await matcher.finish(validation_error)
-
-    cooldown_ok, cooldown_reason = check_owner_notification_cooldown(event)
-    if not cooldown_ok:
-        await matcher.finish(cooldown_reason or "转告过于频繁，请稍后再试。")
-
-    message = format_owner_notification(event, content)
-    try:
-        await bot.call_api(
-            "send_private_msg",
-            user_id=int(config.bot_owner_qq),
-            message=message,
-        )
-    except Exception as exc:
-        log_ai_event_error(exc, event)
-        await matcher.finish("转告发送失败，请稍后再试。")
-    await matcher.finish("已转告主人。")
+    execution = await run_notification_graph(bot, event, content)
+    if execution.result.should_reply_source and execution.result.source_reply:
+        await matcher.finish(execution.result.source_reply)
+    await matcher.finish()
 
 
 @tts_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
+    execution = await run_diagnostics_graph(event, DiagnosticsView.TTS)
+    await matcher.finish(execution.result.reply_text)
     candidate = get_last_tts_candidate()
     lines = tts_status_lines()
     if candidate is None:

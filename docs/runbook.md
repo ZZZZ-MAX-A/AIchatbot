@@ -724,6 +724,26 @@ D:\OllamaModels
 
 如果识图报错中出现 `C:\Users\����\.ollama\models`，说明实际监听 `127.0.0.1:11434` 的 Ollama server 仍在使用默认中文用户目录。需要关闭 `ollama app.exe` 托盘程序和旧的 `ollama.exe`，再用正确环境变量启动 server。
 
+推荐用项目脚本启动视觉 Ollama：
+
+```powershell
+.\scripts\start-ollama-vision.ps1
+```
+
+如果要把模型目录写入当前 Windows 用户环境变量：
+
+```powershell
+.\scripts\start-ollama-vision.ps1 -PersistUserEnv
+```
+
+该脚本会默认关闭现有 `ollama.exe` / `ollama app.exe`，设置：
+
+```powershell
+OLLAMA_MODELS=D:\OllamaModels
+```
+
+然后用 `ollama serve` 重新启动本地 11434 服务。
+
 视觉配置：
 
 ```env
