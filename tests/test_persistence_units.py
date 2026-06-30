@@ -39,6 +39,8 @@ class DatabaseSchemaUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("long_term_memories", table_names)
         self.assertIn("session_summaries", table_names)
         self.assertIn("gap_scene_summaries", table_names)
+        self.assertIn("rag_documents", table_names)
+        self.assertIn("rag_embeddings", table_names)
         self.assertIn("private_trials", table_names)
         self.assertEqual(schema_row["value"], self.database.SCHEMA_VERSION)
 

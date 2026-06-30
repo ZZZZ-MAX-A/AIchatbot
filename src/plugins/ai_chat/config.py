@@ -89,6 +89,26 @@ class AiChatConfig:
     enable_long_term_memory_context: bool
     max_long_term_memories_in_context: int
     rule_reminder_interval_messages: int
+    enable_memory_rag: bool
+    enable_project_doc_rag: bool
+    memory_rag_embedding_provider: str
+    memory_rag_embedding_model: str
+    memory_rag_embedding_base_url: str
+    memory_rag_embedding_dimension: int
+    memory_rag_embedding_timeout_seconds: int
+    memory_rag_top_k: int
+    memory_rag_min_score: float
+    memory_rag_max_context_chars: int
+    project_doc_rag_top_k: int
+    project_doc_rag_min_score: float
+    project_doc_rag_max_context_chars: int
+    memory_rag_include_manual_facts: bool
+    memory_rag_include_manual_preferences: bool
+    memory_rag_include_session_summaries: bool
+    memory_rag_include_short_messages: bool
+    memory_rag_include_gap_scene_summaries: bool
+    memory_rag_owner_only_debug: bool
+    memory_rag_inject_in_chat: bool
     private_whitelist: frozenset[str]
     allow_unknown_private_chat: bool
     private_trial_messages: int
@@ -173,6 +193,26 @@ def load_config() -> AiChatConfig:
         enable_long_term_memory_context=_bool_env("ENABLE_LONG_TERM_MEMORY_CONTEXT", True),
         max_long_term_memories_in_context=_int_env("MAX_LONG_TERM_MEMORIES_IN_CONTEXT", 8),
         rule_reminder_interval_messages=_int_env("RULE_REMINDER_INTERVAL_MESSAGES", 40),
+        enable_memory_rag=_bool_env("ENABLE_MEMORY_RAG", False),
+        enable_project_doc_rag=_bool_env("ENABLE_PROJECT_DOC_RAG", False),
+        memory_rag_embedding_provider=os.getenv("MEMORY_RAG_EMBEDDING_PROVIDER", "ollama"),
+        memory_rag_embedding_model=os.getenv("MEMORY_RAG_EMBEDDING_MODEL", "bge-m3"),
+        memory_rag_embedding_base_url=os.getenv("MEMORY_RAG_EMBEDDING_BASE_URL", "http://127.0.0.1:11434"),
+        memory_rag_embedding_dimension=_int_env("MEMORY_RAG_EMBEDDING_DIMENSION", 1024),
+        memory_rag_embedding_timeout_seconds=_int_env("MEMORY_RAG_EMBEDDING_TIMEOUT_SECONDS", 60),
+        memory_rag_top_k=_int_env("MEMORY_RAG_TOP_K", 5),
+        memory_rag_min_score=_float_env("MEMORY_RAG_MIN_SCORE", 0.55),
+        memory_rag_max_context_chars=_int_env("MEMORY_RAG_MAX_CONTEXT_CHARS", 1600),
+        project_doc_rag_top_k=_int_env("PROJECT_DOC_RAG_TOP_K", 4),
+        project_doc_rag_min_score=_float_env("PROJECT_DOC_RAG_MIN_SCORE", 0.50),
+        project_doc_rag_max_context_chars=_int_env("PROJECT_DOC_RAG_MAX_CONTEXT_CHARS", 2000),
+        memory_rag_include_manual_facts=_bool_env("MEMORY_RAG_INCLUDE_MANUAL_FACTS", True),
+        memory_rag_include_manual_preferences=_bool_env("MEMORY_RAG_INCLUDE_MANUAL_PREFERENCES", True),
+        memory_rag_include_session_summaries=_bool_env("MEMORY_RAG_INCLUDE_SESSION_SUMMARIES", True),
+        memory_rag_include_short_messages=_bool_env("MEMORY_RAG_INCLUDE_SHORT_MESSAGES", False),
+        memory_rag_include_gap_scene_summaries=_bool_env("MEMORY_RAG_INCLUDE_GAP_SCENE_SUMMARIES", False),
+        memory_rag_owner_only_debug=_bool_env("MEMORY_RAG_OWNER_ONLY_DEBUG", True),
+        memory_rag_inject_in_chat=_bool_env("MEMORY_RAG_INJECT_IN_CHAT", False),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
