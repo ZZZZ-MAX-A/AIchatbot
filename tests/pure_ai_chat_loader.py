@@ -323,6 +323,14 @@ def load_rag_modules():
         "src.plugins.ai_chat.rag.memory_sources",
         AI_CHAT_ROOT / "rag" / "memory_sources.py",
     )
+    modules["memory_index"] = load_module(
+        "src.plugins.ai_chat.rag.memory_index",
+        AI_CHAT_ROOT / "rag" / "memory_index.py",
+    )
+    modules["runtime_sync"] = load_module(
+        "src.plugins.ai_chat.rag.runtime_sync",
+        AI_CHAT_ROOT / "rag" / "runtime_sync.py",
+    )
     modules["project_index"] = load_module(
         "src.plugins.ai_chat.rag.project_index",
         AI_CHAT_ROOT / "rag" / "project_index.py",

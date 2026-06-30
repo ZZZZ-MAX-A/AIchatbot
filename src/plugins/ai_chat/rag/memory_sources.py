@@ -40,6 +40,9 @@ def session_summary_document_fields(summary) -> dict[str, str | int]:
         "content": str(summary.summary),
         "visibility": VISIBILITY_OWNER_ONLY,
         "session_key": str(summary.session_key),
+        "message_type": str(getattr(summary, "message_type", "")),
+        "user_id": str(getattr(summary, "user_id", "")),
+        "group_id": str(getattr(summary, "group_id", "")),
         "source_version": str(summary.created_at),
         "chunk_index": 0,
     }

@@ -16,6 +16,7 @@ from .schema import (
     RagSearchResult,
 )
 from .project_index import ProjectDocIndexStats, rebuild_project_doc_index, retrieve_project_docs
+from .memory_index import MemoryRagIndexStats, rebuild_memory_rag_index, retrieve_memory
 
 __all__ = [
     "NAMESPACE_PROJECT_DOCS",
@@ -34,4 +35,7 @@ __all__ = [
     "ProjectDocIndexStats",
     "rebuild_project_doc_index",
     "retrieve_project_docs",
+    "MemoryRagIndexStats",
+    "rebuild_memory_rag_index",
+    "retrieve_memory",
 ]

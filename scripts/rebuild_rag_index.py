@@ -65,6 +65,14 @@ def load_ai_chat_modules() -> dict[str, object]:
         "src.plugins.ai_chat.rag.project_docs",
         AI_CHAT_ROOT / "rag" / "project_docs.py",
     )
+    modules["memory_sources"] = load_module(
+        "src.plugins.ai_chat.rag.memory_sources",
+        AI_CHAT_ROOT / "rag" / "memory_sources.py",
+    )
+    modules["memory_index"] = load_module(
+        "src.plugins.ai_chat.rag.memory_index",
+        AI_CHAT_ROOT / "rag" / "memory_index.py",
+    )
     modules["project_index"] = load_module(
         "src.plugins.ai_chat.rag.project_index",
         AI_CHAT_ROOT / "rag" / "project_index.py",
@@ -75,25 +83,28 @@ def load_ai_chat_modules() -> dict[str, object]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rebuild or query AIchatbot RAG indexes.")
     parser.add_argument("--project-docs", action="store_true", help="Rebuild ProjectDocRAG index.")
+    parser.add_argument("--memory", action="store_true", help="Rebuild MemoryRAG index.")
     parser.add_argument("--query-project-docs", help="Query ProjectDocRAG with the provided text.")
+    parser.add_argument("--query-memory", help="Query MemoryRAG with the provided text.")
     parser.add_argument("--root", default=str(REPO_ROOT), help="Repository root to scan.")
     parser.add_argument("--max-chars", type=int, default=1800, help="Maximum characters per Markdown chunk.")
-    parser.add_argument("--top-k", type=int, help="ProjectDocRAG top-k override.")
-    parser.add_argument("--min-score", type=float, help="ProjectDocRAG minimum score override.")
-    parser.add_argument("--max-context-chars", type=int, help="ProjectDocRAG context character cap override.")
+    parser.add_argument("--top-k", type=int, help="Retrieval top-k override.")
+    parser.add_argument("--min-score", type=float, help="Retrieval minimum score override.")
+    parser.add_argument("--max-context-chars", type=int, help="Retrieval context character cap override.")
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if not args.project_docs and not args.query_project_docs:
-        parser.error("choose --project-docs or --query-project-docs")
+    if not args.project_docs and not args.memory and not args.query_project_docs and not args.query_memory:
+        parser.error("choose --project-docs, --memory, --query-project-docs, or --query-memory")
 
     modules = load_ai_chat_modules()
     config = modules["config"].load_config()
     embedder = modules["providers"].build_embedding_provider(config)
     project_index = modules["project_index"]
+    memory_index = modules["memory_index"]
 
     exit_code = 0
     if args.project_docs:
@@ -103,6 +114,24 @@ def main() -> int:
             max_chars=args.max_chars,
         )
         print("ProjectDocRAG rebuild stats:")
+        for key, value in stats.as_dict().items():
+            if key == "errors":
+                continue
+            print(f"  {key}: {value}")
+        if stats.errors:
+            exit_code = 1
+            print("Errors:")
+            for error in stats.errors:
+                print(f"  - {error}")
+
+    if args.memory:
+        stats = memory_index.rebuild_memory_rag_index(
+            embedder=embedder,
+            include_manual_facts=config.memory_rag_include_manual_facts,
+            include_manual_preferences=config.memory_rag_include_manual_preferences,
+            include_session_summaries=config.memory_rag_include_session_summaries,
+        )
+        print("MemoryRAG rebuild stats:")
         for key, value in stats.as_dict().items():
             if key == "errors":
                 continue
@@ -132,6 +161,26 @@ def main() -> int:
             exit_code = 1
         else:
             print(project_index.format_project_doc_results(results))
+
+    if args.query_memory:
+        try:
+            results = memory_index.retrieve_memory(
+                query=args.query_memory,
+                embedder=embedder,
+                is_owner=True,
+                top_k=args.top_k or config.memory_rag_top_k,
+                min_score=args.min_score if args.min_score is not None else config.memory_rag_min_score,
+                max_context_chars=(
+                    args.max_context_chars
+                    if args.max_context_chars is not None
+                    else config.memory_rag_max_context_chars
+                ),
+            )
+        except modules["providers"].EmbeddingProviderError as exc:
+            print(f"MemoryRAG query failed: {exc}")
+            exit_code = 1
+        else:
+            print(memory_index.format_memory_results(results))
 
     return exit_code
 
