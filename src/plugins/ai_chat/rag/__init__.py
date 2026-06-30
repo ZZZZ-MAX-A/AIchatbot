@@ -15,6 +15,7 @@ from .schema import (
     RagDocument,
     RagSearchResult,
 )
+from .project_index import ProjectDocIndexStats, rebuild_project_doc_index, retrieve_project_docs
 
 __all__ = [
     "NAMESPACE_PROJECT_DOCS",
@@ -30,4 +31,7 @@ __all__ = [
     "VISIBILITY_SUBJECT_ONLY",
     "RagDocument",
     "RagSearchResult",
+    "ProjectDocIndexStats",
+    "rebuild_project_doc_index",
+    "retrieve_project_docs",
 ]

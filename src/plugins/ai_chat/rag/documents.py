@@ -173,12 +173,38 @@ def get_rag_document(document_id: int, *, include_deleted: bool = False) -> RagD
     return None if row is None else document_from_row(row)
 
 
+def find_rag_document(
+    *,
+    namespace: str,
+    source_type: str,
+    source_id: str,
+    chunk_index: int = 0,
+    include_deleted: bool = False,
+) -> RagDocument | None:
+    ensure_database()
+    where_deleted = "" if include_deleted else "AND deleted_at IS NULL"
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT *
+            FROM rag_documents
+            WHERE namespace = ?
+              AND source_type = ?
+              AND source_id = ?
+              AND chunk_index = ?
+              {where_deleted}
+            """,
+            (namespace, source_type, source_id, chunk_index),
+        ).fetchone()
+    return None if row is None else document_from_row(row)
+
+
 def list_rag_documents(
     *,
     namespace: str | None = None,
     source_type: str | None = None,
     include_deleted: bool = False,
-    limit: int = 100,
+    limit: int | None = 100,
 ) -> list[RagDocument]:
     ensure_database()
     clauses: list[str] = []
@@ -192,7 +218,10 @@ def list_rag_documents(
     if not include_deleted:
         clauses.append("deleted_at IS NULL")
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(limit)
 
     with connect() as connection:
         rows = connection.execute(
@@ -201,7 +230,7 @@ def list_rag_documents(
             FROM rag_documents
             {where_clause}
             ORDER BY id DESC
-            LIMIT ?
+            {limit_clause}
             """,
             tuple(params),
         ).fetchall()
@@ -244,6 +273,22 @@ def soft_delete_rag_documents(
             (now, now, *params),
         )
         return int(cursor.rowcount)
+
+
+def soft_delete_rag_document(document_id: int) -> bool:
+    ensure_database()
+    now = utc_now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE rag_documents
+            SET deleted_at = ?, updated_at = ?
+            WHERE id = ?
+              AND deleted_at IS NULL
+            """,
+            (now, now, document_id),
+        )
+        return int(cursor.rowcount) > 0
 
 
 def rag_document_stats() -> dict[str, int]:

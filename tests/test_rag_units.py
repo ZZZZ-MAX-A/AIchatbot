@@ -9,6 +9,21 @@ from unittest.mock import patch
 from pure_ai_chat_loader import load_rag_modules
 
 
+class FakeEmbeddingProvider:
+    provider = "unit"
+    model = "toy"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
+        normalized = text.lower()
+        if "deploy" in normalized or "readme" in normalized:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+
 class TempDatabaseMixin:
     def temp_database(self):
         temp_dir = tempfile.TemporaryDirectory()
@@ -202,8 +217,26 @@ class RagEmbeddingAndSearchUnitTests(TempDatabaseMixin, unittest.TestCase):
                 )
             with self.assertRaises(ValueError):
                 self.embeddings.deserialize_embedding('{"not":"a list"}')
+            record = self.embeddings.get_rag_embedding(
+                document_id=document_id,
+                provider="unit",
+                model="toy",
+            )
+            matches_content = self.embeddings.rag_embedding_matches_content(
+                document_id=document_id,
+                provider="unit",
+                model="toy",
+                content_hash=document.content_hash,
+            )
 
         self.assertEqual(same_embedding_id, embedding_id)
+        self.assertIsNotNone(record)
+        self.assertEqual(record.document_id, document_id)
+        self.assertEqual(record.provider, "unit")
+        self.assertEqual(record.model, "toy")
+        self.assertEqual(record.dimension, 3)
+        self.assertEqual(record.embedding, [3.0, 2.0, 1.0])
+        self.assertTrue(matches_content)
         self.assertEqual(row["embedding_dimension"], 3)
         self.assertEqual(self.embeddings.deserialize_embedding(row["embedding"]), [3.0, 2.0, 1.0])
 
@@ -322,6 +355,106 @@ class RagProjectDocUnitTests(unittest.TestCase):
         self.assertEqual(chunks[0].title, "README.md#README")
         self.assertTrue(any(chunk.title == "README.md#Usage" for chunk in chunks))
         self.assertTrue(all(chunk.source_version for chunk in chunks))
+
+
+class RagProjectIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_rag_modules()
+        cls.database = cls.modules["database"]
+        cls.documents = cls.modules["documents"]
+        cls.project_index = cls.modules["project_index"]
+        cls.schema = cls.modules["schema"]
+
+    def write_project_docs(self, root: Path) -> tuple[Path, Path]:
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        readme = root / "README.md"
+        design = docs_dir / "vision.md"
+        readme.write_text("# README\nDeploy the bot with scripts/start.ps1.\n", encoding="utf-8")
+        design.write_text("# Vision\nOllama handles image descriptions.\n", encoding="utf-8")
+        return readme, design
+
+    def test_rebuild_project_docs_indexes_skips_and_soft_deletes_stale_chunks(self):
+        temp_db_dir, patcher = self.temp_database()
+        with tempfile.TemporaryDirectory() as project_dir, temp_db_dir, patcher:
+            root = Path(project_dir)
+            _, design = self.write_project_docs(root)
+            embedder = FakeEmbeddingProvider()
+
+            first = self.project_index.rebuild_project_doc_index(root=root, embedder=embedder)
+            first_call_count = len(embedder.calls)
+            second = self.project_index.rebuild_project_doc_index(root=root, embedder=embedder)
+            design.unlink()
+            third = self.project_index.rebuild_project_doc_index(root=root, embedder=embedder)
+            active_documents = self.documents.list_rag_documents(
+                namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+                source_type=self.schema.SOURCE_PROJECT_DOC,
+                limit=None,
+            )
+
+        self.assertFalse(first.has_errors)
+        self.assertEqual(first.scanned_files, 2)
+        self.assertEqual(first.created_documents, first.chunks_seen)
+        self.assertEqual(first.embeddings_created, first.chunks_seen)
+        self.assertEqual(first_call_count, first.chunks_seen)
+        self.assertFalse(second.has_errors)
+        self.assertEqual(second.unchanged_documents, second.chunks_seen)
+        self.assertEqual(second.embeddings_skipped, second.chunks_seen)
+        self.assertEqual(len(embedder.calls), first_call_count)
+        self.assertFalse(third.has_errors)
+        self.assertGreaterEqual(third.soft_deleted_documents, 1)
+        self.assertEqual({document.source_id for document in active_documents}, {"README.md"})
+
+    def test_retrieve_project_docs_uses_owner_visibility_and_context_limit(self):
+        temp_db_dir, patcher = self.temp_database()
+        with tempfile.TemporaryDirectory() as project_dir, temp_db_dir, patcher:
+            root = Path(project_dir)
+            self.write_project_docs(root)
+            embedder = FakeEmbeddingProvider()
+            self.project_index.rebuild_project_doc_index(root=root, embedder=embedder)
+
+            owner_results = self.project_index.retrieve_project_docs(
+                query="deploy",
+                embedder=embedder,
+                is_owner=True,
+                top_k=2,
+                min_score=0.1,
+                max_context_chars=20,
+            )
+            non_owner_results = self.project_index.retrieve_project_docs(
+                query="deploy",
+                embedder=embedder,
+                is_owner=False,
+                top_k=2,
+                min_score=0.1,
+                max_context_chars=200,
+            )
+            formatted = self.project_index.format_project_doc_results(owner_results)
+
+        self.assertEqual([result.document.source_id for result in owner_results], ["README.md"])
+        self.assertLessEqual(len(owner_results[0].document.content), 20)
+        self.assertEqual(non_owner_results, [])
+        self.assertIn("README.md#README", formatted)
+
+
+class RagProviderUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_rag_modules()
+        cls.providers = cls.modules["providers"]
+
+    def test_parse_ollama_embedding_response_accepts_current_and_legacy_shapes(self):
+        self.assertEqual(
+            self.providers.parse_ollama_embedding_response({"embeddings": [[1, "2", 3.5]]}),
+            [1.0, 2.0, 3.5],
+        )
+        self.assertEqual(
+            self.providers.parse_ollama_embedding_response({"embedding": [4, 5]}),
+            [4.0, 5.0],
+        )
+        with self.assertRaises(self.providers.EmbeddingProviderError):
+            self.providers.parse_ollama_embedding_response({"embeddings": []})
 
 
 class RagMemorySourceUnitTests(unittest.TestCase):
