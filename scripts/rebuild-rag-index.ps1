@@ -1,6 +1,8 @@
 param(
     [switch]$ProjectDocs,
+    [switch]$Memory,
     [string]$QueryProjectDocs = "",
+    [string]$QueryMemory = "",
     [string]$Root = "",
     [int]$MaxChars = 1800,
     [int]$TopK = 0,
@@ -25,9 +27,16 @@ $arguments = @($scriptPath)
 if ($ProjectDocs) {
     $arguments += "--project-docs"
 }
+if ($Memory) {
+    $arguments += "--memory"
+}
 if ($QueryProjectDocs) {
     $arguments += "--query-project-docs"
     $arguments += $QueryProjectDocs
+}
+if ($QueryMemory) {
+    $arguments += "--query-memory"
+    $arguments += $QueryMemory
 }
 if ($Root) {
     $arguments += "--root"

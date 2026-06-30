@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pure_ai_chat_loader import load_rag_modules
+from pure_ai_chat_loader import load_legacy_memory_modules, load_rag_modules
 
 
 class FakeEmbeddingProvider:
@@ -455,6 +455,144 @@ class RagProviderUnitTests(unittest.TestCase):
         )
         with self.assertRaises(self.providers.EmbeddingProviderError):
             self.providers.parse_ollama_embedding_response({"embeddings": []})
+
+
+class RagMemoryIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_rag_modules()
+        cls.legacy_modules = load_legacy_memory_modules()
+        cls.database = cls.modules["database"]
+        cls.documents = cls.modules["documents"]
+        cls.memory_index = cls.modules["memory_index"]
+        cls.schema = cls.modules["schema"]
+        cls.manual_memory = cls.legacy_modules["manual_memory"]
+        cls.summaries = cls.legacy_modules["summaries"]
+
+    def add_summary(self, session_key: str, text: str) -> int:
+        return self.summaries.add_summary(
+            session_key=session_key,
+            message_type="private",
+            user_id="10001",
+            group_id=None,
+            summary=text,
+            message_start_id=1,
+            message_end_id=2,
+            source_message_count=2,
+        )
+
+    def test_rebuild_memory_rag_indexes_and_skips_unchanged_embeddings(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict("os.environ", {"ENABLE_MEMORY_RAG": "false"}):
+            self.manual_memory.add_manual_memory(
+                "private",
+                "10001",
+                "fact memory",
+                memory_type="fact",
+            )
+            self.manual_memory.add_manual_memory(
+                "private",
+                "10001",
+                "preference memory",
+                memory_type="preference",
+            )
+            self.add_summary("private:10001", "summary memory")
+            embedder = FakeEmbeddingProvider()
+
+            first = self.memory_index.rebuild_memory_rag_index(embedder=embedder)
+            first_call_count = len(embedder.calls)
+            second = self.memory_index.rebuild_memory_rag_index(embedder=embedder)
+            active_documents = self.documents.list_rag_documents(
+                namespace=self.schema.NAMESPACE_SEMANTIC_MEMORY,
+                include_deleted=False,
+                limit=None,
+            )
+
+        self.assertFalse(first.has_errors)
+        self.assertEqual(first.scanned_manual_memories, 2)
+        self.assertEqual(first.scanned_session_summaries, 1)
+        self.assertEqual(first.created_documents, 3)
+        self.assertEqual(first.embeddings_created, 3)
+        self.assertEqual(first_call_count, 3)
+        self.assertFalse(second.has_errors)
+        self.assertEqual(second.unchanged_documents, 3)
+        self.assertEqual(second.embeddings_skipped, 3)
+        self.assertEqual(len(embedder.calls), first_call_count)
+        self.assertEqual(
+            {document.source_type for document in active_documents},
+            {
+                self.schema.SOURCE_MANUAL_FACT,
+                self.schema.SOURCE_MANUAL_PREFERENCE,
+                self.schema.SOURCE_SESSION_SUMMARY,
+            },
+        )
+
+    def test_memory_delete_hooks_soft_delete_index_documents(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict("os.environ", {"ENABLE_MEMORY_RAG": "false"}):
+            memory_id = self.manual_memory.add_manual_memory(
+                "private",
+                "10001",
+                "preference memory",
+                memory_type="preference",
+            )
+            summary_id = self.add_summary("private:10001", "summary memory")
+            embedder = FakeEmbeddingProvider()
+            self.memory_index.rebuild_memory_rag_index(embedder=embedder)
+
+            memory_deleted = self.manual_memory.delete_manual_memory(memory_id)
+            summary_deleted = self.summaries.delete_session_summary("private:10001", summary_id)
+            active_documents = self.documents.list_rag_documents(
+                namespace=self.schema.NAMESPACE_SEMANTIC_MEMORY,
+                include_deleted=False,
+                limit=None,
+            )
+            all_documents = self.documents.list_rag_documents(
+                namespace=self.schema.NAMESPACE_SEMANTIC_MEMORY,
+                include_deleted=True,
+                limit=None,
+            )
+
+        self.assertTrue(memory_deleted)
+        self.assertTrue(summary_deleted)
+        self.assertEqual(active_documents, [])
+        self.assertEqual(len(all_documents), 2)
+        self.assertTrue(all(document.deleted_at for document in all_documents))
+
+    def test_retrieve_memory_uses_owner_visibility_and_context_limit(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict("os.environ", {"ENABLE_MEMORY_RAG": "false"}):
+            self.manual_memory.add_manual_memory(
+                "private",
+                "10001",
+                "fact memory with a long enough body",
+                memory_type="fact",
+            )
+            embedder = FakeEmbeddingProvider()
+            self.memory_index.rebuild_memory_rag_index(embedder=embedder)
+
+            owner_results = self.memory_index.retrieve_memory(
+                query="memory",
+                embedder=embedder,
+                is_owner=True,
+                top_k=3,
+                min_score=0.1,
+                max_context_chars=12,
+            )
+            non_owner_results = self.memory_index.retrieve_memory(
+                query="memory",
+                embedder=embedder,
+                is_owner=False,
+                top_k=3,
+                min_score=0.1,
+                max_context_chars=120,
+            )
+            formatted = self.memory_index.format_memory_results(owner_results)
+
+        self.assertEqual([result.document.source_type for result in owner_results], [self.schema.SOURCE_MANUAL_FACT])
+        self.assertLessEqual(len(owner_results[0].document.content), 12)
+        self.assertEqual(non_owner_results, [])
+        self.assertIn("manual_fact", formatted)
 
 
 class RagMemorySourceUnitTests(unittest.TestCase):

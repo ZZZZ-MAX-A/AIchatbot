@@ -13,6 +13,9 @@ class SessionSummary:
     message_end_id: int
     source_message_count: int
     created_at: str
+    message_type: str = ""
+    user_id: str = ""
+    group_id: str = ""
 
 
 def _summary_from_row(row: Any) -> SessionSummary:
@@ -24,6 +27,9 @@ def _summary_from_row(row: Any) -> SessionSummary:
         message_end_id=int(row["message_end_id"]),
         source_message_count=int(row["source_message_count"]),
         created_at=str(row["created_at"]),
+        message_type=str(row["message_type"]) if "message_type" in row.keys() else "",
+        user_id=str(row["user_id"]) if "user_id" in row.keys() and row["user_id"] is not None else "",
+        group_id=str(row["group_id"]) if "group_id" in row.keys() and row["group_id"] is not None else "",
     )
 
 
@@ -66,7 +72,84 @@ def add_summary(
                 utc_now(),
             ),
         )
-        return int(cursor.lastrowid)
+        summary_id = int(cursor.lastrowid)
+    try:
+        from .rag.runtime_sync import sync_session_summary_after_write
+
+        sync_session_summary_after_write(summary_id)
+    except Exception:
+        pass
+    return summary_id
+
+
+def get_session_summary(summary_id: int, session_key: str | None = None) -> SessionSummary | None:
+    ensure_database()
+    clauses = ["id = ?"]
+    params: list[object] = [summary_id]
+    if session_key is not None:
+        clauses.append("session_key = ?")
+        params.append(session_key)
+
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT
+                id,
+                session_key,
+                message_type,
+                user_id,
+                group_id,
+                summary,
+                message_start_id,
+                message_end_id,
+                source_message_count,
+                created_at
+            FROM session_summaries
+            WHERE {' AND '.join(clauses)}
+            """,
+            tuple(params),
+        ).fetchone()
+    return _summary_from_row(row) if row else None
+
+
+def list_session_summaries(
+    session_key: str | None = None,
+    limit: int | None = 100,
+) -> list[SessionSummary]:
+    ensure_database()
+    clauses: list[str] = []
+    params: list[object] = []
+    if session_key is not None:
+        clauses.append("session_key = ?")
+        params.append(session_key)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(limit)
+
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                id,
+                session_key,
+                message_type,
+                user_id,
+                group_id,
+                summary,
+                message_start_id,
+                message_end_id,
+                source_message_count,
+                created_at
+            FROM session_summaries
+            {where_clause}
+            ORDER BY id DESC
+            {limit_clause}
+            """,
+            tuple(params),
+        ).fetchall()
+    return [_summary_from_row(row) for row in rows]
 
 
 def recent_summaries(session_key: str, limit: int) -> list[SessionSummary]:
@@ -79,6 +162,9 @@ def recent_summaries(session_key: str, limit: int) -> list[SessionSummary]:
             SELECT
                 id,
                 session_key,
+                message_type,
+                user_id,
+                group_id,
                 summary,
                 message_start_id,
                 message_end_id,
@@ -101,7 +187,15 @@ def clear_session_summaries(session_key: str) -> int:
             "DELETE FROM session_summaries WHERE session_key = ?",
             (session_key,),
         )
-        return int(cursor.rowcount)
+        deleted_count = int(cursor.rowcount)
+    if deleted_count:
+        try:
+            from .rag.runtime_sync import sync_session_summaries_after_clear_session
+
+            sync_session_summaries_after_clear_session(session_key)
+        except Exception:
+            pass
+    return deleted_count
 
 
 def delete_session_summary(session_key: str, summary_id: int) -> bool:
@@ -115,14 +209,30 @@ def delete_session_summary(session_key: str, summary_id: int) -> bool:
             """,
             (session_key, summary_id),
         )
-        return int(cursor.rowcount) > 0
+        deleted = int(cursor.rowcount) > 0
+    if deleted:
+        try:
+            from .rag.runtime_sync import sync_session_summary_after_delete
+
+            sync_session_summary_after_delete(summary_id)
+        except Exception:
+            pass
+    return deleted
 
 
 def clear_all_summaries() -> int:
     ensure_database()
     with connect() as connection:
         cursor = connection.execute("DELETE FROM session_summaries")
-        return int(cursor.rowcount)
+        deleted_count = int(cursor.rowcount)
+    if deleted_count:
+        try:
+            from .rag.runtime_sync import sync_session_summaries_after_clear_all
+
+            sync_session_summaries_after_clear_all()
+        except Exception:
+            pass
+    return deleted_count
 
 
 def summary_stats(session_key: str | None = None) -> dict[str, int]:

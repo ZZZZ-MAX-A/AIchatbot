@@ -95,13 +95,42 @@ def add_manual_memory(
                 now,
             ),
         )
-        return int(cursor.lastrowid)
+        memory_id = int(cursor.lastrowid)
+    try:
+        from .rag.runtime_sync import sync_manual_memory_after_write
+
+        sync_manual_memory_after_write(memory_id)
+    except Exception:
+        pass
+    return memory_id
+
+
+def get_manual_memory(memory_id: int) -> ManualMemory | None:
+    ensure_database()
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                subject_type,
+                subject_id,
+                memory_type,
+                content,
+                confidence,
+                created_at,
+                updated_at
+            FROM long_term_memories
+            WHERE id = ?
+            """,
+            (memory_id,),
+        ).fetchone()
+    return _memory_from_row(row) if row else None
 
 
 def list_manual_memories(
     subject_type: str | None = None,
     subject_id: str | None = None,
-    limit: int = 20,
+    limit: int | None = 20,
 ) -> list[ManualMemory]:
     ensure_database()
     clauses: list[str] = []
@@ -113,7 +142,10 @@ def list_manual_memories(
         clauses.append("subject_id = ?")
         params.append(subject_id)
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(limit)
 
     with connect() as connection:
         rows = connection.execute(
@@ -130,7 +162,7 @@ def list_manual_memories(
             FROM long_term_memories
             {where_clause}
             ORDER BY id DESC
-            LIMIT ?
+            {limit_clause}
             """,
             tuple(params),
         ).fetchall()
@@ -144,7 +176,15 @@ def delete_manual_memory(memory_id: int) -> bool:
             "DELETE FROM long_term_memories WHERE id = ?",
             (memory_id,),
         )
-        return int(cursor.rowcount) > 0
+        deleted = int(cursor.rowcount) > 0
+    if deleted:
+        try:
+            from .rag.runtime_sync import sync_manual_memory_after_delete
+
+            sync_manual_memory_after_delete(memory_id)
+        except Exception:
+            pass
+    return deleted
 
 
 def manual_memory_stats() -> dict[str, int]:
