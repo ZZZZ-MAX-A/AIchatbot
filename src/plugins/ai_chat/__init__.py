@@ -62,6 +62,10 @@ from .graph import (
     DiagnosticsGraphRunner,
     DiagnosticsState,
     DiagnosticsView,
+    MemoryAdminAction,
+    MemoryAdminGraphExecution,
+    MemoryAdminGraphRunner,
+    MemoryAdminState,
     MemoryContext,
     MemoryContextGraphExecution,
     MemoryContextGraphRunner,
@@ -1074,6 +1078,166 @@ def format_current_long_term_memories(event: MessageEvent) -> str:
     if not found:
         return "当前相关对象暂无手动长期记忆。"
     return "\n".join(lines)
+
+
+async def run_memory_admin_graph(
+    event: MessageEvent,
+    action: MemoryAdminAction,
+    *,
+    content: str = "",
+    target_id: str = "",
+) -> MemoryAdminGraphExecution:
+    state = MemoryAdminState(
+        action=action,
+        session_key=session_key(event),
+        content=content.strip(),
+        target_id=target_id.strip(),
+    )
+
+    def usage_for(current: MemoryAdminState) -> str:
+        usage = {
+            MemoryAdminAction.DELETE_SUMMARY: "用法：/删除摘要 摘要ID",
+            MemoryAdminAction.ADD_FACT_MEMORY: "用法：/添加事实记忆 内容",
+            MemoryAdminAction.ADD_PREFERENCE_MEMORY: "用法：/添加偏好记忆 内容",
+            MemoryAdminAction.DELETE_LONG_TERM_MEMORY: "用法：/删除长期记忆 记忆ID",
+        }
+        return usage.get(current.action, "用法不正确。")
+
+    async def validate_admin_request(current: MemoryAdminState) -> MemoryAdminState:
+        if current.action in {
+            MemoryAdminAction.ADD_FACT_MEMORY,
+            MemoryAdminAction.ADD_PREFERENCE_MEMORY,
+        } and not current.content:
+            current.reply_text = usage_for(current)
+            current.error = "validation_failed"
+            return current
+        if current.action in {
+            MemoryAdminAction.DELETE_SUMMARY,
+            MemoryAdminAction.DELETE_LONG_TERM_MEMORY,
+        } and (not current.target_id or not current.target_id.isdigit()):
+            current.reply_text = usage_for(current)
+            current.error = "validation_failed"
+            return current
+        return current
+
+    async def execute_admin_operation(current: MemoryAdminState) -> MemoryAdminState:
+        key = current.session_key
+
+        if current.action == MemoryAdminAction.SUMMARY_STATUS:
+            current.reply_text = "\n".join(summary_status_lines(key))
+        elif current.action == MemoryAdminAction.VIEW_SUMMARIES:
+            summaries = recent_summaries(key, 5)
+            if not summaries:
+                current.reply_text = "当前会话暂无摘要。"
+            else:
+                lines = ["当前会话最近摘要："]
+                for summary in summaries:
+                    lines.append(
+                        f"ID {summary.id}，覆盖 {summary.source_message_count} 条，"
+                        f"{summary.created_at}\n{summary.summary}"
+                    )
+                current.reply_text = "\n".join(lines)
+        elif current.action == MemoryAdminAction.VIEW_GAP_SCENE_SUMMARIES:
+            summaries = list_gap_scene_summaries(
+                key,
+                config.max_gap_scene_summaries_in_context,
+            )
+            if not summaries:
+                current.reply_text = "当前会话暂无空窗场景状态摘要。"
+            else:
+                lines = ["当前会话空窗场景状态摘要："]
+                for summary in summaries:
+                    lines.append(
+                        f"Slot {summary.slot}，覆盖 {summary.source_message_count} 条，"
+                        f"消息 ID {summary.message_start_id}-{summary.message_end_id}，"
+                        f"{summary.updated_at}\n{summary.summary}"
+                    )
+                current.reply_text = "\n".join(lines)
+        elif current.action == MemoryAdminAction.COMPRESS_SESSION:
+            try:
+                result = await compress_session(config, key, force=True)
+            except Exception as exc:
+                log_ai_event_error(exc, event)
+                current.reply_text = f"压缩失败：{type(exc).__name__}"
+                current.error = type(exc).__name__
+            else:
+                current.reply_text = compression_result_message(result)
+                current.metadata["compressed"] = result.compressed
+                current.metadata["summary_id"] = result.summary_id
+        elif current.action == MemoryAdminAction.CLEAR_SESSION_SUMMARIES:
+            count = clear_session_summaries(key)
+            current.reply_text = f"已清空当前会话摘要：{count} 条。"
+            current.metadata["cleared_count"] = count
+        elif current.action == MemoryAdminAction.DELETE_SUMMARY:
+            deleted = delete_session_summary(key, int(current.target_id))
+            current.reply_text = (
+                f"已删除当前会话摘要：ID {current.target_id}。"
+                if deleted
+                else f"没有找到当前会话摘要：{current.target_id}"
+            )
+            current.metadata["deleted"] = deleted
+        elif current.action == MemoryAdminAction.CLEAR_ALL_SUMMARIES:
+            count = clear_all_summaries()
+            current.reply_text = f"已清空全部摘要：{count} 条。"
+            current.metadata["cleared_count"] = count
+        elif current.action == MemoryAdminAction.ADD_FACT_MEMORY:
+            subject_type, subject_id = fact_memory_subject(event)
+            memory_id = add_manual_memory(
+                subject_type=subject_type,
+                subject_id=subject_id,
+                content=current.content,
+                memory_type=MANUAL_FACT_TYPE,
+                source_session_key=key,
+            )
+            current.reply_text = (
+                f"已添加事实摘要记忆：ID {memory_id}，对象："
+                f"{subject_label(subject_type, subject_id)}。"
+            )
+            current.metadata["memory_id"] = memory_id
+        elif current.action == MemoryAdminAction.ADD_PREFERENCE_MEMORY:
+            subject_type, subject_id = preference_memory_subject(event)
+            memory_id = add_manual_memory(
+                subject_type=subject_type,
+                subject_id=subject_id,
+                content=current.content,
+                memory_type=MANUAL_PREFERENCE_TYPE,
+                source_session_key=key,
+            )
+            current.reply_text = (
+                f"已添加偏好摘要记忆：ID {memory_id}，对象："
+                f"{subject_label(subject_type, subject_id)}。"
+            )
+            current.metadata["memory_id"] = memory_id
+        elif current.action == MemoryAdminAction.VIEW_LONG_TERM_MEMORY:
+            current.reply_text = format_current_long_term_memories(event)
+        elif current.action == MemoryAdminAction.DELETE_LONG_TERM_MEMORY:
+            deleted = delete_manual_memory(int(current.target_id))
+            current.reply_text = (
+                f"已删除长期记忆：ID {current.target_id}。"
+                if deleted
+                else f"没有找到长期记忆：{current.target_id}"
+            )
+            current.metadata["deleted"] = deleted
+        elif current.action == MemoryAdminAction.CLEAR_ALL_CONTEXT:
+            clear_all_sessions()
+            current.reply_text = "已清空全部会话上下文。"
+            current.metadata["cleared_context"] = True
+        else:
+            current.reply_text = "未知记忆管理命令。"
+            current.error = "unknown_action"
+        return current
+
+    async def render_admin_reply(current: MemoryAdminState) -> MemoryAdminState:
+        if not current.reply_text:
+            current.reply_text = "记忆管理命令已执行。"
+        return current
+
+    runner = MemoryAdminGraphRunner(
+        validate_admin_request=validate_admin_request,
+        execute_admin_operation=execute_admin_operation,
+        render_admin_reply=render_admin_reply,
+    )
+    return await runner.run(state)
 
 
 def stored_user_content(event: MessageEvent, text: str) -> str:
@@ -2582,145 +2746,105 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @clear_all_memory_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    clear_all_sessions()
-    await matcher.finish("已清空全部会话上下文。")
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.CLEAR_ALL_CONTEXT)
+    await matcher.finish(execution.result.reply_text)
 
 
 @summary_status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish("\n".join(summary_status_lines(session_key(event))))
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.SUMMARY_STATUS)
+    await matcher.finish(execution.result.reply_text)
 
 
 @view_summaries_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    summaries = recent_summaries(session_key(event), 5)
-    if not summaries:
-        await matcher.finish("当前会话暂无摘要。")
-    lines = ["当前会话最近摘要："]
-    for summary in summaries:
-        lines.append(
-            f"ID {summary.id}，覆盖 {summary.source_message_count} 条，"
-            f"{summary.created_at}\n{summary.summary}"
-        )
-    await matcher.finish("\n".join(lines))
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.VIEW_SUMMARIES)
+    await matcher.finish(execution.result.reply_text)
 
 
 @view_gap_scene_summaries_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    summaries = list_gap_scene_summaries(
-        session_key(event),
-        config.max_gap_scene_summaries_in_context,
-    )
-    if not summaries:
-        await matcher.finish("当前会话暂无空窗场景状态摘要。")
-    lines = ["当前会话空窗场景状态摘要："]
-    for summary in summaries:
-        lines.append(
-            f"Slot {summary.slot}，覆盖 {summary.source_message_count} 条，"
-            f"消息 ID {summary.message_start_id}-{summary.message_end_id}，"
-            f"{summary.updated_at}\n{summary.summary}"
-        )
-    await matcher.finish("\n".join(lines))
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.VIEW_GAP_SCENE_SUMMARIES)
+    await matcher.finish(execution.result.reply_text)
 
 
 @compress_session_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    try:
-        result = await compress_session(config, session_key(event), force=True)
-    except Exception as exc:
-        log_ai_event_error(exc, event)
-        await matcher.finish(f"压缩失败：{type(exc).__name__}")
-    await matcher.finish(compression_result_message(result))
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.COMPRESS_SESSION)
+    await matcher.finish(execution.result.reply_text)
 
 
 @clear_session_summaries_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    count = clear_session_summaries(session_key(event))
-    await matcher.finish(f"已清空当前会话摘要：{count} 条。")
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.CLEAR_SESSION_SUMMARIES)
+    await matcher.finish(execution.result.reply_text)
 
 
 @delete_summary_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
     target = parse_single_arg(arg.extract_plain_text())
-    if not target or not target.isdigit():
-        await matcher.finish("用法：/删除摘要 摘要ID")
-    deleted = delete_session_summary(session_key(event), int(target))
-    await matcher.finish(
-        f"已删除当前会话摘要：ID {target}。"
-        if deleted
-        else f"没有找到当前会话摘要：{target}"
+    execution = await run_memory_admin_graph(
+        event,
+        MemoryAdminAction.DELETE_SUMMARY,
+        target_id=target,
     )
+    await matcher.finish(execution.result.reply_text)
 
 
 @clear_all_summaries_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    count = clear_all_summaries()
-    await matcher.finish(f"已清空全部摘要：{count} 条。")
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.CLEAR_ALL_SUMMARIES)
+    await matcher.finish(execution.result.reply_text)
 
 
 @add_fact_memory_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
     content = arg.extract_plain_text().strip()
-    if not content:
-        await matcher.finish("用法：/添加事实记忆 内容")
-    subject_type, subject_id = fact_memory_subject(event)
-    memory_id = add_manual_memory(
-        subject_type=subject_type,
-        subject_id=subject_id,
+    execution = await run_memory_admin_graph(
+        event,
+        MemoryAdminAction.ADD_FACT_MEMORY,
         content=content,
-        memory_type=MANUAL_FACT_TYPE,
-        source_session_key=session_key(event),
     )
-    await matcher.finish(
-        f"已添加事实摘要记忆：ID {memory_id}，对象：{subject_label(subject_type, subject_id)}。"
-    )
+    await matcher.finish(execution.result.reply_text)
 
 
 @add_preference_memory_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
     content = arg.extract_plain_text().strip()
-    if not content:
-        await matcher.finish("用法：/添加偏好记忆 内容")
-    subject_type, subject_id = preference_memory_subject(event)
-    memory_id = add_manual_memory(
-        subject_type=subject_type,
-        subject_id=subject_id,
+    execution = await run_memory_admin_graph(
+        event,
+        MemoryAdminAction.ADD_PREFERENCE_MEMORY,
         content=content,
-        memory_type=MANUAL_PREFERENCE_TYPE,
-        source_session_key=session_key(event),
     )
-    await matcher.finish(
-        f"已添加偏好摘要记忆：ID {memory_id}，对象：{subject_label(subject_type, subject_id)}。"
-    )
+    await matcher.finish(execution.result.reply_text)
 
 
 @view_long_term_memory_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish(format_current_long_term_memories(event))
+    execution = await run_memory_admin_graph(event, MemoryAdminAction.VIEW_LONG_TERM_MEMORY)
+    await matcher.finish(execution.result.reply_text)
 
 
 @delete_long_term_memory_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
     target = parse_single_arg(arg.extract_plain_text())
-    if not target or not target.isdigit():
-        await matcher.finish("用法：/删除长期记忆 记忆ID")
-    deleted = delete_manual_memory(int(target))
-    await matcher.finish(
-        f"已删除长期记忆：ID {target}。"
-        if deleted
-        else f"没有找到长期记忆：{target}"
+    execution = await run_memory_admin_graph(
+        event,
+        MemoryAdminAction.DELETE_LONG_TERM_MEMORY,
+        target_id=target,
     )
+    await matcher.finish(execution.result.reply_text)
 
 
 @view_persona_cmd.handle()

@@ -488,6 +488,76 @@ class MemoryGraphRunnerTests(unittest.TestCase):
             (self.memory.MemoryNode.SAVE_USER_MESSAGE,),
         )
 
+    def test_memory_admin_graph_runner_executes_and_renders_reply(self):
+        state = self.memory.MemoryAdminState(
+            action=self.memory.MemoryAdminAction.ADD_FACT_MEMORY,
+            session_key="private:10001",
+            content="project fact",
+        )
+        calls = []
+
+        async def validate(memory_state):
+            calls.append(("validate", memory_state.action))
+            return memory_state
+
+        async def execute(memory_state):
+            calls.append(("execute", memory_state.content))
+            memory_state.metadata["memory_id"] = 7
+            return memory_state
+
+        async def render(memory_state):
+            calls.append(("render", memory_state.metadata["memory_id"]))
+            memory_state.reply_text = "已添加事实摘要记忆：ID 7。"
+            return memory_state
+
+        runner = self.memory.MemoryAdminGraphRunner(
+            validate_admin_request=validate,
+            execute_admin_operation=execute,
+            render_admin_reply=render,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.node_trace, self.memory.MEMORY_ADMIN_NODE_SEQUENCE)
+        self.assertEqual(execution.result.reply_text, "已添加事实摘要记忆：ID 7。")
+        self.assertEqual(execution.result.metadata["memory_id"], 7)
+        self.assertEqual(
+            calls,
+            [
+                ("validate", self.memory.MemoryAdminAction.ADD_FACT_MEMORY),
+                ("execute", "project fact"),
+                ("render", 7),
+            ],
+        )
+
+    def test_memory_admin_graph_runner_stops_on_validation_error(self):
+        state = self.memory.MemoryAdminState(
+            action=self.memory.MemoryAdminAction.DELETE_SUMMARY,
+            target_id="not-a-number",
+        )
+
+        async def validate(memory_state):
+            memory_state.reply_text = "用法：/删除摘要 摘要ID"
+            memory_state.error = "validation_failed"
+            return memory_state
+
+        async def execute(_):
+            raise AssertionError("execute should not run after validation failure")
+
+        runner = self.memory.MemoryAdminGraphRunner(
+            validate_admin_request=validate,
+            execute_admin_operation=execute,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "validation_failed")
+        self.assertEqual(execution.result.reply_text, "用法：/删除摘要 摘要ID")
+        self.assertEqual(
+            execution.node_trace,
+            (self.memory.MemoryAdminNode.VALIDATE_ADMIN_REQUEST,),
+        )
+
 
 class VisionGraphRunnerTests(unittest.TestCase):
     @classmethod
