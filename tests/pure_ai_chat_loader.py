@@ -285,6 +285,43 @@ def load_legacy_memory_modules():
     return modules
 
 
+def load_rag_modules():
+    ensure_ai_chat_packages()
+    ensure_package("src.plugins.ai_chat.rag", AI_CHAT_ROOT / "rag")
+
+    modules = {
+        "database": load_module(
+            "src.plugins.ai_chat.database",
+            AI_CHAT_ROOT / "database.py",
+        ),
+        "schema": load_module(
+            "src.plugins.ai_chat.rag.schema",
+            AI_CHAT_ROOT / "rag" / "schema.py",
+        ),
+    }
+    modules["documents"] = load_module(
+        "src.plugins.ai_chat.rag.documents",
+        AI_CHAT_ROOT / "rag" / "documents.py",
+    )
+    modules["embeddings"] = load_module(
+        "src.plugins.ai_chat.rag.embeddings",
+        AI_CHAT_ROOT / "rag" / "embeddings.py",
+    )
+    modules["search"] = load_module(
+        "src.plugins.ai_chat.rag.search",
+        AI_CHAT_ROOT / "rag" / "search.py",
+    )
+    modules["project_docs"] = load_module(
+        "src.plugins.ai_chat.rag.project_docs",
+        AI_CHAT_ROOT / "rag" / "project_docs.py",
+    )
+    modules["memory_sources"] = load_module(
+        "src.plugins.ai_chat.rag.memory_sources",
+        AI_CHAT_ROOT / "rag" / "memory_sources.py",
+    )
+    return modules
+
+
 def load_legacy_operation_modules():
     install_openai_stub()
     ensure_ai_chat_packages()

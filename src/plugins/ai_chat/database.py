@@ -7,7 +7,7 @@ from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_PATH = PROJECT_ROOT / "data" / "chatbot.db"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def utc_now() -> str:
@@ -127,6 +127,77 @@ def ensure_database() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_gap_scene_summaries_session_slot
             ON gap_scene_summaries (session_key, slot)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                namespace TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_version TEXT,
+                subject_type TEXT,
+                subject_id TEXT,
+                session_key TEXT,
+                message_type TEXT,
+                user_id TEXT,
+                group_id TEXT,
+                visibility TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_unique_source_chunk
+            ON rag_documents (namespace, source_type, source_id, chunk_index)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rag_documents_namespace
+            ON rag_documents (namespace, deleted_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rag_documents_source
+            ON rag_documents (source_type, source_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rag_documents_scope
+            ON rag_documents (subject_type, subject_id, session_key, visibility)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                embedding_provider TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                embedding_dimension INTEGER NOT NULL,
+                embedding TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES rag_documents(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_embeddings_document_model
+            ON rag_embeddings (document_id, embedding_provider, embedding_model)
             """
         )
         connection.execute(
