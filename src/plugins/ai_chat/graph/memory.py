@@ -30,6 +30,34 @@ MEMORY_PERSIST_NODE_SEQUENCE: tuple[MemoryNode, ...] = (
 )
 
 
+class MemoryAdminAction(str, Enum):
+    SUMMARY_STATUS = "summary_status"
+    VIEW_SUMMARIES = "view_summaries"
+    VIEW_GAP_SCENE_SUMMARIES = "view_gap_scene_summaries"
+    COMPRESS_SESSION = "compress_session"
+    CLEAR_SESSION_SUMMARIES = "clear_session_summaries"
+    DELETE_SUMMARY = "delete_summary"
+    CLEAR_ALL_SUMMARIES = "clear_all_summaries"
+    ADD_FACT_MEMORY = "add_fact_memory"
+    ADD_PREFERENCE_MEMORY = "add_preference_memory"
+    VIEW_LONG_TERM_MEMORY = "view_long_term_memory"
+    DELETE_LONG_TERM_MEMORY = "delete_long_term_memory"
+    CLEAR_ALL_CONTEXT = "clear_all_context"
+
+
+class MemoryAdminNode(str, Enum):
+    VALIDATE_ADMIN_REQUEST = "validate_admin_request"
+    EXECUTE_ADMIN_OPERATION = "execute_admin_operation"
+    RENDER_ADMIN_REPLY = "render_admin_reply"
+
+
+MEMORY_ADMIN_NODE_SEQUENCE: tuple[MemoryAdminNode, ...] = (
+    MemoryAdminNode.VALIDATE_ADMIN_REQUEST,
+    MemoryAdminNode.EXECUTE_ADMIN_OPERATION,
+    MemoryAdminNode.RENDER_ADMIN_REPLY,
+)
+
+
 @dataclass
 class MemoryContext:
     session_key: str = ""
@@ -100,6 +128,31 @@ class MemoryPersistGraphExecution:
     node_trace: tuple[MemoryNode, ...]
 
 
+@dataclass
+class MemoryAdminState:
+    action: MemoryAdminAction
+    session_key: str = ""
+    content: str = ""
+    target_id: str = ""
+    reply_text: str = ""
+    metadata: dict[str, object] = field(default_factory=dict)
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryAdminGraphResult:
+    reply_text: str
+    error: str = ""
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryAdminGraphExecution:
+    state: MemoryAdminState
+    result: MemoryAdminGraphResult
+    node_trace: tuple[MemoryAdminNode, ...]
+
+
 MemoryContextHandler: TypeAlias = Callable[
     [MemoryContext],
     MemoryContext | Awaitable[MemoryContext],
@@ -107,6 +160,10 @@ MemoryContextHandler: TypeAlias = Callable[
 MemoryPersistHandler: TypeAlias = Callable[
     [MemoryPersistState],
     MemoryPersistState | Awaitable[MemoryPersistState],
+]
+MemoryAdminHandler: TypeAlias = Callable[
+    [MemoryAdminState],
+    MemoryAdminState | Awaitable[MemoryAdminState],
 ]
 
 
@@ -200,3 +257,47 @@ class MemoryPersistGraphRunner:
             error=current.error,
         )
         return MemoryPersistGraphExecution(current, result, tuple(node_trace))
+
+
+class MemoryAdminGraphRunner:
+    """Executable memory administration graph boundary for owner commands."""
+
+    def __init__(
+        self,
+        *,
+        validate_admin_request: MemoryAdminHandler | None = None,
+        execute_admin_operation: MemoryAdminHandler | None = None,
+        render_admin_reply: MemoryAdminHandler | None = None,
+    ) -> None:
+        self.validate_admin_request = validate_admin_request
+        self.execute_admin_operation = execute_admin_operation
+        self.render_admin_reply = render_admin_reply
+
+    async def run(self, state: MemoryAdminState) -> MemoryAdminGraphExecution:
+        node_trace: list[MemoryAdminNode] = []
+        current = state
+
+        for node in MEMORY_ADMIN_NODE_SEQUENCE:
+            node_trace.append(node)
+            if (
+                node == MemoryAdminNode.VALIDATE_ADMIN_REQUEST
+                and self.validate_admin_request is not None
+            ):
+                current = await _maybe_await(self.validate_admin_request(current))
+            elif (
+                node == MemoryAdminNode.EXECUTE_ADMIN_OPERATION
+                and self.execute_admin_operation is not None
+            ):
+                current = await _maybe_await(self.execute_admin_operation(current))
+            elif node == MemoryAdminNode.RENDER_ADMIN_REPLY and self.render_admin_reply is not None:
+                current = await _maybe_await(self.render_admin_reply(current))
+
+            if current.error:
+                break
+
+        result = MemoryAdminGraphResult(
+            reply_text=current.reply_text,
+            error=current.error,
+            metadata=dict(current.metadata),
+        )
+        return MemoryAdminGraphExecution(current, result, tuple(node_trace))

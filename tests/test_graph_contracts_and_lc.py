@@ -84,6 +84,20 @@ class GraphContractTests(unittest.TestCase):
             ),
         )
 
+    def test_memory_admin_sequence_validates_before_execute_and_render(self):
+        sequence = self.memory.MEMORY_ADMIN_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.memory.MemoryAdminNode.VALIDATE_ADMIN_REQUEST)
+        self.assertLess(
+            sequence.index(self.memory.MemoryAdminNode.VALIDATE_ADMIN_REQUEST),
+            sequence.index(self.memory.MemoryAdminNode.EXECUTE_ADMIN_OPERATION),
+        )
+        self.assertLess(
+            sequence.index(self.memory.MemoryAdminNode.EXECUTE_ADMIN_OPERATION),
+            sequence.index(self.memory.MemoryAdminNode.RENDER_ADMIN_REPLY),
+        )
+        self.assertEqual(sequence[-1], self.memory.MemoryAdminNode.RENDER_ADMIN_REPLY)
+
     def test_vision_node_sequence_describes_before_returning_artifact(self):
         sequence = self.vision.VISION_NODE_SEQUENCE
 
