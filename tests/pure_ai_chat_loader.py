@@ -307,6 +307,10 @@ def load_rag_modules():
         "src.plugins.ai_chat.rag.embeddings",
         AI_CHAT_ROOT / "rag" / "embeddings.py",
     )
+    modules["providers"] = load_module(
+        "src.plugins.ai_chat.rag.providers",
+        AI_CHAT_ROOT / "rag" / "providers.py",
+    )
     modules["search"] = load_module(
         "src.plugins.ai_chat.rag.search",
         AI_CHAT_ROOT / "rag" / "search.py",
@@ -318,6 +322,10 @@ def load_rag_modules():
     modules["memory_sources"] = load_module(
         "src.plugins.ai_chat.rag.memory_sources",
         AI_CHAT_ROOT / "rag" / "memory_sources.py",
+    )
+    modules["project_index"] = load_module(
+        "src.plugins.ai_chat.rag.project_index",
+        AI_CHAT_ROOT / "rag" / "project_index.py",
     )
     return modules
 
