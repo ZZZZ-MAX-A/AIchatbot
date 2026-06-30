@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
 from pure_ai_chat_loader import load_legacy_media_modules
 
@@ -38,6 +40,7 @@ class VisionPureUnitTests(unittest.TestCase):
         )
 
         urls = self.vision.image_urls_from_event(event)
+        refs = self.vision.image_refs_from_event(event)
 
         self.assertEqual(
             urls,
@@ -47,7 +50,34 @@ class VisionPureUnitTests(unittest.TestCase):
                 "data:image/png;base64,AAAA",
             ],
         )
+        self.assertEqual(
+            refs,
+            [
+                "https://example.test/a.png",
+                "http://example.test/b.jpg",
+                "data:image/png;base64,AAAA",
+                "local-cache-name.jpg",
+            ],
+        )
         self.assertTrue(self.vision.event_has_image(event))
+
+    def test_image_refs_from_event_accepts_onebot_file_id_and_path(self):
+        event = self.make_event(
+            [
+                {
+                    "type": "image",
+                    "data": {
+                        "file_id": "napcat-file-id",
+                        "path": "D:\\NapCat\\cache\\image.jpg",
+                    },
+                },
+            ]
+        )
+
+        refs = self.vision.image_refs_from_event(event)
+
+        self.assertEqual(refs, ["D:\\NapCat\\cache\\image.jpg", "napcat-file-id"])
+        self.assertEqual(self.vision.image_urls_from_event(event), [])
 
     def test_image_urls_from_event_ignores_non_image_and_empty_data(self):
         event = self.make_event(
@@ -99,12 +129,24 @@ class VisionPureUnitTests(unittest.TestCase):
 
         self.assertEqual(result, payload)
 
+    def test_download_image_base64_accepts_local_paths_and_file_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "image.png"
+            path.write_bytes(b"image-bytes")
+            expected = base64.b64encode(b"image-bytes").decode("ascii")
+
+            local_result = self.vision._download_image_base64(str(path), 1, 100)
+            file_url_result = self.vision._download_image_base64(path.as_uri(), 1, 100)
+
+        self.assertEqual(local_result, expected)
+        self.assertEqual(file_url_result, expected)
+
     def test_download_image_base64_rejects_invalid_local_inputs_without_network(self):
         with self.assertRaises(self.vision.VisionError):
             self.vision._download_image_base64("data:image/png;base64", 1, 1)
 
         with self.assertRaises(self.vision.VisionError):
-            self.vision._download_image_base64("file:///tmp/image.png", 1, 1)
+            self.vision._download_image_base64("file:///definitely/missing/image.png", 1, 1)
 
     def test_describe_images_short_circuits_when_disabled_or_limited(self):
         disabled = types.SimpleNamespace(enable_vision=False)

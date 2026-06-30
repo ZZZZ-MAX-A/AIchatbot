@@ -11,7 +11,9 @@ class GraphContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.modules = load_pure_graph_modules()
         cls.chat = cls.modules["chat"]
+        cls.diagnostics = cls.modules["diagnostics"]
         cls.memory = cls.modules["memory"]
+        cls.notification = cls.modules["notification"]
         cls.root = cls.modules["root"]
         cls.vision = cls.modules["vision"]
         cls.voice = cls.modules["voice"]
@@ -65,6 +67,14 @@ class GraphContractTests(unittest.TestCase):
         self.assertIn(self.memory.MemoryNode.BUILD_HISTORY, context_sequence)
         self.assertIn(self.memory.MemoryNode.BUILD_MANUAL_MEMORY_CONTEXT, context_sequence)
         self.assertNotIn(self.memory.MemoryNode.SAVE_USER_MESSAGE, context_sequence)
+        self.assertLess(
+            context_sequence.index(self.memory.MemoryNode.ENSURE_GAP_SCENE),
+            context_sequence.index(self.memory.MemoryNode.BUILD_HISTORY),
+        )
+        self.assertLess(
+            context_sequence.index(self.memory.MemoryNode.BUILD_MANUAL_MEMORY_CONTEXT),
+            context_sequence.index(self.memory.MemoryNode.BUILD_HISTORY),
+        )
         self.assertEqual(
             persist_sequence,
             (
@@ -79,7 +89,19 @@ class GraphContractTests(unittest.TestCase):
 
         self.assertEqual(sequence[0], self.vision.VisionNode.EXTRACT_IMAGE_URLS)
         self.assertLess(
+            sequence.index(self.vision.VisionNode.APPLY_IMAGE_CACHE_POLICY),
             sequence.index(self.vision.VisionNode.DESCRIBE_IMAGES),
+        )
+        self.assertLess(
+            sequence.index(self.vision.VisionNode.CHECK_VISION_ACCESS),
+            sequence.index(self.vision.VisionNode.DESCRIBE_IMAGES),
+        )
+        self.assertLess(
+            sequence.index(self.vision.VisionNode.DESCRIBE_IMAGES),
+            sequence.index(self.vision.VisionNode.SANITIZE_IMAGE_CONTEXT),
+        )
+        self.assertLess(
+            sequence.index(self.vision.VisionNode.SANITIZE_IMAGE_CONTEXT),
             sequence.index(self.vision.VisionNode.RETURN_IMAGE_ARTIFACT),
         )
 
@@ -91,6 +113,42 @@ class GraphContractTests(unittest.TestCase):
             sequence.index(self.voice.VoiceNode.GENERATE_TTS),
         )
         self.assertEqual(sequence[-1], self.voice.VoiceNode.SEND_PRIVATE_RECORD)
+
+    def test_diagnostics_node_sequence_reads_before_rendering(self):
+        sequence = self.diagnostics.DIAGNOSTICS_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.diagnostics.DiagnosticsNode.READ_CONFIG_SNAPSHOT)
+        self.assertLess(
+            sequence.index(self.diagnostics.DiagnosticsNode.CHECK_TTS_HEALTH),
+            sequence.index(self.diagnostics.DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY),
+        )
+        self.assertLess(
+            sequence.index(self.diagnostics.DiagnosticsNode.READ_RECENT_ERRORS),
+            sequence.index(self.diagnostics.DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY),
+        )
+        self.assertEqual(sequence[-1], self.diagnostics.DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY)
+
+    def test_notification_node_sequence_checks_before_sending_owner_message(self):
+        sequence = self.notification.NOTIFICATION_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.notification.NotificationNode.CHECK_NOTIFICATION_POLICY)
+        self.assertLess(
+            sequence.index(self.notification.NotificationNode.CHECK_NOTIFICATION_POLICY),
+            sequence.index(self.notification.NotificationNode.SEND_OWNER_PRIVATE_MESSAGE),
+        )
+        self.assertLess(
+            sequence.index(self.notification.NotificationNode.VALIDATE_NOTIFICATION_CONTENT),
+            sequence.index(self.notification.NotificationNode.CHECK_NOTIFICATION_COOLDOWN),
+        )
+        self.assertLess(
+            sequence.index(self.notification.NotificationNode.CHECK_NOTIFICATION_COOLDOWN),
+            sequence.index(self.notification.NotificationNode.FORMAT_OWNER_NOTIFICATION),
+        )
+        self.assertLess(
+            sequence.index(self.notification.NotificationNode.FORMAT_OWNER_NOTIFICATION),
+            sequence.index(self.notification.NotificationNode.SEND_OWNER_PRIVATE_MESSAGE),
+        )
+        self.assertEqual(sequence[-1], self.notification.NotificationNode.RENDER_SOURCE_REPLY)
 
     def test_vision_artifact_from_context_freezes_descriptions(self):
         context = self.vision.VisionContext(

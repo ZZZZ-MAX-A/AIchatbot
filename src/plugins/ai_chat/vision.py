@@ -1,10 +1,11 @@
 import asyncio
 import base64
 import json
+from pathlib import Path
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 from nonebot.adapters.onebot.v11 import MessageEvent
@@ -73,6 +74,10 @@ class VisionError(RuntimeError):
     pass
 
 
+DIRECT_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
+IMAGE_REF_FIELDS = ("file", "path", "file_id", "url")
+
+
 def _segment_type(segment: Any) -> str:
     if hasattr(segment, "type"):
         return str(segment.type)
@@ -92,20 +97,30 @@ def _segment_data(segment: Any) -> dict[str, Any]:
     return {}
 
 
-def image_urls_from_event(event: MessageEvent) -> list[str]:
-    urls: list[str] = []
+def _append_unique(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
+
+
+def is_direct_image_source(value: str) -> bool:
+    return value.strip().startswith(DIRECT_IMAGE_PREFIXES)
+
+
+def image_refs_from_event(event: MessageEvent) -> list[str]:
+    refs: list[str] = []
     for segment in event.message:
         if _segment_type(segment) != "image":
             continue
         data = _segment_data(segment)
-        url = str(data.get("url") or "").strip()
-        if not url:
-            file_value = str(data.get("file") or "").strip()
-            if file_value.startswith(("http://", "https://", "data:image/")):
-                url = file_value
-        if url:
-            urls.append(url)
-    return urls
+        for field in IMAGE_REF_FIELDS:
+            value = str(data.get(field) or "").strip()
+            if value:
+                _append_unique(refs, value)
+    return refs
+
+
+def image_urls_from_event(event: MessageEvent) -> list[str]:
+    return [ref for ref in image_refs_from_event(event) if is_direct_image_source(ref)]
 
 
 def event_has_image(event: MessageEvent) -> bool:
@@ -168,6 +183,7 @@ async def _image_url_to_base64(url: str, timeout_seconds: int, max_bytes: int) -
 
 
 def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> str:
+    url = url.strip()
     if url.startswith("data:image/"):
         try:
             _, payload = url.split(",", 1)
@@ -176,8 +192,12 @@ def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> st
         return payload.strip()
 
     parsed = urlparse(url)
+    if parsed.scheme == "file":
+        return _read_local_image_base64(_file_url_to_path(parsed), max_bytes)
+    if _looks_like_local_path(url):
+        return _read_local_image_base64(Path(url), max_bytes)
     if parsed.scheme not in {"http", "https"}:
-        raise VisionError("图片地址不是 HTTP/HTTPS URL")
+        raise VisionError("图片地址不是 HTTP/HTTPS URL，也不是可读取本地文件")
 
     request = Request(
         url,
@@ -211,6 +231,37 @@ def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> st
     if not chunks:
         raise VisionError("图片内容为空")
     return base64.b64encode(b"".join(chunks)).decode("ascii")
+
+
+def _file_url_to_path(parsed) -> Path:
+    if parsed.netloc and parsed.path:
+        return Path(f"//{parsed.netloc}{unquote(parsed.path)}")
+    return Path(unquote(parsed.path))
+
+
+def _looks_like_local_path(value: str) -> bool:
+    if not value:
+        return False
+    path = Path(value)
+    return path.is_absolute() or path.exists()
+
+
+def _read_local_image_base64(path: Path, max_bytes: int) -> str:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError as exc:
+        raise VisionError("本地图片路径无效") from exc
+
+    if not resolved.is_file():
+        raise VisionError("本地图片文件不存在")
+
+    limit = max(max_bytes, 1)
+    size = resolved.stat().st_size
+    if size <= 0:
+        raise VisionError("图片内容为空")
+    if size > limit:
+        raise VisionError("图片超过大小限制")
+    return base64.b64encode(resolved.read_bytes()).decode("ascii")
 
 
 async def _describe_image_base64(config: AiChatConfig, image_base64: str) -> str:
