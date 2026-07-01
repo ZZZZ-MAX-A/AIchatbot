@@ -17,6 +17,7 @@ from .schema import (
 )
 from .project_index import ProjectDocIndexStats, rebuild_project_doc_index, retrieve_project_docs
 from .memory_index import MemoryRagIndexStats, rebuild_memory_rag_index, retrieve_memory
+from .combined import CombinedRagResults, format_combined_rag_results, retrieve_combined_rag
 
 __all__ = [
     "NAMESPACE_PROJECT_DOCS",
@@ -38,4 +39,7 @@ __all__ = [
     "MemoryRagIndexStats",
     "rebuild_memory_rag_index",
     "retrieve_memory",
+    "CombinedRagResults",
+    "format_combined_rag_results",
+    "retrieve_combined_rag",
 ]

@@ -4,6 +4,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+PROJECT_DOC_INCLUDE_PATTERNS: tuple[str, ...] = (
+    "README.md",
+    "docs/**/*.md",
+    "prompts/base/**/*.json",
+    "prompts/persona-cards/public/**/*.md",
+)
+PROJECT_DOC_EXCLUDED_PARTS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".venv",
+        "data",
+        "docs-archive",
+        "logs",
+        "prompts/persona-cards/private",
+        "temp_audio",
+        "tools",
+        "tts-validation",
+        "voice-samples",
+        "__pycache__",
+    }
+)
+PROJECT_DOC_EXCLUDED_SUFFIXES: tuple[str, ...] = (
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".log",
+)
+
+
 @dataclass(frozen=True)
 class ProjectDocChunk:
     source_id: str
@@ -67,9 +96,41 @@ def chunk_markdown_document(
     return chunks
 
 
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
+    return path.relative_to(root).as_posix().split("/")
+
+
+def should_index_project_document(path: Path, root: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    relative = path.relative_to(root).as_posix()
+    if path.name.startswith(".env") or any(part.startswith(".") for part in _relative_parts(path, root)):
+        return False
+    if relative in {"pyproject.toml"}:
+        return False
+    if path.suffix.lower() in PROJECT_DOC_EXCLUDED_SUFFIXES:
+        return False
+    for excluded in PROJECT_DOC_EXCLUDED_PARTS:
+        if relative == excluded or relative.startswith(f"{excluded}/"):
+            return False
+    return True
+
+
+def iter_project_document_files(root: Path) -> list[Path]:
+    root = root.resolve()
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for pattern in PROJECT_DOC_INCLUDE_PATTERNS:
+        for path in sorted(root.glob(pattern)):
+            if not should_index_project_document(path, root):
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(path)
+    return files
+
+
 def iter_project_markdown_files(root: Path) -> list[Path]:
-    candidates = [root / "README.md"]
-    docs_dir = root / "docs"
-    if docs_dir.exists():
-        candidates.extend(sorted(docs_dir.glob("*.md")))
-    return [path for path in candidates if path.exists() and path.is_file()]
+    return iter_project_document_files(root)

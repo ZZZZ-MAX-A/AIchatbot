@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib.util
 import sys
 import types
@@ -39,6 +40,8 @@ def load_ai_chat_modules() -> dict[str, object]:
     ensure_package("src.plugins", REPO_ROOT / "src" / "plugins")
     ensure_package("src.plugins.ai_chat", AI_CHAT_ROOT)
     ensure_package("src.plugins.ai_chat.rag", AI_CHAT_ROOT / "rag")
+    ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
+    ensure_package("src.plugins.ai_chat.policy", AI_CHAT_ROOT / "policy")
 
     modules: dict[str, object] = {
         "config": load_module("src.plugins.ai_chat.config", AI_CHAT_ROOT / "config.py"),
@@ -77,6 +80,26 @@ def load_ai_chat_modules() -> dict[str, object]:
         "src.plugins.ai_chat.rag.project_index",
         AI_CHAT_ROOT / "rag" / "project_index.py",
     )
+    modules["combined"] = load_module(
+        "src.plugins.ai_chat.rag.combined",
+        AI_CHAT_ROOT / "rag" / "combined.py",
+    )
+    modules["dev_context"] = load_module(
+        "src.plugins.ai_chat.graph.dev_context",
+        AI_CHAT_ROOT / "graph" / "dev_context.py",
+    )
+    modules["main_agent"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent",
+        AI_CHAT_ROOT / "graph" / "main_agent.py",
+    )
+    modules["risk"] = load_module(
+        "src.plugins.ai_chat.policy.risk",
+        AI_CHAT_ROOT / "policy" / "risk.py",
+    )
+    modules["policy_engine"] = load_module(
+        "src.plugins.ai_chat.policy.engine",
+        AI_CHAT_ROOT / "policy" / "engine.py",
+    )
     return modules
 
 
@@ -86,6 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory", action="store_true", help="Rebuild MemoryRAG index.")
     parser.add_argument("--query-project-docs", help="Query ProjectDocRAG with the provided text.")
     parser.add_argument("--query-memory", help="Query MemoryRAG with the provided text.")
+    parser.add_argument("--query-combined", help="Query ProjectDocRAG and MemoryRAG together for dev-side context.")
+    parser.add_argument("--query-dev-context", help="Build dev-side context through the DevContextGraph boundary.")
+    parser.add_argument("--query-main-agent", help="Run MainAgentGraph with the read-only dev_context tool.")
     parser.add_argument("--root", default=str(REPO_ROOT), help="Repository root to scan.")
     parser.add_argument("--max-chars", type=int, default=1800, help="Maximum characters per Markdown chunk.")
     parser.add_argument("--top-k", type=int, help="Retrieval top-k override.")
@@ -94,17 +120,136 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+PROJECT_DOC_REBUILD_LABELS = {
+    "scanned_files": "扫描文件",
+    "chunks_seen": "扫描片段",
+    "created_documents": "新增文档",
+    "updated_documents": "更新文档",
+    "reactivated_documents": "恢复文档",
+    "unchanged_documents": "未变化文档",
+    "embeddings_created": "新增向量",
+    "embeddings_updated": "更新向量",
+    "embeddings_skipped": "跳过向量",
+    "soft_deleted_documents": "软删除过期文档",
+}
+MEMORY_REBUILD_LABELS = {
+    "scanned_manual_memories": "扫描长期记忆",
+    "scanned_session_summaries": "扫描会话摘要",
+    "created_documents": "新增文档",
+    "updated_documents": "更新文档",
+    "reactivated_documents": "恢复文档",
+    "unchanged_documents": "未变化文档",
+    "embeddings_created": "新增向量",
+    "embeddings_updated": "更新向量",
+    "embeddings_skipped": "跳过向量",
+    "soft_deleted_documents": "软删除过期文档",
+}
+
+
+def print_stats(title: str, stats: object, labels: dict[str, str]) -> int:
+    data = stats.as_dict()
+    print(title)
+    for key, label in labels.items():
+        print(f"  {label}: {data.get(key, 0)}")
+    errors = data.get("errors") or []
+    if errors:
+        print("错误:")
+        for error in errors:
+            print(f"  - {error}")
+        return 1
+    print("错误: 无")
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if not args.project_docs and not args.memory and not args.query_project_docs and not args.query_memory:
-        parser.error("choose --project-docs, --memory, --query-project-docs, or --query-memory")
+    if (
+        not args.project_docs
+        and not args.memory
+        and not args.query_project_docs
+        and not args.query_memory
+        and not args.query_combined
+        and not args.query_dev_context
+        and not args.query_main_agent
+    ):
+        parser.error(
+            "choose --project-docs, --memory, --query-project-docs, "
+            "--query-memory, --query-combined, --query-dev-context, or --query-main-agent"
+        )
 
     modules = load_ai_chat_modules()
     config = modules["config"].load_config()
     embedder = modules["providers"].build_embedding_provider(config)
     project_index = modules["project_index"]
     memory_index = modules["memory_index"]
+    combined = modules["combined"]
+    dev_context = modules["dev_context"]
+    main_agent = modules["main_agent"]
+    risk = modules["risk"]
+    policy_engine = modules["policy_engine"]
+
+    async def run_dev_context_query(query: str, *, is_owner: bool = True):
+        state = dev_context.DevContextState(query=query, is_owner=is_owner)
+
+        def validate_context_request(current):
+            if not current.is_owner:
+                current.context_text = "只有主人可以使用开发侧上下文恢复。"
+                current.error = "permission_denied"
+            elif not current.query.strip():
+                current.context_text = "请输入开发侧上下文查询。"
+                current.error = "validation_failed"
+            return current
+
+        def retrieve_combined_context(current):
+            results = combined.retrieve_combined_rag(
+                query=current.query,
+                embedder=embedder,
+                is_owner=current.is_owner,
+                project_top_k=args.top_k or config.project_doc_rag_top_k,
+                project_min_score=(
+                    args.min_score if args.min_score is not None else config.project_doc_rag_min_score
+                ),
+                project_max_context_chars=(
+                    args.max_context_chars
+                    if args.max_context_chars is not None
+                    else config.project_doc_rag_max_context_chars
+                ),
+                memory_top_k=args.top_k or config.memory_rag_top_k,
+                memory_min_score=args.min_score if args.min_score is not None else config.memory_rag_min_score,
+                memory_max_context_chars=(
+                    args.max_context_chars
+                    if args.max_context_chars is not None
+                    else config.memory_rag_max_context_chars
+                ),
+            )
+            current.project_result_count = len(results.project_docs)
+            current.memory_result_count = len(results.memories)
+            current.metadata["combined_results"] = results
+            return current
+
+        def render_context_artifact(current):
+            results = current.metadata.get("combined_results")
+            if results is None:
+                return current
+            current.context_text = "\n".join(
+                [
+                    "DevContextGraph 开发侧上下文恢复：",
+                    f"查询：{current.query}",
+                    f"项目文档命中：{current.project_result_count}",
+                    f"记忆命中：{current.memory_result_count}",
+                    "",
+                    combined.format_combined_rag_results(results),
+                ]
+            ).strip()
+            return current
+
+        runner = dev_context.DevContextGraphRunner(
+            validate_context_request=validate_context_request,
+            retrieve_combined_context=retrieve_combined_context,
+            render_context_artifact=render_context_artifact,
+        )
+        return await runner.run(state)
 
     exit_code = 0
     if args.project_docs:
@@ -113,16 +258,7 @@ def main() -> int:
             embedder=embedder,
             max_chars=args.max_chars,
         )
-        print("ProjectDocRAG rebuild stats:")
-        for key, value in stats.as_dict().items():
-            if key == "errors":
-                continue
-            print(f"  {key}: {value}")
-        if stats.errors:
-            exit_code = 1
-            print("Errors:")
-            for error in stats.errors:
-                print(f"  - {error}")
+        exit_code = max(exit_code, print_stats("ProjectDocRAG 项目文档索引重建完成：", stats, PROJECT_DOC_REBUILD_LABELS))
 
     if args.memory:
         stats = memory_index.rebuild_memory_rag_index(
@@ -131,16 +267,7 @@ def main() -> int:
             include_manual_preferences=config.memory_rag_include_manual_preferences,
             include_session_summaries=config.memory_rag_include_session_summaries,
         )
-        print("MemoryRAG rebuild stats:")
-        for key, value in stats.as_dict().items():
-            if key == "errors":
-                continue
-            print(f"  {key}: {value}")
-        if stats.errors:
-            exit_code = 1
-            print("Errors:")
-            for error in stats.errors:
-                print(f"  - {error}")
+        exit_code = max(exit_code, print_stats("MemoryRAG 记忆索引重建完成：", stats, MEMORY_REBUILD_LABELS))
 
     if args.query_project_docs:
         try:
@@ -157,7 +284,7 @@ def main() -> int:
                 ),
             )
         except modules["providers"].EmbeddingProviderError as exc:
-            print(f"ProjectDocRAG query failed: {exc}")
+            print(f"ProjectDocRAG 查询失败：{exc}")
             exit_code = 1
         else:
             print(project_index.format_project_doc_results(results))
@@ -177,10 +304,153 @@ def main() -> int:
                 ),
             )
         except modules["providers"].EmbeddingProviderError as exc:
-            print(f"MemoryRAG query failed: {exc}")
+            print(f"MemoryRAG 查询失败：{exc}")
             exit_code = 1
         else:
             print(memory_index.format_memory_results(results))
+
+    if args.query_combined:
+        try:
+            results = combined.retrieve_combined_rag(
+                query=args.query_combined,
+                embedder=embedder,
+                is_owner=True,
+                project_top_k=args.top_k or config.project_doc_rag_top_k,
+                project_min_score=(
+                    args.min_score if args.min_score is not None else config.project_doc_rag_min_score
+                ),
+                project_max_context_chars=(
+                    args.max_context_chars
+                    if args.max_context_chars is not None
+                    else config.project_doc_rag_max_context_chars
+                ),
+                memory_top_k=args.top_k or config.memory_rag_top_k,
+                memory_min_score=args.min_score if args.min_score is not None else config.memory_rag_min_score,
+                memory_max_context_chars=(
+                    args.max_context_chars
+                    if args.max_context_chars is not None
+                    else config.memory_rag_max_context_chars
+                ),
+            )
+        except modules["providers"].EmbeddingProviderError as exc:
+            print(f"CombinedRAG 查询失败：{exc}")
+            exit_code = 1
+        else:
+            print(combined.format_combined_rag_results(results))
+
+    if args.query_dev_context:
+        try:
+            execution = asyncio.run(run_dev_context_query(args.query_dev_context, is_owner=True))
+        except modules["providers"].EmbeddingProviderError as exc:
+            print(f"DevContextGraph 查询失败：{exc}")
+            exit_code = 1
+        else:
+            print(execution.result.context_text)
+            if execution.result.error:
+                exit_code = 1
+
+    if args.query_main_agent:
+        try:
+            state = main_agent.MainAgentState(
+                query=args.query_main_agent,
+                is_owner=True,
+                is_group=False,
+            )
+
+            def validate_agent_request(current):
+                if not current.is_owner:
+                    current.response_text = "MainAgentGraph 拒绝执行：只有主人可以使用。"
+                    current.error = "permission_denied"
+                elif current.is_group:
+                    current.response_text = "MainAgentGraph 拒绝执行：第一版只允许主人私聊使用。"
+                    current.error = "group_denied"
+                elif not current.query.strip():
+                    current.response_text = "请输入 MainAgentGraph 查询内容。"
+                    current.error = "validation_failed"
+                return current
+
+            def build_agent_context(current):
+                current.metadata["mode"] = "read_only"
+                current.metadata["allowed_tools"] = [main_agent.MainAgentToolName.DEV_CONTEXT.value]
+                return current
+
+            def call_main_agent(current):
+                current.raw_action_request = main_agent.dev_context_tool_action_json(
+                    current.query,
+                    reason="恢复开发侧项目上下文",
+                )
+                return current
+
+            def validate_action_request(current):
+                try:
+                    action_request = main_agent.parse_main_agent_action_request(current.raw_action_request)
+                except main_agent.MainAgentActionRequestError as exc:
+                    current.response_text = f"MainAgentGraph 拒绝执行：{exc}"
+                    current.error = "invalid_action_request"
+                    return current
+                main_agent.apply_action_request_to_state(current, action_request)
+                return current
+
+            def check_tool_policy(current):
+                if current.action != main_agent.MainAgentAction.TOOL_REQUEST.value:
+                    return current
+                decision = policy_engine.decide_tool_policy(
+                    policy_engine.ToolPolicyInput(
+                        risk_level=risk.RiskLevel.INTERNAL,
+                        is_owner=current.is_owner,
+                        is_group=current.is_group,
+                    )
+                )
+                current.policy_decision = decision.type.value
+                current.policy_reason = decision.reason
+                if not decision.allowed:
+                    current.response_text = f"MainAgentGraph 拒绝执行：{decision.reason}"
+                    current.error = "policy_denied"
+                return current
+
+            async def execute_tool(current):
+                if current.action != main_agent.MainAgentAction.TOOL_REQUEST.value:
+                    return current
+                if current.requested_tool != main_agent.MainAgentToolName.DEV_CONTEXT.value:
+                    current.response_text = f"MainAgentGraph 拒绝执行：未注册工具 {current.requested_tool}"
+                    current.error = "unknown_tool"
+                    return current
+                execution = await run_dev_context_query(current.tool_query, is_owner=current.is_owner)
+                current.tool_result = execution.result.context_text
+                current.metadata["dev_context_node_trace"] = tuple(node.value for node in execution.node_trace)
+                return current
+
+            def render_agent_response(current):
+                if current.action != main_agent.MainAgentAction.TOOL_REQUEST.value:
+                    return current
+                current.response_text = "\n".join(
+                    [
+                        "MainAgentGraph 只读工具执行结果：",
+                        f"工具：{current.requested_tool}",
+                        f"策略：{current.policy_decision}",
+                        "",
+                        current.tool_result,
+                    ]
+                ).strip()
+                return current
+
+            runner = main_agent.MainAgentGraphRunner(
+                validate_agent_request=validate_agent_request,
+                build_agent_context=build_agent_context,
+                call_main_agent=call_main_agent,
+                validate_action_request=validate_action_request,
+                check_tool_policy=check_tool_policy,
+                execute_tool=execute_tool,
+                render_agent_response=render_agent_response,
+            )
+            execution = asyncio.run(runner.run(state))
+        except modules["providers"].EmbeddingProviderError as exc:
+            print(f"MainAgentGraph 查询失败：{exc}")
+            exit_code = 1
+        else:
+            print(execution.result.response_text)
+            if execution.result.error:
+                exit_code = 1
 
     return exit_code
 

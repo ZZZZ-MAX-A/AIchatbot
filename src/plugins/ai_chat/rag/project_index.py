@@ -11,7 +11,7 @@ from .documents import (
     upsert_rag_document,
 )
 from .embeddings import get_rag_embedding, upsert_rag_embedding
-from .project_docs import chunk_markdown_document, iter_project_markdown_files
+from .project_docs import chunk_markdown_document, iter_project_document_files
 from .providers import EmbeddingProvider
 from .schema import (
     NAMESPACE_PROJECT_DOCS,
@@ -69,7 +69,7 @@ def rebuild_project_doc_index(
     stats = ProjectDocIndexStats()
     active_document_ids: set[int] = set()
 
-    for path in iter_project_markdown_files(root):
+    for path in iter_project_document_files(root):
         stats.scanned_files += 1
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -170,15 +170,14 @@ def trim_results_to_context_chars(
 
 def format_project_doc_results(results: list[RagSearchResult]) -> str:
     if not results:
-        return "No matching project documents found."
+        return "ProjectDocRAG 暂无匹配项目文档。"
 
-    lines: list[str] = []
+    lines: list[str] = ["ProjectDocRAG 项目文档召回："]
     for index, result in enumerate(results, start=1):
         document = result.document
-        lines.append(
-            f"[{index}] {document.title} "
-            f"(score={result.score:.3f}, source={document.source_id}, chunk={document.chunk_index})"
-        )
+        lines.append(f"{index}. {document.title}")
+        lines.append(f"   路径：{document.source_id}")
+        lines.append(f"   相似度：{result.score:.3f}，片段：{document.chunk_index}")
         lines.append(document.content)
         lines.append("")
     return "\n".join(lines).strip()

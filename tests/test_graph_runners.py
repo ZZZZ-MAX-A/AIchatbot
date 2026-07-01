@@ -358,6 +358,13 @@ class MemoryGraphRunnerTests(unittest.TestCase):
             memory_state.system_contexts.append(memory_state.manual_long_term_context)
             return memory_state
 
+        async def retrieve_semantic(memory_state):
+            calls.append(("semantic", tuple(memory_state.system_contexts), memory_state.query))
+            memory_state.semantic_memory_context = "semantic memory"
+            memory_state.semantic_memory_result_count = 1
+            memory_state.system_contexts.append(memory_state.semantic_memory_context)
+            return memory_state
+
         async def build_history(memory_state):
             calls.append(("history", tuple(memory_state.system_contexts)))
             memory_state.rule_reminder_context = "rule reminder"
@@ -373,6 +380,7 @@ class MemoryGraphRunnerTests(unittest.TestCase):
         runner = self.memory.MemoryContextGraphRunner(
             ensure_gap_scene=ensure_gap,
             build_manual_memory_context=build_manual,
+            retrieve_semantic_memory=retrieve_semantic,
             build_history=build_history,
         )
 
@@ -380,17 +388,20 @@ class MemoryGraphRunnerTests(unittest.TestCase):
 
         self.assertEqual(execution.node_trace, self.memory.MEMORY_CONTEXT_NODE_SEQUENCE)
         self.assertEqual(execution.result.manual_long_term_context, "manual memory")
+        self.assertEqual(execution.result.semantic_memory_context, "semantic memory")
+        self.assertEqual(execution.result.semantic_memory_result_count, 1)
         self.assertEqual(execution.result.rule_reminder_context, "rule reminder")
         self.assertEqual(
             [item["content"] for item in execution.result.history],
-            ["base", "manual memory", "rule reminder"],
+            ["base", "manual memory", "semantic memory", "rule reminder"],
         )
         self.assertEqual(
             calls,
             [
                 ("gap", "private:10001"),
                 ("manual", ("base",)),
-                ("history", ("base", "manual memory")),
+                ("semantic", ("base", "manual memory"), ""),
+                ("history", ("base", "manual memory", "semantic memory")),
             ],
         )
 
@@ -559,6 +570,389 @@ class MemoryGraphRunnerTests(unittest.TestCase):
         )
 
 
+
+class MemoryRetrievalGraphRunnerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_pure_graph_modules()
+        cls.retrieval = cls.modules["retrieval"]
+
+    def test_memory_retrieval_graph_runner_executes_sync_and_async_nodes(self):
+        state = self.retrieval.MemoryRetrievalState(
+            action=self.retrieval.MemoryRetrievalAction.QUERY,
+            query="MemoryRAG",
+            is_owner=True,
+        )
+        calls = []
+
+        def validate(retrieval_state):
+            calls.append(("validate", retrieval_state.query))
+            return retrieval_state
+
+        async def execute(retrieval_state):
+            calls.append(("execute", retrieval_state.is_owner))
+            retrieval_state.metadata["result_count"] = 2
+            return retrieval_state
+
+        def render(retrieval_state):
+            calls.append(("render", retrieval_state.metadata["result_count"]))
+            retrieval_state.reply_text = "found 2 memories"
+            return retrieval_state
+
+        runner = self.retrieval.MemoryRetrievalGraphRunner(
+            validate_retrieval_request=validate,
+            execute_retrieval_operation=execute,
+            render_retrieval_reply=render,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.node_trace, self.retrieval.MEMORY_RETRIEVAL_NODE_SEQUENCE)
+        self.assertEqual(execution.result.reply_text, "found 2 memories")
+        self.assertEqual(execution.result.metadata["result_count"], 2)
+        self.assertEqual(
+            calls,
+            [
+                ("validate", "MemoryRAG"),
+                ("execute", True),
+                ("render", 2),
+            ],
+        )
+
+    def test_memory_retrieval_graph_runner_stops_on_validation_error(self):
+        state = self.retrieval.MemoryRetrievalState(
+            action=self.retrieval.MemoryRetrievalAction.QUERY,
+            query="",
+        )
+
+        async def validate(retrieval_state):
+            retrieval_state.reply_text = "用法：/记忆检索 查询内容"
+            retrieval_state.error = "validation_failed"
+            return retrieval_state
+
+        async def execute(_):
+            raise AssertionError("execute should not run after validation failure")
+
+        runner = self.retrieval.MemoryRetrievalGraphRunner(
+            validate_retrieval_request=validate,
+            execute_retrieval_operation=execute,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "validation_failed")
+        self.assertEqual(execution.result.reply_text, "用法：/记忆检索 查询内容")
+        self.assertEqual(
+            execution.node_trace,
+            (self.retrieval.MemoryRetrievalNode.VALIDATE_RETRIEVAL_REQUEST,),
+        )
+
+
+class DevContextGraphRunnerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_pure_graph_modules()
+        cls.dev_context = cls.modules["dev_context"]
+
+    def test_dev_context_graph_runner_executes_sync_and_async_nodes(self):
+        state = self.dev_context.DevContextState(
+            query="CombinedRAG",
+            is_owner=True,
+        )
+        calls = []
+
+        def validate(context_state):
+            calls.append(("validate", context_state.query))
+            return context_state
+
+        async def retrieve(context_state):
+            calls.append(("retrieve", context_state.is_owner))
+            context_state.project_result_count = 2
+            context_state.memory_result_count = 1
+            context_state.metadata["query"] = context_state.query
+            return context_state
+
+        def render(context_state):
+            calls.append(("render", context_state.project_result_count, context_state.memory_result_count))
+            context_state.context_text = "dev context ready"
+            return context_state
+
+        runner = self.dev_context.DevContextGraphRunner(
+            validate_context_request=validate,
+            retrieve_combined_context=retrieve,
+            render_context_artifact=render,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.node_trace, self.dev_context.DEV_CONTEXT_NODE_SEQUENCE)
+        self.assertEqual(execution.result.context_text, "dev context ready")
+        self.assertEqual(execution.result.project_result_count, 2)
+        self.assertEqual(execution.result.memory_result_count, 1)
+        self.assertEqual(execution.result.metadata["query"], "CombinedRAG")
+        self.assertEqual(
+            calls,
+            [
+                ("validate", "CombinedRAG"),
+                ("retrieve", True),
+                ("render", 2, 1),
+            ],
+        )
+
+    def test_dev_context_graph_runner_stops_on_validation_error(self):
+        state = self.dev_context.DevContextState(query="")
+
+        async def validate(context_state):
+            context_state.context_text = "请输入开发侧上下文查询。"
+            context_state.error = "validation_failed"
+            return context_state
+
+        async def retrieve(_):
+            raise AssertionError("retrieve should not run after validation failure")
+
+        runner = self.dev_context.DevContextGraphRunner(
+            validate_context_request=validate,
+            retrieve_combined_context=retrieve,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "validation_failed")
+        self.assertEqual(execution.result.context_text, "请输入开发侧上下文查询。")
+        self.assertEqual(
+            execution.node_trace,
+            (self.dev_context.DevContextNode.VALIDATE_CONTEXT_REQUEST,),
+        )
+
+
+class MainAgentGraphRunnerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_pure_graph_modules()
+        cls.main_agent = cls.modules["main_agent"]
+
+    def test_main_agent_graph_runner_executes_read_only_dev_context_tool(self):
+        state = self.main_agent.MainAgentState(
+            query="恢复项目上下文",
+            is_owner=True,
+            is_group=False,
+        )
+        calls = []
+
+        def validate(agent_state):
+            calls.append(("validate", agent_state.query))
+            return agent_state
+
+        def build_context(agent_state):
+            calls.append(("context", agent_state.is_owner, agent_state.is_group))
+            agent_state.metadata["mode"] = "read_only"
+            return agent_state
+
+        def call_agent(agent_state):
+            calls.append(("agent", agent_state.query))
+            agent_state.raw_action_request = self.main_agent.dev_context_tool_action_json(
+                agent_state.query,
+                reason="需要恢复项目上下文",
+            )
+            return agent_state
+
+        def validate_action(agent_state):
+            action_request = self.main_agent.parse_main_agent_action_request(agent_state.raw_action_request)
+            self.main_agent.apply_action_request_to_state(agent_state, action_request)
+            calls.append(("action", agent_state.action, agent_state.requested_tool))
+            return agent_state
+
+        def check_policy(agent_state):
+            calls.append(("policy", agent_state.requested_tool))
+            agent_state.policy_decision = "allow"
+            return agent_state
+
+        async def execute_tool(agent_state):
+            calls.append(("execute", agent_state.tool_query))
+            agent_state.tool_result = "DevContextGraph result"
+            return agent_state
+
+        def render(agent_state):
+            calls.append(("render", agent_state.policy_decision))
+            agent_state.response_text = f"MainAgentGraph 只读结果：\n{agent_state.tool_result}"
+            return agent_state
+
+        runner = self.main_agent.MainAgentGraphRunner(
+            validate_agent_request=validate,
+            build_agent_context=build_context,
+            call_main_agent=call_agent,
+            validate_action_request=validate_action,
+            check_tool_policy=check_policy,
+            execute_tool=execute_tool,
+            render_agent_response=render,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.node_trace, self.main_agent.MAIN_AGENT_NODE_SEQUENCE)
+        self.assertEqual(execution.result.action, self.main_agent.MainAgentAction.TOOL_REQUEST.value)
+        self.assertEqual(execution.result.requested_tool, self.main_agent.MainAgentToolName.DEV_CONTEXT.value)
+        self.assertEqual(execution.result.policy_decision, "allow")
+        self.assertEqual(execution.result.tool_result, "DevContextGraph result")
+        self.assertIn("MainAgentGraph 只读结果", execution.result.response_text)
+        self.assertEqual(
+            calls,
+            [
+                ("validate", "恢复项目上下文"),
+                ("context", True, False),
+                ("agent", "恢复项目上下文"),
+                ("action", "tool_request", "dev_context"),
+                ("policy", "dev_context"),
+                ("execute", "恢复项目上下文"),
+                ("render", "allow"),
+            ],
+        )
+
+    def test_main_agent_graph_runner_stops_when_policy_denies_tool(self):
+        state = self.main_agent.MainAgentState(
+            query="恢复项目上下文",
+            is_owner=False,
+            is_group=False,
+        )
+
+        def call_agent(agent_state):
+            agent_state.raw_action_request = self.main_agent.dev_context_tool_action_json(agent_state.query)
+            return agent_state
+
+        def validate_action(agent_state):
+            action_request = self.main_agent.parse_main_agent_action_request(agent_state.raw_action_request)
+            self.main_agent.apply_action_request_to_state(agent_state, action_request)
+            return agent_state
+
+        def check_policy(agent_state):
+            agent_state.policy_decision = "deny"
+            agent_state.policy_reason = "main agent tools require owner access"
+            agent_state.response_text = "MainAgentGraph 拒绝执行：main agent tools require owner access"
+            agent_state.error = "policy_denied"
+            return agent_state
+
+        async def execute_tool(_):
+            raise AssertionError("execute_tool should not run after policy denial")
+
+        runner = self.main_agent.MainAgentGraphRunner(
+            call_main_agent=call_agent,
+            validate_action_request=validate_action,
+            check_tool_policy=check_policy,
+            execute_tool=execute_tool,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "policy_denied")
+        self.assertEqual(execution.result.policy_decision, "deny")
+        self.assertEqual(
+            execution.node_trace,
+            (
+                self.main_agent.MainAgentNode.VALIDATE_AGENT_REQUEST,
+                self.main_agent.MainAgentNode.BUILD_AGENT_CONTEXT,
+                self.main_agent.MainAgentNode.CALL_MAIN_AGENT,
+                self.main_agent.MainAgentNode.VALIDATE_ACTION_REQUEST,
+                self.main_agent.MainAgentNode.CHECK_TOOL_POLICY,
+            ),
+        )
+
+    def test_main_agent_dev_context_action_json_builds_valid_tool_request(self):
+        raw = self.main_agent.dev_context_tool_action_json("恢复上下文", reason="单元测试")
+        action_request = self.main_agent.parse_main_agent_action_request(raw)
+
+        self.assertEqual(action_request.action, self.main_agent.MainAgentAction.TOOL_REQUEST)
+        self.assertEqual(action_request.tool_name, self.main_agent.MainAgentToolName.DEV_CONTEXT.value)
+        self.assertEqual(action_request.arguments["query"], "恢复上下文")
+        self.assertEqual(action_request.reason, "单元测试")
+
+    def test_main_agent_action_parser_accepts_supported_actions(self):
+        final_answer = self.main_agent.parse_main_agent_action_request(
+            {"action": "final_answer", "content": "完成。"}
+        )
+        tool_request = self.main_agent.parse_main_agent_action_request(
+            {
+                "action": "tool_request",
+                "tool_name": "dev_context",
+                "arguments": {"query": "恢复上下文"},
+                "reason": "需要读取项目状态",
+            }
+        )
+        ask_owner = self.main_agent.parse_main_agent_action_request(
+            {"action": "ask_owner", "content": "需要确认下一步方向。"}
+        )
+        stop = self.main_agent.parse_main_agent_action_request(
+            {"action": "stop", "reason": "无需继续。"}
+        )
+
+        self.assertEqual(final_answer.action, self.main_agent.MainAgentAction.FINAL_ANSWER)
+        self.assertEqual(final_answer.content, "完成。")
+        self.assertEqual(tool_request.action, self.main_agent.MainAgentAction.TOOL_REQUEST)
+        self.assertEqual(tool_request.tool_name, "dev_context")
+        self.assertEqual(tool_request.arguments["query"], "恢复上下文")
+        self.assertEqual(ask_owner.action, self.main_agent.MainAgentAction.ASK_OWNER)
+        self.assertEqual(stop.action, self.main_agent.MainAgentAction.STOP)
+
+    def test_main_agent_action_parser_rejects_malformed_or_unsafe_actions(self):
+        invalid_payloads = [
+            "not json",
+            [],
+            {"action": ""},
+            {"action": "run_shell", "arguments": {"command": "dir"}},
+            {"action": "final_answer"},
+            {"action": "ask_owner"},
+            {"action": "tool_request", "tool_name": "shell", "arguments": {"query": "x"}},
+            {"action": "tool_request", "tool_name": "dev_context", "arguments": {}},
+            {"action": "stop", "tool_name": "dev_context"},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(self.main_agent.MainAgentActionRequestError):
+                    self.main_agent.parse_main_agent_action_request(payload)
+
+    def test_main_agent_graph_runner_stops_when_action_request_is_malformed(self):
+        state = self.main_agent.MainAgentState(
+            query="恢复项目上下文",
+            is_owner=True,
+            is_group=False,
+        )
+
+        def call_agent(agent_state):
+            agent_state.raw_action_request = {"action": "tool_request", "tool_name": "shell"}
+            return agent_state
+
+        def validate_action(agent_state):
+            try:
+                action_request = self.main_agent.parse_main_agent_action_request(agent_state.raw_action_request)
+            except self.main_agent.MainAgentActionRequestError as exc:
+                agent_state.response_text = f"MainAgentGraph 拒绝执行：{exc}"
+                agent_state.error = "invalid_action_request"
+                return agent_state
+            self.main_agent.apply_action_request_to_state(agent_state, action_request)
+            return agent_state
+
+        async def check_policy(_):
+            raise AssertionError("policy should not run after malformed action")
+
+        runner = self.main_agent.MainAgentGraphRunner(
+            call_main_agent=call_agent,
+            validate_action_request=validate_action,
+            check_tool_policy=check_policy,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "invalid_action_request")
+        self.assertIn("unsupported tool", execution.result.response_text)
+        self.assertEqual(
+            execution.node_trace,
+            (
+                self.main_agent.MainAgentNode.VALIDATE_AGENT_REQUEST,
+                self.main_agent.MainAgentNode.BUILD_AGENT_CONTEXT,
+                self.main_agent.MainAgentNode.CALL_MAIN_AGENT,
+                self.main_agent.MainAgentNode.VALIDATE_ACTION_REQUEST,
+            ),
+        )
 class VisionGraphRunnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

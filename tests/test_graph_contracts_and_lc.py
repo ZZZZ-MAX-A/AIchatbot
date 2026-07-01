@@ -12,7 +12,10 @@ class GraphContractTests(unittest.TestCase):
         cls.modules = load_pure_graph_modules()
         cls.chat = cls.modules["chat"]
         cls.diagnostics = cls.modules["diagnostics"]
+        cls.dev_context = cls.modules["dev_context"]
+        cls.main_agent = cls.modules["main_agent"]
         cls.memory = cls.modules["memory"]
+        cls.retrieval = cls.modules["retrieval"]
         cls.notification = cls.modules["notification"]
         cls.root = cls.modules["root"]
         cls.vision = cls.modules["vision"]
@@ -66,6 +69,7 @@ class GraphContractTests(unittest.TestCase):
 
         self.assertIn(self.memory.MemoryNode.BUILD_HISTORY, context_sequence)
         self.assertIn(self.memory.MemoryNode.BUILD_MANUAL_MEMORY_CONTEXT, context_sequence)
+        self.assertIn(self.memory.MemoryNode.RETRIEVE_SEMANTIC_MEMORY, context_sequence)
         self.assertNotIn(self.memory.MemoryNode.SAVE_USER_MESSAGE, context_sequence)
         self.assertLess(
             context_sequence.index(self.memory.MemoryNode.ENSURE_GAP_SCENE),
@@ -73,6 +77,10 @@ class GraphContractTests(unittest.TestCase):
         )
         self.assertLess(
             context_sequence.index(self.memory.MemoryNode.BUILD_MANUAL_MEMORY_CONTEXT),
+            context_sequence.index(self.memory.MemoryNode.RETRIEVE_SEMANTIC_MEMORY),
+        )
+        self.assertLess(
+            context_sequence.index(self.memory.MemoryNode.RETRIEVE_SEMANTIC_MEMORY),
             context_sequence.index(self.memory.MemoryNode.BUILD_HISTORY),
         )
         self.assertEqual(
@@ -97,6 +105,60 @@ class GraphContractTests(unittest.TestCase):
             sequence.index(self.memory.MemoryAdminNode.RENDER_ADMIN_REPLY),
         )
         self.assertEqual(sequence[-1], self.memory.MemoryAdminNode.RENDER_ADMIN_REPLY)
+
+    def test_memory_retrieval_sequence_validates_before_execute_and_render(self):
+        sequence = self.retrieval.MEMORY_RETRIEVAL_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.retrieval.MemoryRetrievalNode.VALIDATE_RETRIEVAL_REQUEST)
+        self.assertLess(
+            sequence.index(self.retrieval.MemoryRetrievalNode.VALIDATE_RETRIEVAL_REQUEST),
+            sequence.index(self.retrieval.MemoryRetrievalNode.EXECUTE_RETRIEVAL_OPERATION),
+        )
+        self.assertLess(
+            sequence.index(self.retrieval.MemoryRetrievalNode.EXECUTE_RETRIEVAL_OPERATION),
+            sequence.index(self.retrieval.MemoryRetrievalNode.RENDER_RETRIEVAL_REPLY),
+        )
+        self.assertEqual(sequence[-1], self.retrieval.MemoryRetrievalNode.RENDER_RETRIEVAL_REPLY)
+
+    def test_dev_context_sequence_validates_before_retrieve_and_render(self):
+        sequence = self.dev_context.DEV_CONTEXT_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.dev_context.DevContextNode.VALIDATE_CONTEXT_REQUEST)
+        self.assertLess(
+            sequence.index(self.dev_context.DevContextNode.VALIDATE_CONTEXT_REQUEST),
+            sequence.index(self.dev_context.DevContextNode.RETRIEVE_COMBINED_CONTEXT),
+        )
+        self.assertLess(
+            sequence.index(self.dev_context.DevContextNode.RETRIEVE_COMBINED_CONTEXT),
+            sequence.index(self.dev_context.DevContextNode.RENDER_CONTEXT_ARTIFACT),
+        )
+        self.assertEqual(sequence[-1], self.dev_context.DevContextNode.RENDER_CONTEXT_ARTIFACT)
+
+    def test_main_agent_sequence_checks_policy_before_execute_and_render(self):
+        sequence = self.main_agent.MAIN_AGENT_NODE_SEQUENCE
+
+        self.assertEqual(sequence[0], self.main_agent.MainAgentNode.VALIDATE_AGENT_REQUEST)
+        self.assertLess(
+            sequence.index(self.main_agent.MainAgentNode.BUILD_AGENT_CONTEXT),
+            sequence.index(self.main_agent.MainAgentNode.CALL_MAIN_AGENT),
+        )
+        self.assertLess(
+            sequence.index(self.main_agent.MainAgentNode.CALL_MAIN_AGENT),
+            sequence.index(self.main_agent.MainAgentNode.VALIDATE_ACTION_REQUEST),
+        )
+        self.assertLess(
+            sequence.index(self.main_agent.MainAgentNode.VALIDATE_ACTION_REQUEST),
+            sequence.index(self.main_agent.MainAgentNode.CHECK_TOOL_POLICY),
+        )
+        self.assertLess(
+            sequence.index(self.main_agent.MainAgentNode.CHECK_TOOL_POLICY),
+            sequence.index(self.main_agent.MainAgentNode.EXECUTE_TOOL),
+        )
+        self.assertLess(
+            sequence.index(self.main_agent.MainAgentNode.EXECUTE_TOOL),
+            sequence.index(self.main_agent.MainAgentNode.RENDER_AGENT_RESPONSE),
+        )
+        self.assertEqual(sequence[-1], self.main_agent.MainAgentNode.RENDER_AGENT_RESPONSE)
 
     def test_vision_node_sequence_describes_before_returning_artifact(self):
         sequence = self.vision.VISION_NODE_SEQUENCE

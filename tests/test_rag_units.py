@@ -356,6 +356,39 @@ class RagProjectDocUnitTests(unittest.TestCase):
         self.assertTrue(any(chunk.title == "README.md#Usage" for chunk in chunks))
         self.assertTrue(all(chunk.source_version for chunk in chunks))
 
+    def test_project_doc_scanner_includes_safe_docs_and_excludes_private_runtime_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = [
+                root / "README.md",
+                root / "docs" / "design.md",
+                root / "docs" / "nested" / "runbook.md",
+                root / "docs-archive" / "old.md",
+                root / "prompts" / "base" / "chat-core.json",
+                root / "prompts" / "persona-cards" / "public" / "default.md",
+                root / "prompts" / "persona-cards" / "private" / "secret.md",
+                root / "data" / "chatbot.db",
+                root / "logs" / "ai_chat_error.log",
+                root / ".env",
+            ]
+            for path in paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("content", encoding="utf-8")
+
+            files = self.project_docs.iter_project_document_files(root)
+            relative_files = [path.relative_to(root).as_posix() for path in files]
+
+        self.assertEqual(
+            relative_files,
+            [
+                "README.md",
+                "docs/design.md",
+                "docs/nested/runbook.md",
+                "prompts/base/chat-core.json",
+                "prompts/persona-cards/public/default.md",
+            ],
+        )
+
 
 class RagProjectIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
     @classmethod
@@ -436,6 +469,96 @@ class RagProjectIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertLessEqual(len(owner_results[0].document.content), 20)
         self.assertEqual(non_owner_results, [])
         self.assertIn("README.md#README", formatted)
+
+
+class RagCombinedRetrievalUnitTests(TempDatabaseMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_rag_modules()
+        cls.database = cls.modules["database"]
+        cls.documents = cls.modules["documents"]
+        cls.embeddings = cls.modules["embeddings"]
+        cls.combined = cls.modules["combined"]
+        cls.schema = cls.modules["schema"]
+
+    def add_document_with_embedding(
+        self,
+        *,
+        namespace: str,
+        source_type: str,
+        source_id: str,
+        title: str,
+        content: str,
+        visibility: str,
+        embedding: list[float],
+    ) -> None:
+        document_id = self.documents.upsert_rag_document(
+            namespace=namespace,
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            content=content,
+            visibility=visibility,
+        )
+        document = self.documents.get_rag_document(document_id)
+        self.assertIsNotNone(document)
+        self.embeddings.upsert_rag_embedding(
+            document_id=document_id,
+            provider="unit",
+            model="toy",
+            embedding=embedding,
+            content_hash=document.content_hash,
+        )
+
+    def test_combined_retrieval_keeps_project_docs_and_memories_separated(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            self.add_document_with_embedding(
+                namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+                source_type=self.schema.SOURCE_PROJECT_DOC,
+                source_id="docs/runbook.md",
+                title="docs/runbook.md#Deploy",
+                content="Deploy the bot with scripts/start.ps1.",
+                visibility=self.schema.VISIBILITY_PROJECT_OWNER,
+                embedding=[1.0, 0.0],
+            )
+            self.add_document_with_embedding(
+                namespace=self.schema.NAMESPACE_SEMANTIC_MEMORY,
+                source_type=self.schema.SOURCE_MANUAL_FACT,
+                source_id="42",
+                title="长期事实记忆 42",
+                content="主人确认 MemoryRAG 已经接入普通聊天。",
+                visibility=self.schema.VISIBILITY_OWNER_ONLY,
+                embedding=[1.0, 0.0],
+            )
+            embedder = FakeEmbeddingProvider()
+
+            owner_results = self.combined.retrieve_combined_rag(
+                query="deploy memoryrag readme",
+                embedder=embedder,
+                is_owner=True,
+                project_top_k=3,
+                project_min_score=0.1,
+                project_max_context_chars=200,
+                memory_top_k=3,
+                memory_min_score=0.1,
+                memory_max_context_chars=200,
+            )
+            non_owner_results = self.combined.retrieve_combined_rag(
+                query="deploy memoryrag readme",
+                embedder=embedder,
+                is_owner=False,
+            )
+            formatted = self.combined.format_combined_rag_results(owner_results)
+
+        self.assertEqual([result.document.source_id for result in owner_results.project_docs], ["docs/runbook.md"])
+        self.assertEqual([result.document.source_id for result in owner_results.memories], ["42"])
+        self.assertEqual(non_owner_results.project_docs, [])
+        self.assertEqual(non_owner_results.memories, [])
+        self.assertEqual(len(embedder.calls), 1)
+        self.assertIn("CombinedRAG 开发侧召回：", formatted)
+        self.assertIn("项目文档召回：", formatted)
+        self.assertIn("记忆召回：", formatted)
 
 
 class RagProviderUnitTests(unittest.TestCase):
