@@ -135,6 +135,18 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.graph.diagnostics",
         AI_CHAT_ROOT / "graph" / "diagnostics.py",
     )
+    modules["dev_context"] = load_module(
+        "src.plugins.ai_chat.graph.dev_context",
+        AI_CHAT_ROOT / "graph" / "dev_context.py",
+    )
+    modules["main_agent"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent",
+        AI_CHAT_ROOT / "graph" / "main_agent.py",
+    )
+    modules["retrieval"] = load_module(
+        "src.plugins.ai_chat.graph.retrieval",
+        AI_CHAT_ROOT / "graph" / "retrieval.py",
+    )
     modules["notification"] = load_module(
         "src.plugins.ai_chat.graph.notification",
         AI_CHAT_ROOT / "graph" / "notification.py",
@@ -334,6 +346,10 @@ def load_rag_modules():
     modules["project_index"] = load_module(
         "src.plugins.ai_chat.rag.project_index",
         AI_CHAT_ROOT / "rag" / "project_index.py",
+    )
+    modules["combined"] = load_module(
+        "src.plugins.ai_chat.rag.combined",
+        AI_CHAT_ROOT / "rag" / "combined.py",
     )
     return modules
 

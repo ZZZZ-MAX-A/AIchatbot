@@ -20,6 +20,7 @@ class SessionType(str, Enum):
 class RuntimeIntent(str, Enum):
     CHAT = "chat"
     MAIN_AGENT = "main_agent"
+    DEV_CONTEXT = "dev_context"
     VOICE = "voice"
     VISION = "vision"
     MEMORY_ADMIN = "memory_admin"
@@ -61,4 +62,3 @@ class RuntimeState:
     tool_events: list[dict[str, Any]] = field(default_factory=list)
     response: str | None = None
     error: str | None = None
-

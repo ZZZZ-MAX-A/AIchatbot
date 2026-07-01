@@ -3,6 +3,9 @@ param(
     [switch]$Memory,
     [string]$QueryProjectDocs = "",
     [string]$QueryMemory = "",
+    [string]$QueryCombined = "",
+    [string]$QueryDevContext = "",
+    [string]$QueryMainAgent = "",
     [string]$Root = "",
     [int]$MaxChars = 1800,
     [int]$TopK = 0,
@@ -37,6 +40,18 @@ if ($QueryProjectDocs) {
 if ($QueryMemory) {
     $arguments += "--query-memory"
     $arguments += $QueryMemory
+}
+if ($QueryCombined) {
+    $arguments += "--query-combined"
+    $arguments += $QueryCombined
+}
+if ($QueryDevContext) {
+    $arguments += "--query-dev-context"
+    $arguments += $QueryDevContext
+}
+if ($QueryMainAgent) {
+    $arguments += "--query-main-agent"
+    $arguments += $QueryMainAgent
 }
 if ($Root) {
     $arguments += "--root"

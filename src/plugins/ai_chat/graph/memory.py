@@ -11,6 +11,7 @@ class MemoryNode(str, Enum):
     ENSURE_GAP_SCENE = "ensure_gap_scene"
     BUILD_HISTORY = "build_history"
     BUILD_MANUAL_MEMORY_CONTEXT = "build_manual_memory_context"
+    RETRIEVE_SEMANTIC_MEMORY = "retrieve_semantic_memory"
     SAVE_USER_MESSAGE = "save_user_message"
     SAVE_ASSISTANT_MESSAGE = "save_assistant_message"
     SCHEDULE_COMPRESSION = "schedule_compression"
@@ -19,6 +20,7 @@ class MemoryNode(str, Enum):
 MEMORY_CONTEXT_NODE_SEQUENCE: tuple[MemoryNode, ...] = (
     MemoryNode.ENSURE_GAP_SCENE,
     MemoryNode.BUILD_MANUAL_MEMORY_CONTEXT,
+    MemoryNode.RETRIEVE_SEMANTIC_MEMORY,
     MemoryNode.BUILD_HISTORY,
 )
 
@@ -61,12 +63,16 @@ MEMORY_ADMIN_NODE_SEQUENCE: tuple[MemoryAdminNode, ...] = (
 @dataclass
 class MemoryContext:
     session_key: str = ""
+    query: str = ""
     message_type: str = ""
     user_id: str = ""
     group_id: str | None = None
     system_contexts: list[str] = field(default_factory=list)
     history: list[dict[str, str]] = field(default_factory=list)
     manual_long_term_context: str = ""
+    semantic_memory_context: str = ""
+    semantic_memory_error: str = ""
+    semantic_memory_result_count: int = 0
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
@@ -77,6 +83,9 @@ class MemoryContextGraphResult:
     history: tuple[dict[str, str], ...]
     system_contexts: tuple[str, ...]
     manual_long_term_context: str = ""
+    semantic_memory_context: str = ""
+    semantic_memory_error: str = ""
+    semantic_memory_result_count: int = 0
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
@@ -181,10 +190,12 @@ class MemoryContextGraphRunner:
         *,
         ensure_gap_scene: MemoryContextHandler | None = None,
         build_manual_memory_context: MemoryContextHandler | None = None,
+        retrieve_semantic_memory: MemoryContextHandler | None = None,
         build_history: MemoryContextHandler | None = None,
     ) -> None:
         self.ensure_gap_scene = ensure_gap_scene
         self.build_manual_memory_context = build_manual_memory_context
+        self.retrieve_semantic_memory = retrieve_semantic_memory
         self.build_history = build_history
 
     async def run(self, state: MemoryContext) -> MemoryContextGraphExecution:
@@ -200,6 +211,11 @@ class MemoryContextGraphRunner:
                 and self.build_manual_memory_context is not None
             ):
                 current = await _maybe_await(self.build_manual_memory_context(current))
+            elif (
+                node == MemoryNode.RETRIEVE_SEMANTIC_MEMORY
+                and self.retrieve_semantic_memory is not None
+            ):
+                current = await _maybe_await(self.retrieve_semantic_memory(current))
             elif node == MemoryNode.BUILD_HISTORY and self.build_history is not None:
                 current = await _maybe_await(self.build_history(current))
 
@@ -210,6 +226,9 @@ class MemoryContextGraphRunner:
             history=tuple(current.history),
             system_contexts=tuple(current.system_contexts),
             manual_long_term_context=current.manual_long_term_context,
+            semantic_memory_context=current.semantic_memory_context,
+            semantic_memory_error=current.semantic_memory_error,
+            semantic_memory_result_count=current.semantic_memory_result_count,
             rule_reminder_context=current.rule_reminder_context,
             gap_scene_error=current.gap_scene_error,
             error=current.error,
