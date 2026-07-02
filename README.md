@@ -148,13 +148,14 @@ cd D:\AIchatbot
 - `v0.9`: 视觉识图与图片上下文，已实现第一批。
 - `v1.0`: 稳定性与双通道诊断，已实现第一批。
 - `v1.2`: 记忆系统运行结构，短时 40 条、正式压缩 80/40、空窗场景摘要和手动长期记忆。
-- `v1.3`: LangGraph Agent Runtime 设计，规划主 Agent / 聊天 Agent 分离、权限图、工具风险分级和主人审批。
-- `v1.4`: 语义记忆检索与项目文档 RAG 设计，规划长期事实/偏好、正式摘要和项目文档的受控召回。
+- `v1.3`: LangGraph Agent Runtime 已进入只读 live 验证阶段，QQ `/agent` 可通过真实 MainAgent LLM 调用 `dev_context`，仍不开放 shell、写文件、数据库写入、Agent API 或多步 loop。
+- `v1.4`: 语义记忆检索与项目文档 RAG 核心能力已落地，MemoryRAG 可用于普通聊天，ProjectDocRAG 只通过本地开发命令或 `/agent` owner 显式命令进入 `dev_context`。
 
 ## 文档
 
-- [方案 C：NoneBot2 自研 QQ AI 机器人](docs/plan-c-nonebot.md)
-- [NapCatQQ 接入 NoneBot2](docs/napcatqq-setup.md)
+- [版本运行日志](docs/version-runlog.md)
+- [运行维护手册](docs/runbook.md)
+- [项目 RAG 使用手册](docs/project-rag-usage.md)
 - [v0.2 权限与安全设计](docs/v0.2-access-control.md)
 - [v0.3 SQLite 记忆方案](docs/v0.3-sqlite-memory.md)
 - [v0.4 记忆压缩方案](docs/v0.4-memory-compression.md)
@@ -167,8 +168,20 @@ cd D:\AIchatbot
 - [v1.4 语义记忆检索与项目文档 RAG 设计](docs/v1.4-memory-rag.md)
 - [v0.9 视觉识图与图片上下文方案](docs/v0.9-vision-image-context.md)
 - [v1.0 稳定性与双通道诊断方案](docs/v1.0-diagnostics-and-operations.md)
-- [运行维护手册](docs/runbook.md)
+- [方案 C：NoneBot2 自研 QQ AI 机器人](docs/plan-c-nonebot.md)
+- [NapCatQQ 接入 NoneBot2](docs/napcatqq-setup.md)
 - [推送到 GitHub](docs/push-to-github.md)
+
+## 稀土掘金文章草稿
+
+- [01 NoneBot2 + NapCatQQ + DeepSeek：从零搭一个 QQ AI 聊天机器人](docs/juejin/01-nonebot2-napcatqq-deepseek-qq-ai-chatbot.md)
+- [02 SQLite 记忆与会话摘要压缩](docs/juejin/02-sqlite-memory-and-session-summary-compression.md)
+- [03 可控记忆、会话摘要与角色卡边界](docs/juejin/03-memory-boundaries-and-persona-cards.md)
+- [04 群聊主动回复与主人转告设计](docs/juejin/04-group-auto-reply-and-owner-notifications.md)
+- [05 主人通知、视觉识图与诊断系统](docs/juejin/05-owner-notification-vision-and-diagnostics.md)
+- [06 语音输出与记忆运行结构](docs/juejin/06-voice-output-and-memory-runtime.md)
+- [07 从固定上下文到语义召回：QQ AI 机器人的记忆系统](docs/juejin/07-memory-rag.md)
+- [08 给 QQ 机器人接入主 Agent：只读、任务表和审批流](docs/juejin/08-main-agent-runtime.md)
 
 ## 安全提醒
 

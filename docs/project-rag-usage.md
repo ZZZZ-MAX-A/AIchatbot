@@ -24,8 +24,9 @@ DevContextGraph
   内部调用 CombinedRAG，用于 Codex / 后续 MainAgentGraph 恢复项目上下文。
 
 MainAgentGraph
-  QQ 外任务型 Agent 图的第一版只读入口。
+  QQ /agent 只读主 Agent 入口。
   当前只允许调用 dev_context 只读工具。
+  可在 MAIN_AGENT_USE_LLM=true 时使用真实 MainAgent LLM 生成 ActionRequest。
   不执行 shell，不写文件，不发 QQ 消息。
 ```
 
@@ -78,7 +79,7 @@ CombinedRAG 开发侧召回：
 项目怎么启动
 NapCat / NoneBot 怎么接
 某个设计文档里怎么规划
-某次 runlog 记录了什么
+版本运行日志记录了什么
 RAG 边界在文档里怎么写
 TTS / Vision / MemoryGraph 怎么排查
 ```
@@ -103,7 +104,7 @@ prompts/persona-cards/public/**/*.md
 ```text
 项目文档 + 长期记忆一起看
 想确认文档结论和记忆结论是否一致
-想看某个主题是否既在 runlog 里出现过，也在长期记忆里出现过
+想看某个主题是否既在版本运行日志里出现过，也在长期记忆里出现过
 ```
 
 输出会保持分区：
@@ -298,7 +299,7 @@ cd D:\AIchatbot
 ```
 
 ```text
-继续 AIchatbot 文档整理，恢复当前 runlog、架构文档、RAG 使用手册和需要同步的 README 内容
+继续 AIchatbot 文档整理，恢复版本运行日志、架构文档、RAG 使用手册和需要同步的 README 内容
 ```
 
 ## 常用参数
@@ -373,7 +374,7 @@ cd D:\AIchatbot
 .\scripts\rebuild-rag-index.ps1 -ProjectDocs
 ```
 
-如果刚写了 runlog 或使用手册，建议马上重建：
+如果刚写了版本运行日志或使用手册，建议马上重建：
 
 ```powershell
 .\scripts\rebuild-rag-index.ps1 -ProjectDocs
@@ -523,7 +524,7 @@ DevContextGraph 开发侧上下文
 
 但日常恢复仍建议先用 `-QueryDevContext`，它更直接。
 
-### 写完重要文档或 runlog
+### 写完重要文档或版本运行日志
 
 ```powershell
 .\scripts\rebuild-rag-index.ps1 -ProjectDocs

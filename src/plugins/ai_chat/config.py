@@ -48,6 +48,7 @@ class AiChatConfig:
     ai_temperature: float
     ai_timeout_seconds: int
     enable_main_agent: bool
+    main_agent_use_llm: bool
     main_agent_owner_only: bool
     main_agent_allow_group: bool
     main_agent_max_steps: int
@@ -152,6 +153,7 @@ def load_config() -> AiChatConfig:
         ai_temperature=_float_env("AI_TEMPERATURE", 0.7),
         ai_timeout_seconds=_int_env("AI_TIMEOUT_SECONDS", 60),
         enable_main_agent=_bool_env("ENABLE_MAIN_AGENT", False),
+        main_agent_use_llm=_bool_env("MAIN_AGENT_USE_LLM", False),
         main_agent_owner_only=_bool_env("MAIN_AGENT_OWNER_ONLY", True),
         main_agent_allow_group=_bool_env("MAIN_AGENT_ALLOW_GROUP", False),
         main_agent_max_steps=_int_env("MAIN_AGENT_MAX_STEPS", 5),

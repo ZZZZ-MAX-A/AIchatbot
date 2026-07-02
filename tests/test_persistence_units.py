@@ -42,6 +42,9 @@ class DatabaseSchemaUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("rag_documents", table_names)
         self.assertIn("rag_embeddings", table_names)
         self.assertIn("private_trials", table_names)
+        self.assertIn("agent_tasks", table_names)
+        self.assertIn("agent_task_events", table_names)
+        self.assertIn("agent_approvals", table_names)
         self.assertEqual(schema_row["value"], self.database.SCHEMA_VERSION)
 
 
@@ -65,10 +68,183 @@ class TrialPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
 
             self.assertEqual(self.trials.private_trial_used("10001"), 2)
             self.assertFalse(self.trials.can_use_private_trial("10001", 2))
-            self.assertEqual(
-                self.trials.trial_stats(),
-                {"trial_user_count": 2, "trial_message_count": 3},
+            stats = self.trials.trial_stats()
+        self.assertEqual(stats, {"trial_user_count": 2, "trial_message_count": 3})
+
+
+class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.memory_modules = load_legacy_memory_modules()
+        cls.database = cls.memory_modules["database"]
+        cls.agent_tasks = cls.memory_modules["agent_tasks"]
+
+    def test_agent_tasks_round_trip_and_format_without_execution(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="整理 MainAgentGraph 下一步计划",
             )
+            other_id = self.agent_tasks.create_agent_task(
+                session_key="private:20002",
+                user_id="20002",
+                goal="other task",
+            )
+
+            task = self.agent_tasks.get_agent_task(task_id)
+            tasks = self.agent_tasks.list_agent_tasks(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            formatted_created = self.agent_tasks.format_agent_task_created(task)
+            formatted_list = self.agent_tasks.format_agent_task_list(tasks)
+            events = self.agent_tasks.list_agent_task_events(task_id)
+            formatted_detail = self.agent_tasks.format_agent_task_detail(task, events)
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.id, task_id)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_PENDING)
+        self.assertEqual(task.goal, "整理 MainAgentGraph 下一步计划")
+        self.assertEqual([item.id for item in tasks], [task_id])
+        self.assertNotIn(str(other_id), formatted_list)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "created")
+        self.assertIn("只记录任务", formatted_created)
+        self.assertIn("不自动执行", formatted_list)
+        self.assertIn("事件：", formatted_detail)
+
+    def test_agent_task_cancel_is_scoped_and_records_event(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="等待取消的任务",
+            )
+            missing_task, missing_changed = self.agent_tasks.cancel_agent_task(
+                task_id=task_id,
+                session_key="private:20002",
+                user_id="20002",
+            )
+            task, changed = self.agent_tasks.cancel_agent_task(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            again_task, again_changed = self.agent_tasks.cancel_agent_task(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+            formatted = self.agent_tasks.format_agent_task_cancelled(task, changed=changed)
+
+        self.assertIsNone(missing_task)
+        self.assertFalse(missing_changed)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertTrue(changed)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_CANCELLED)
+        self.assertIsNotNone(again_task)
+        self.assertFalse(again_changed)
+        self.assertEqual([event.kind for event in events], ["created", "cancelled"])
+        self.assertIn("已取消 Agent 任务", formatted)
+
+    def test_agent_approvals_are_scoped_and_read_only_formatted(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="需要审批的任务",
+            )
+            other_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:20002",
+                user_id="20002",
+                goal="other approval task",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="write_file",
+                tool_input_json='{"path":"docs/example.md"}',
+                risk_level="L3_WRITE_LOCAL",
+                reason="需要写入文档",
+            )
+            other_approval_id = self.agent_tasks.create_agent_approval(
+                task_id=other_task_id,
+                tool_name="shell",
+                tool_input_json='{"command":"dir"}',
+                risk_level="L5_DANGEROUS",
+                reason="other",
+            )
+
+            approval = self.agent_tasks.get_agent_approval(
+                approval_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            approvals = self.agent_tasks.list_agent_approvals(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            missing = self.agent_tasks.get_agent_approval(
+                approval_id,
+                session_key="private:20002",
+                user_id="20002",
+            )
+            assert approval is not None
+            formatted_list = self.agent_tasks.format_agent_approval_list(approvals)
+            formatted_detail = self.agent_tasks.format_agent_approval_detail(approval)
+
+        self.assertIsNotNone(approval)
+        self.assertIsNone(missing)
+        self.assertEqual(approval.status, self.agent_tasks.AGENT_APPROVAL_PENDING)
+        self.assertEqual([item.id for item in approvals], [approval_id])
+        self.assertNotIn(f"#{other_approval_id}", formatted_list)
+        self.assertIn("待审批", formatted_detail)
+        self.assertIn("只展示审批记录", formatted_detail)
+
+    def test_agent_task_command_parser(self):
+        parse = self.agent_tasks.parse_agent_task_command
+
+        self.assertEqual(
+            parse("任务 整理 MainAgentGraph 下一步计划"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, "整理 MainAgentGraph 下一步计划"),
+        )
+        self.assertEqual(parse("任务状态"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
+        self.assertEqual(parse("task status"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
+        self.assertEqual(parse("审批状态"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_STATUS, ""))
+        self.assertEqual(parse("审批详情 #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DETAIL, "#7"))
+        self.assertEqual(parse("审批详情"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DETAIL, ""))
+        self.assertEqual(parse("任务详情 #12"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, "#12"))
+        self.assertEqual(parse("任务详情"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, ""))
+        self.assertEqual(parse("取消任务 12"), (self.agent_tasks.AGENT_TASK_COMMAND_CANCEL, "12"))
+        self.assertEqual(parse("取消任务"), (self.agent_tasks.AGENT_TASK_COMMAND_CANCEL, ""))
+        self.assertEqual(
+            parse("新增任务：整理审批流"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, "整理审批流"),
+        )
+        self.assertEqual(
+            parse("帮我记一个任务：整理 Route B 审批流"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, "整理 Route B 审批流"),
+        )
+        self.assertEqual(
+            parse("把“整理审批流”加入任务"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, "整理审批流"),
+        )
+        self.assertEqual(
+            parse("把 Route B 的执行器先放进待办"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, "Route B 的执行器"),
+        )
+        self.assertEqual(self.agent_tasks.parse_agent_task_id("#12"), 12)
+        self.assertIsNone(self.agent_tasks.parse_agent_task_id("abc"))
+        self.assertEqual(parse("任务"), (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, ""))
+        self.assertIsNone(parse("后面是不是该整理任务系统？"))
+        self.assertIsNone(parse("后面记得做一下审批流"))
+        self.assertIsNone(parse("查 MainAgentGraph 当前状态"))
 
 
 class SummaryPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):

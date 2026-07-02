@@ -669,6 +669,213 @@ cd D:\AIchatbot
 logs/ai_chat_error.log
 ```
 
+## MainAgent /agent 只读主 Agent 运行
+
+`/agent` 是主人私聊显式触发的只读主 Agent 入口。当前 live 验证版本只允许调用 `dev_context`，用于查询项目文档和开发上下文；它不是普通聊天上下文的一部分。
+
+当前边界：
+
+```text
+只允许主人私聊。
+只允许 dev_context 只读工具。
+允许 /agent 任务固定命令写入 agent_tasks / agent_task_events。
+ProjectDocRAG 只在 /agent 显式命令中使用，不进入普通聊天。
+不执行 shell。
+不写文件。
+MainAgent/LLM 不写数据库。
+不发送额外 QQ 消息。
+不接 Agent API。
+不跑多步 agent loop。
+```
+
+### 启动只读 stub 模式
+
+stub 模式不调用真实 Main LLM，适合先确认 `/agent` 命令和 `dev_context` 是否正常：
+
+```powershell
+cd D:\AIchatbot
+
+$env:ENABLE_MAIN_AGENT="true"
+$env:MAIN_AGENT_USE_LLM="false"
+
+.\.venv\Scripts\python.exe .\bot.py
+```
+
+QQ 测试：
+
+```text
+/agent 状态
+/agent 边界
+/agent 任务 整理 MainAgentGraph 下一步计划
+/agent 新增任务：整理审批流
+/agent 把“整理审批流”加入任务
+/agent 任务状态
+/agent 任务详情 1
+/agent 取消任务 1
+/agent 审批状态
+/agent 审批详情 1
+/agent 下一步
+/agent-debug 下一步
+```
+
+### 启动真实 Main LLM 模式
+
+真实 Main LLM 模式会让主模型生成 ActionRequest，并在 `dev_context` 返回后对 `tool_result` 做自然语言总结。推荐先用前台窗口启动，方便观察错误。
+
+```powershell
+cd D:\AIchatbot
+
+$env:ENABLE_MAIN_AGENT="true"
+$env:MAIN_AGENT_USE_LLM="true"
+$env:MAIN_LLM_BASE_URL="https://你的-openai-compatible-api-base-url/v1"
+$env:MAIN_LLM_MODEL="中转侧支持的模型名"
+$env:MAIN_LLM_API_KEY="你的 key"
+
+.\.venv\Scripts\python.exe .\bot.py
+```
+
+不要把 `MAIN_LLM_API_KEY` 写入文档、日志或 Git 提交。若要长期固化配置，只能写入本地 `.env`，且 `.env` 不得提交。
+
+QQ 测试顺序：
+
+```text
+/agent 状态
+/agent 任务 整理 MainAgentGraph 下一步计划
+/agent 新增任务：整理审批流
+/agent 把“整理审批流”加入任务
+/agent 任务状态
+/agent 任务详情 1
+/agent 取消任务 1
+/agent 审批状态
+/agent 审批详情 1
+/agent-debug MainAgentGraph 当前状态
+/agent 查 MainAgentGraph 当前状态
+/agent 帮我执行 dir
+```
+
+预期结果：
+
+```text
+/agent 状态
+  入口开启，LLM 已接入 /agent ActionRequest 生成。
+  显示主模型名和主模型 Key 是否配置。
+  不显示 MAIN_LLM_API_KEY 原文，也不显示 MAIN_LLM_BASE_URL。
+
+/agent 任务 ...
+  创建 pending 任务记录。
+  当前版本只记录任务，不自动执行 shell、写文件或写数据库。
+  该命令不触发 Main LLM 或 dev_context。
+
+/agent 新增任务：...
+/agent 记录任务：...
+/agent 把“...”加入任务
+  这些是明确创建任务的本地别名。
+  只走固定解析规则，不调用 Main LLM 做语义判断。
+  不明确的自然句不会自动创建任务。
+
+/agent 任务状态
+  列出当前会话和当前用户最近任务。
+  该命令不触发 Main LLM 或 dev_context。
+
+/agent 任务详情 <任务ID>
+  展示当前会话任务详情和事件记录。
+  该命令不触发 Main LLM 或 dev_context。
+
+/agent 取消任务 <任务ID>
+  只允许取消当前会话、当前用户的 pending 任务。
+  会写入 cancelled 事件。
+  不执行任何工具。
+
+/agent 审批状态
+  列出当前会话和当前用户最近审批记录。
+  当前版本通常为空，因为还没有开放真实写工具和审批恢复。
+  该命令不触发 Main LLM 或 dev_context。
+
+/agent 审批详情 <审批ID>
+  展示当前会话审批详情。
+  只查看记录，不确认、不拒绝、不恢复执行。
+
+/agent-debug ...
+  返回原始 dev_context / CombinedRAG 召回。
+
+/agent 查 ...
+  返回主 Agent 自然语言总结。
+
+/agent 帮我执行 dir
+  必须拒绝 shell，不能执行命令。
+```
+
+### Main LLM 连接失败
+
+如果 QQ 返回：
+
+```text
+MainAgentGraph rejected: main llm failed: Connection error.
+```
+
+或返回新的中文短提示：
+
+```text
+MainAgentGraph rejected: 主模型连接失败，请检查 MAIN_LLM_BASE_URL、网络、代理或中转服务。
+```
+
+同时可以查看本地错误日志：
+
+```powershell
+Get-Content D:\AIchatbot\logs\ai_chat_error.log -Tail 20
+```
+
+MainAgent LLM 失败日志会记录：
+
+```text
+phase
+error_type
+error
+model
+base_url
+api_key_configured
+```
+
+日志不会记录 `MAIN_LLM_API_KEY` 原文；`base_url` 只保留 scheme、host、port 和 path，不保留 query 或用户名密码。
+
+优先检查机器是否能连到 `MAIN_LLM_BASE_URL` 对应域名的 443 端口：
+
+```powershell
+Test-NetConnection api.openai.com -Port 443
+```
+
+如果直连 OpenAI 不通，可以使用 OpenAI 兼容中转。`MAIN_LLM_BASE_URL` 要填中转站的 API Base URL，不是网页首页。比如中转文档里的请求地址是：
+
+```text
+https://api.example.com/v1/chat/completions
+```
+
+则配置：
+
+```powershell
+$env:MAIN_LLM_BASE_URL="https://api.example.com/v1"
+```
+
+如果使用本地代理，代理变量必须在启动 bot 的同一个 PowerShell 窗口设置：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7890"
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+```
+
+### 关闭后台 bot 进程
+
+如果曾用后台方式启动 bot，需要切回前台调试，可以先关闭后台 `bot.py`：
+
+```powershell
+$procs = Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -like "python*" -and $_.CommandLine -like "*bot.py*"
+}
+$procs | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force
+}
+```
+
 ### 修改 .env 后不生效
 
 `.env` 只在机器人启动时读取。

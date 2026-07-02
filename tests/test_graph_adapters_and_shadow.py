@@ -67,6 +67,53 @@ class GraphAdapterTests(unittest.TestCase):
             },
         )
 
+    def test_parse_main_agent_command_text_accepts_agent_prefixes(self):
+        self.assertEqual(
+            self.adapters.parse_main_agent_command_text("/agent recover context"),
+            "recover context",
+        )
+        self.assertEqual(
+            self.adapters.parse_main_agent_command_text("  /main-agent\tstatus  "),
+            "status",
+        )
+        self.assertEqual(self.adapters.parse_main_agent_command_text("/agent"), "")
+        self.assertIsNone(self.adapters.parse_main_agent_command_text("/agentx recover"))
+        self.assertIsNone(self.adapters.parse_main_agent_command_text("hello /agent recover"))
+
+    def test_runtime_state_from_main_agent_command_builds_main_agent_intent(self):
+        runtime = self.adapters.runtime_state_from_main_agent_command(
+            "/agent recover project context",
+            user_id="10001",
+            actor_role=self.state.ActorRole.OWNER,
+            session_type=self.state.SessionType.PRIVATE,
+            session_key="private:10001",
+            message_id="9002",
+        )
+
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual(runtime.event.message_id, "9002")
+        self.assertEqual(runtime.event.raw_text, "/agent recover project context")
+        self.assertEqual(runtime.event.plain_text, "recover project context")
+        self.assertEqual(runtime.actor.role, self.state.ActorRole.OWNER)
+        self.assertEqual(runtime.session.session_key, "private:10001")
+        self.assertEqual(runtime.intent, self.state.RuntimeIntent.MAIN_AGENT)
+        self.assertEqual(
+            runtime.artifacts["main_agent_command"]["prefixes"],
+            ("/agent", "/main-agent"),
+        )
+
+    def test_runtime_state_from_main_agent_command_ignores_non_command_text(self):
+        runtime = self.adapters.runtime_state_from_main_agent_command(
+            "ordinary chat",
+            user_id="10001",
+            actor_role=self.state.ActorRole.OWNER,
+            session_type=self.state.SessionType.PRIVATE,
+            session_key="private:10001",
+        )
+
+        self.assertIsNone(runtime)
+
     def test_chat_state_from_request_maps_semantic_voice_options(self):
         request = self.make_request()
         runtime = self.make_runtime(request)

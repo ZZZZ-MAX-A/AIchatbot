@@ -25,6 +25,56 @@ from .state import (
 from .vision import VisionContext
 
 
+MAIN_AGENT_COMMAND_PREFIXES: tuple[str, ...] = ("/agent", "/main-agent")
+
+
+def parse_main_agent_command_text(
+    text: str,
+    *,
+    prefixes: tuple[str, ...] = MAIN_AGENT_COMMAND_PREFIXES,
+) -> str | None:
+    stripped = text.strip()
+    for prefix in prefixes:
+        if stripped == prefix:
+            return ""
+        if stripped.startswith(prefix):
+            suffix = stripped[len(prefix) :]
+            if suffix and suffix[0].isspace():
+                return suffix.strip()
+    return None
+
+
+def runtime_state_from_main_agent_command(
+    raw_text: str,
+    *,
+    user_id: str,
+    actor_role: ActorRole,
+    session_type: SessionType,
+    session_key: str,
+    group_id: str | None = None,
+    message_id: str = "",
+) -> RuntimeState | None:
+    query = parse_main_agent_command_text(raw_text)
+    if query is None:
+        return None
+    return RuntimeState(
+        event=EventContext(
+            message_id=message_id,
+            raw_text=raw_text,
+            plain_text=query,
+            has_image=False,
+        ),
+        actor=ActorContext(user_id=user_id, role=actor_role),
+        session=SessionContext(
+            session_type=session_type,
+            session_key=session_key,
+            group_id=group_id or "",
+        ),
+        intent=RuntimeIntent.MAIN_AGENT,
+        artifacts={"main_agent_command": {"prefixes": MAIN_AGENT_COMMAND_PREFIXES}},
+    )
+
+
 def chat_mode_from_options(options: ChatOptions) -> ChatMode:
     if options.semantic_voice:
         return ChatMode.SEMANTIC_VOICE
