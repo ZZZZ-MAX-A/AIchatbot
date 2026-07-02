@@ -108,6 +108,7 @@ def install_nonebot_event_stubs():
 def load_pure_graph_modules():
     ensure_ai_chat_packages()
     ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
+    ensure_package("src.plugins.ai_chat.policy", AI_CHAT_ROOT / "policy")
 
     modules = {
         "contracts": load_module(
@@ -142,6 +143,22 @@ def load_pure_graph_modules():
     modules["main_agent"] = load_module(
         "src.plugins.ai_chat.graph.main_agent",
         AI_CHAT_ROOT / "graph" / "main_agent.py",
+    )
+    modules["main_agent_llm"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent_llm",
+        AI_CHAT_ROOT / "graph" / "main_agent_llm.py",
+    )
+    modules["policy_risk"] = load_module(
+        "src.plugins.ai_chat.policy.risk",
+        AI_CHAT_ROOT / "policy" / "risk.py",
+    )
+    modules["policy_engine"] = load_module(
+        "src.plugins.ai_chat.policy.engine",
+        AI_CHAT_ROOT / "policy" / "engine.py",
+    )
+    modules["main_agent_bridge"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent_bridge",
+        AI_CHAT_ROOT / "graph" / "main_agent_bridge.py",
     )
     modules["retrieval"] = load_module(
         "src.plugins.ai_chat.graph.retrieval",
@@ -197,6 +214,7 @@ def load_pure_policy_modules():
 
 def load_pure_lc_modules():
     ensure_ai_chat_packages()
+    ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
     ensure_package("src.plugins.ai_chat.lc", AI_CHAT_ROOT / "lc")
 
     modules = {
@@ -205,9 +223,21 @@ def load_pure_lc_modules():
             AI_CHAT_ROOT / "config.py",
         )
     }
+    modules["graph_main_agent"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent",
+        AI_CHAT_ROOT / "graph" / "main_agent.py",
+    )
+    modules["graph_main_agent_llm"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent_llm",
+        AI_CHAT_ROOT / "graph" / "main_agent_llm.py",
+    )
     modules["models"] = load_module(
         "src.plugins.ai_chat.lc.models",
         AI_CHAT_ROOT / "lc" / "models.py",
+    )
+    modules["main_agent"] = load_module(
+        "src.plugins.ai_chat.lc.main_agent",
+        AI_CHAT_ROOT / "lc" / "main_agent.py",
     )
     return modules
 
@@ -276,6 +306,10 @@ def load_legacy_memory_modules():
         "database": load_module(
             "src.plugins.ai_chat.database",
             AI_CHAT_ROOT / "database.py",
+        ),
+        "agent_tasks": load_module(
+            "src.plugins.ai_chat.agent_tasks",
+            AI_CHAT_ROOT / "agent_tasks.py",
         ),
         "summaries": load_module(
             "src.plugins.ai_chat.summaries",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import importlib.util
 import sys
 import types
@@ -42,6 +43,7 @@ def load_ai_chat_modules() -> dict[str, object]:
     ensure_package("src.plugins.ai_chat.rag", AI_CHAT_ROOT / "rag")
     ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
     ensure_package("src.plugins.ai_chat.policy", AI_CHAT_ROOT / "policy")
+    ensure_package("src.plugins.ai_chat.lc", AI_CHAT_ROOT / "lc")
 
     modules: dict[str, object] = {
         "config": load_module("src.plugins.ai_chat.config", AI_CHAT_ROOT / "config.py"),
@@ -100,6 +102,22 @@ def load_ai_chat_modules() -> dict[str, object]:
         "src.plugins.ai_chat.policy.engine",
         AI_CHAT_ROOT / "policy" / "engine.py",
     )
+    modules["main_agent_llm"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent_llm",
+        AI_CHAT_ROOT / "graph" / "main_agent_llm.py",
+    )
+    modules["main_agent_bridge"] = load_module(
+        "src.plugins.ai_chat.graph.main_agent_bridge",
+        AI_CHAT_ROOT / "graph" / "main_agent_bridge.py",
+    )
+    modules["lc_models"] = load_module(
+        "src.plugins.ai_chat.lc.models",
+        AI_CHAT_ROOT / "lc" / "models.py",
+    )
+    modules["lc_main_agent"] = load_module(
+        "src.plugins.ai_chat.lc.main_agent",
+        AI_CHAT_ROOT / "lc" / "main_agent.py",
+    )
     return modules
 
 
@@ -112,6 +130,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--query-combined", help="Query ProjectDocRAG and MemoryRAG together for dev-side context.")
     parser.add_argument("--query-dev-context", help="Build dev-side context through the DevContextGraph boundary.")
     parser.add_argument("--query-main-agent", help="Run MainAgentGraph with the read-only dev_context tool.")
+    parser.add_argument(
+        "--main-agent-use-llm",
+        action="store_true",
+        help="Use the configured Main LLM for --query-main-agent instead of the safe dev_context stub.",
+    )
+    parser.add_argument(
+        "--main-agent-action-json",
+        help="Inject raw ActionRequest JSON for --query-main-agent local testing.",
+    )
+    parser.add_argument(
+        "--main-agent-action-json-base64",
+        help="Inject base64-encoded ActionRequest JSON for shell-safe local testing.",
+    )
     parser.add_argument("--root", default=str(REPO_ROOT), help="Repository root to scan.")
     parser.add_argument("--max-chars", type=int, default=1800, help="Maximum characters per Markdown chunk.")
     parser.add_argument("--top-k", type=int, help="Retrieval top-k override.")
@@ -177,6 +208,25 @@ def main() -> int:
             "choose --project-docs, --memory, --query-project-docs, "
             "--query-memory, --query-combined, --query-dev-context, or --query-main-agent"
         )
+    injected_action_count = sum(
+        1
+        for value in (
+            args.main_agent_use_llm,
+            bool(args.main_agent_action_json),
+            bool(args.main_agent_action_json_base64),
+        )
+        if value
+    )
+    if injected_action_count > 1:
+        parser.error(
+            "--main-agent-use-llm, --main-agent-action-json, and "
+            "--main-agent-action-json-base64 are mutually exclusive"
+        )
+    if injected_action_count and not args.query_main_agent:
+        parser.error(
+            "--main-agent-use-llm, --main-agent-action-json, and "
+            "--main-agent-action-json-base64 require --query-main-agent"
+        )
 
     modules = load_ai_chat_modules()
     config = modules["config"].load_config()
@@ -188,6 +238,8 @@ def main() -> int:
     main_agent = modules["main_agent"]
     risk = modules["risk"]
     policy_engine = modules["policy_engine"]
+    main_agent_bridge = modules["main_agent_bridge"]
+    lc_main_agent = modules["lc_main_agent"]
 
     async def run_dev_context_query(query: str, *, is_owner: bool = True):
         state = dev_context.DevContextState(query=query, is_owner=is_owner)
@@ -434,14 +486,36 @@ def main() -> int:
                 ).strip()
                 return current
 
-            runner = main_agent.MainAgentGraphRunner(
-                validate_agent_request=validate_agent_request,
-                build_agent_context=build_agent_context,
-                call_main_agent=call_main_agent,
-                validate_action_request=validate_action_request,
-                check_tool_policy=check_tool_policy,
-                execute_tool=execute_tool,
-                render_agent_response=render_agent_response,
+            async def retrieve_dev_context(query: str, is_owner: bool) -> str:
+                execution = await run_dev_context_query(query, is_owner=is_owner)
+                if execution.result.error:
+                    raise RuntimeError(execution.result.context_text or execution.result.error)
+                return execution.result.context_text
+
+            call_main_agent_handler = None
+            if args.main_agent_action_json:
+                def call_main_agent_from_action_json(current):
+                    current.raw_action_request = args.main_agent_action_json
+                    return current
+
+                call_main_agent_handler = call_main_agent_from_action_json
+            elif args.main_agent_action_json_base64:
+                raw_action_request = base64.b64decode(
+                    args.main_agent_action_json_base64,
+                    validate=True,
+                ).decode("utf-8")
+
+                def call_main_agent_from_action_json_base64(current):
+                    current.raw_action_request = raw_action_request
+                    return current
+
+                call_main_agent_handler = call_main_agent_from_action_json_base64
+            elif args.main_agent_use_llm:
+                call_main_agent_handler = lc_main_agent.create_main_agent_lc_call_handler(config)
+
+            runner = main_agent_bridge.create_read_only_main_agent_runner(
+                retrieve_dev_context=retrieve_dev_context,
+                call_main_agent=call_main_agent_handler,
             )
             execution = asyncio.run(runner.run(state))
         except modules["providers"].EmbeddingProviderError as exc:

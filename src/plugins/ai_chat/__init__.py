@@ -27,6 +27,29 @@ from .access_store import (
     merged_access,
     remove_item,
 )
+from .agent_tasks import (
+    AGENT_TASK_COMMAND_APPROVAL_DETAIL,
+    AGENT_TASK_COMMAND_APPROVAL_STATUS,
+    AGENT_TASK_COMMAND_CANCEL,
+    AGENT_TASK_COMMAND_CREATE,
+    AGENT_TASK_COMMAND_DETAIL,
+    AGENT_TASK_COMMAND_STATUS,
+    cancel_agent_task,
+    create_agent_task,
+    format_agent_task_cancelled,
+    format_agent_task_created,
+    format_agent_task_detail,
+    format_agent_task_list,
+    format_agent_approval_detail,
+    format_agent_approval_list,
+    get_agent_approval,
+    get_agent_task,
+    list_agent_task_events,
+    list_agent_approvals,
+    list_agent_tasks,
+    parse_agent_task_command,
+    parse_agent_task_id,
+)
 from .base_prompt import load_base_chat_reminder
 from .chat_contracts import (
     ChatImageContext,
@@ -59,6 +82,9 @@ from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_s
 from .graph import (
     ActorRole,
     ChatState,
+    DevContextGraphExecution,
+    DevContextGraphRunner,
+    DevContextState,
     DiagnosticsGraphRunner,
     DiagnosticsState,
     DiagnosticsView,
@@ -79,6 +105,8 @@ from .graph import (
     NotificationGraphExecution,
     NotificationGraphRunner,
     NotificationState,
+    RootGraphRunner,
+    RuntimeIntent,
     SessionType,
     ShadowChatSnapshot,
     ShadowChatValidation,
@@ -87,7 +115,9 @@ from .graph import (
     chat_state_with_prompt_context,
     chat_state_with_runtime_result,
     chat_state_with_vision_result,
+    create_read_only_main_agent_runtime_handler,
     persisted_turn_from_chat_turn,
+    runtime_state_from_main_agent_command,
     runtime_state_from_chat_request,
     shadow_chat_snapshot_from_state,
     validate_shadow_chat_snapshot,
@@ -108,10 +138,15 @@ from .manual_memory import (
     manual_memory_stats,
     memory_type_label,
 )
+from .main_agent_observability import build_main_llm_failure_log_message
 from .llm import (
     active_persona_prompt_path,
     ask_llm,
     load_persona_prompt,
+)
+from .lc import (
+    create_main_agent_lc_call_handler,
+    create_main_agent_tool_summary_lc_handler,
 )
 from .memory import (
     append_message,
@@ -126,6 +161,7 @@ from .owner_notify import (
     format_owner_notification,
     validate_owner_notification_content,
 )
+from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
 from .rag.providers import build_embedding_provider
 from .rag.schema import (
@@ -240,6 +276,16 @@ def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
             f"{datetime.now().isoformat(timespec='seconds')} "
             f"user={event.user_id} group={group} "
             f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def log_main_agent_observation(message: str, event: MessageEvent) -> None:
+    ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    group = event.group_id if isinstance(event, GroupMessageEvent) else ""
+    with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(
+            f"{datetime.now().isoformat(timespec='seconds')} "
+            f"user={event.user_id} group={group} {message}\n"
         )
 
 
@@ -1323,6 +1369,73 @@ async def run_memory_retrieval_graph(
     return await runner.run(state)
 
 
+async def run_dev_context_graph_for_main_agent(
+    query: str,
+    *,
+    requester_is_owner: bool,
+    event: MessageEvent,
+) -> DevContextGraphExecution:
+    state = DevContextState(query=query.strip(), is_owner=requester_is_owner)
+
+    async def validate_context_request(current: DevContextState) -> DevContextState:
+        if not current.is_owner:
+            current.context_text = "DevContextGraph rejected: owner access is required."
+            current.error = "permission_denied"
+        elif not current.query:
+            current.context_text = "Please provide a MainAgentGraph query."
+            current.error = "validation_failed"
+        return current
+
+    async def retrieve_combined_context(current: DevContextState) -> DevContextState:
+        try:
+            embedder = build_embedding_provider(config)
+            results = await asyncio.to_thread(
+                retrieve_combined_rag,
+                query=current.query,
+                embedder=embedder,
+                is_owner=current.is_owner,
+                project_top_k=config.project_doc_rag_top_k,
+                project_min_score=config.project_doc_rag_min_score,
+                project_max_context_chars=config.project_doc_rag_max_context_chars,
+                memory_top_k=config.memory_rag_top_k,
+                memory_min_score=config.memory_rag_min_score,
+                memory_max_context_chars=config.memory_rag_max_context_chars,
+            )
+            current.project_result_count = len(results.project_docs)
+            current.memory_result_count = len(results.memories)
+            current.metadata["combined_results"] = results
+        except Exception as exc:
+            log_ai_event_error(exc, event)
+            current.context_text = f"DevContextGraph query failed: {type(exc).__name__}"
+            current.error = "execution_failed"
+        return current
+
+    async def render_context_artifact(current: DevContextState) -> DevContextState:
+        if current.context_text:
+            return current
+        results = current.metadata.get("combined_results")
+        if results is None:
+            return current
+        current.context_text = "\n".join(
+            [
+                "DevContextGraph dev-side context:",
+                f"query: {current.query}",
+                f"project docs: {current.project_result_count}",
+                f"memories: {current.memory_result_count}",
+                "",
+                format_combined_rag_results(results),
+            ]
+        ).strip()
+        return current
+
+    runner = DevContextGraphRunner(
+        validate_context_request=validate_context_request,
+        retrieve_combined_context=retrieve_combined_context,
+        render_context_artifact=render_context_artifact,
+    )
+    return await runner.run(state)
+
+
 def summary_status_lines(key: str) -> list[str]:
     current = summary_stats(key)
     gap = gap_scene_summary_stats(key)
@@ -2188,6 +2301,13 @@ clear_image_cache_cmd = on_command("清空图片缓存", aliases={"clear_image_c
 memory_status_cmd = on_command("记忆状态", aliases={"memory_status"}, priority=5, block=True)
 rag_status_cmd = on_command("RAG状态", aliases={"rag_status"}, priority=5, block=True)
 memory_retrieval_cmd = on_command("记忆检索", aliases={"memory_retrieval"}, priority=5, block=True)
+main_agent_cmd = on_command("agent", aliases={"main-agent"}, priority=5, block=True)
+main_agent_debug_cmd = on_command(
+    "agent-debug",
+    aliases={"agent_debug", "main-agent-debug"},
+    priority=5,
+    block=True,
+)
 rebuild_memory_rag_cmd = on_command(
     "重建记忆索引",
     aliases={"rebuild_memory_rag_index"},
@@ -3153,6 +3273,287 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
         query=query,
     )
     await matcher.finish(execution.result.reply_text)
+
+
+def main_agent_help_reply() -> str:
+    return "\n".join(
+        [
+            "MainAgent /agent 可用命令：",
+            "/agent 状态",
+            "/agent 边界",
+            "/agent 任务 <目标>",
+            "/agent 新增任务：<目标>",
+            "/agent 把“目标”加入任务",
+            "/agent 任务状态",
+            "/agent 任务详情 <任务ID>",
+            "/agent 取消任务 <任务ID>",
+            "/agent 审批状态",
+            "/agent 审批详情 <审批ID>",
+            "/agent 下一步",
+            "/agent 查 <问题>",
+            "/agent-debug <问题>",
+            "边界：只读 dev_context；任务命令只记录，不执行 shell，不写文件。",
+        ]
+    )
+
+
+def main_agent_status_reply() -> str:
+    output_mode = (
+        "/agent 自然总结，/agent-debug 原始召回"
+        if config.main_agent_use_llm
+        else "/agent 简短摘要，/agent-debug 原始召回"
+    )
+    return "\n".join(
+        [
+            "MainAgent 当前状态：",
+            f"入口：{'开启' if config.enable_main_agent else '关闭'}",
+            "模式：只读",
+            "工具：dev_context",
+            "任务：只记录状态和事件，不自动执行",
+            "审批：只读查看，不恢复执行",
+            f"LLM：{'已接入 /agent ActionRequest 生成' if config.main_agent_use_llm else '未接入 /agent 默认路径'}",
+            f"主模型：{config.main_llm_model or '未配置'}",
+            f"主模型 Key：{'已配置' if config.main_llm_api_key else '未配置'}",
+            f"输出：{output_mode}",
+        ]
+    )
+
+
+def main_agent_boundary_reply() -> str:
+    return "\n".join(
+        [
+            "MainAgent 当前边界：",
+            "允许：主人私聊调用 dev_context 只读工具。",
+            "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
+            "禁止：MainAgent/LLM 执行 shell、写文件、写数据库、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
+            "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
+            "真实 LLM：只负责生成 ActionRequest 和总结只读工具结果。",
+        ]
+    )
+
+
+def main_agent_static_reply(query: str) -> str | None:
+    normalized = query.strip().lower()
+    if not normalized:
+        return main_agent_help_reply()
+    if normalized in {"状态", "status"}:
+        return main_agent_status_reply()
+    if normalized in {"边界", "boundary", "boundaries"}:
+        return main_agent_boundary_reply()
+    if normalized in {"帮助", "help"}:
+        return main_agent_help_reply()
+    return None
+
+
+def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
+    parsed = parse_agent_task_command(query)
+    if parsed is None:
+        return None
+
+    action, goal = parsed
+    if action == AGENT_TASK_COMMAND_APPROVAL_STATUS:
+        approvals = list_agent_approvals(
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        return format_agent_approval_list(approvals)
+
+    if action == AGENT_TASK_COMMAND_APPROVAL_DETAIL:
+        approval_id = parse_agent_task_id(goal)
+        if approval_id is None:
+            return "请提供审批 ID：/agent 审批详情 <审批ID>"
+        approval = get_agent_approval(
+            approval_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        if approval is None:
+            return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
+        return format_agent_approval_detail(approval)
+
+    if action == AGENT_TASK_COMMAND_STATUS:
+        tasks = list_agent_tasks(
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        return format_agent_task_list(tasks)
+
+    if action == AGENT_TASK_COMMAND_DETAIL:
+        task_id = parse_agent_task_id(goal)
+        if task_id is None:
+            return "请提供任务 ID：/agent 任务详情 <任务ID>"
+        task = get_agent_task(
+            task_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        if task is None:
+            return f"未找到当前会话中的 Agent 任务 #{task_id}。"
+        events = list_agent_task_events(task.id)
+        return format_agent_task_detail(task, events)
+
+    if action == AGENT_TASK_COMMAND_CANCEL:
+        task_id = parse_agent_task_id(goal)
+        if task_id is None:
+            return "请提供任务 ID：/agent 取消任务 <任务ID>"
+        task, changed = cancel_agent_task(
+            task_id=task_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        if task is None:
+            return f"未找到当前会话中的 Agent 任务 #{task_id}。"
+        return format_agent_task_cancelled(task, changed=changed)
+
+    if action == AGENT_TASK_COMMAND_CREATE:
+        if not goal:
+            return "请提供任务目标：/agent 任务 <目标>\n当前版本只记录任务，不自动执行。"
+        task_id = create_agent_task(
+            session_key=session_key(event),
+            user_id=user_id(event),
+            goal=goal,
+        )
+        task = get_agent_task(task_id)
+        if task is None:
+            return "Agent 任务创建失败：任务记录未找到。"
+        return format_agent_task_created(task)
+
+    return None
+
+
+def normalize_main_agent_query(query: str) -> str:
+    stripped = query.strip()
+    for prefix in ("查 ", "查询 ", "search "):
+        if stripped.lower().startswith(prefix.lower()):
+            return stripped[len(prefix):].strip()
+    if stripped in {"下一步", "next"}:
+        return "继续 AIchatbot MainAgentGraph 开发，恢复当前状态、边界和下一步建议"
+    return stripped
+
+
+def log_main_agent_runtime_observations(
+    runtime_state,
+    event: MessageEvent,
+) -> None:
+    artifact = runtime_state.artifacts.get("main_agent_graph", {})
+    if not isinstance(artifact, dict):
+        return
+    metadata = artifact.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    if artifact.get("error") == "main_llm_failed":
+        error_info = metadata.get("main_llm_error", {})
+        if not isinstance(error_info, dict):
+            error_info = {}
+        log_main_agent_observation(
+            build_main_llm_failure_log_message(
+                config=config,
+                phase="action_request",
+                error_type=str(error_info.get("type") or "unknown"),
+                error_message=str(error_info.get("message") or artifact.get("error") or ""),
+            ),
+            event,
+        )
+
+    tool_summary_error = metadata.get("tool_summary_error")
+    if tool_summary_error:
+        log_main_agent_observation(
+            build_main_llm_failure_log_message(
+                config=config,
+                phase="tool_summary",
+                error_type=str(metadata.get("tool_summary_error_type") or "unknown"),
+                error_message=str(tool_summary_error),
+            ),
+            event,
+        )
+
+
+async def run_main_agent_qq_command(
+    event: MessageEvent,
+    query: str,
+    *,
+    raw_output: bool,
+) -> str:
+    if not config.enable_main_agent:
+        return "MainAgent is disabled. Set ENABLE_MAIN_AGENT=true to use /agent."
+    if config.main_agent_owner_only and not is_owner(config, event):
+        return "MainAgent rejected: owner access is required."
+    if isinstance(event, GroupMessageEvent) and not config.main_agent_allow_group:
+        return "MainAgent rejected: the first read-only version is private-only."
+
+    if not raw_output:
+        static_reply = main_agent_static_reply(query)
+        if static_reply is not None:
+            return static_reply
+        task_reply = run_main_agent_task_command(event, query)
+        if task_reply is not None:
+            return task_reply
+
+    normalized_query = normalize_main_agent_query(query)
+    raw_text = f"/agent {normalized_query}".strip()
+    runtime_state = runtime_state_from_main_agent_command(
+        raw_text,
+        user_id=user_id(event),
+        actor_role=graph_actor_role_for_event(event),
+        session_type=graph_session_type_for_event(event),
+        session_key=session_key(event),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
+        message_id=event_message_id(event),
+    )
+    if runtime_state is None:
+        return "MainAgent rejected: invalid command."
+
+    async def retrieve_dev_context(query_text: str, requester_is_owner: bool) -> str:
+        execution = await run_dev_context_graph_for_main_agent(
+            query_text,
+            requester_is_owner=requester_is_owner,
+            event=event,
+        )
+        if execution.result.error:
+            raise RuntimeError(execution.result.context_text or execution.result.error)
+        return execution.result.context_text
+
+    call_main_agent = None
+    summarize_tool_result = None
+    if config.main_agent_use_llm:
+        try:
+            call_main_agent = create_main_agent_lc_call_handler(config)
+            if not raw_output:
+                summarize_tool_result = create_main_agent_tool_summary_lc_handler(config)
+        except Exception as exc:
+            return f"MainAgent LLM is not available: {exc}"
+
+    handler = create_read_only_main_agent_runtime_handler(
+        retrieve_dev_context=retrieve_dev_context,
+        call_main_agent=call_main_agent,
+        summarize_tool_result=summarize_tool_result,
+        render_mode="raw" if raw_output else "concise",
+    )
+    runner = RootGraphRunner(handlers={RuntimeIntent.MAIN_AGENT: handler})
+    response = await runner.run(runtime_state)
+    log_main_agent_runtime_observations(runtime_state, event)
+    return response.text
+
+
+@main_agent_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    reply = await run_main_agent_qq_command(
+        event,
+        arg.extract_plain_text().strip(),
+        raw_output=False,
+    )
+    await matcher.finish(reply)
+
+
+@main_agent_debug_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    reply = await run_main_agent_qq_command(
+        event,
+        arg.extract_plain_text().strip(),
+        raw_output=True,
+    )
+    await matcher.finish(reply)
 
 
 @rebuild_memory_rag_cmd.handle()

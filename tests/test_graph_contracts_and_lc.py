@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 import unittest
 
@@ -307,6 +308,147 @@ class LangChainModelFactoryTests(unittest.TestCase):
                 }
             ],
         )
+
+
+class LangChainMainAgentAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_pure_lc_modules()
+        cls.lc_main_agent = cls.modules["main_agent"]
+        cls.graph_main_agent = cls.modules["graph_main_agent"]
+
+    def test_invoke_main_llm_prefers_async_invoke(self):
+        calls = []
+
+        class FakeLLM:
+            async def ainvoke(self, messages):
+                calls.append(("ainvoke", messages))
+                return {"content": '{"action":"final_answer","content":"async"}'}
+
+            def invoke(self, _messages):
+                raise AssertionError("invoke should not run when ainvoke exists")
+
+        response = asyncio.run(
+            self.lc_main_agent.invoke_main_llm(
+                FakeLLM(),
+                [{"role": "user", "content": "hello"}],
+            )
+        )
+
+        self.assertEqual(response["content"], '{"action":"final_answer","content":"async"}')
+        self.assertEqual(calls[0][0], "ainvoke")
+        self.assertIsInstance(calls[0][1], tuple)
+        self.assertEqual(calls[0][1][0]["content"], "hello")
+
+    def test_invoke_main_llm_uses_sync_invoke_fallback(self):
+        calls = []
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(messages)
+                return {"content": '{"action":"final_answer","content":"sync"}'}
+
+        response = asyncio.run(
+            self.lc_main_agent.invoke_main_llm(
+                FakeLLM(),
+                [{"role": "user", "content": "hello"}],
+            )
+        )
+
+        self.assertEqual(response["content"], '{"action":"final_answer","content":"sync"}')
+        self.assertEqual(calls[0][0]["role"], "user")
+
+    def test_create_main_llm_call_builds_model_from_config_when_not_provided(self):
+        calls = []
+        original_build_main_llm = self.lc_main_agent.build_main_llm
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(("invoke", messages))
+                return {"content": '{"action":"final_answer","content":"built"}'}
+
+        def fake_build_main_llm(config):
+            calls.append(("build", config.main_llm_model))
+            return FakeLLM()
+
+        self.lc_main_agent.build_main_llm = fake_build_main_llm
+        try:
+            config = types.SimpleNamespace(main_llm_model="main-model")
+            llm_call = self.lc_main_agent.create_main_llm_call(config)
+            response = asyncio.run(llm_call([{"role": "user", "content": "hello"}]))
+        finally:
+            self.lc_main_agent.build_main_llm = original_build_main_llm
+
+        self.assertEqual(response["content"], '{"action":"final_answer","content":"built"}')
+        self.assertEqual(calls[0], ("build", "main-model"))
+        self.assertEqual(calls[1][0], "invoke")
+
+    def test_lc_call_handler_integrates_real_wrapper_with_main_agent_graph(self):
+        state = self.graph_main_agent.MainAgentState(
+            query="recover context",
+            metadata={"agent_context": "read-only context"},
+        )
+        calls = []
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(messages)
+                return {
+                    "content": self_graph.dev_context_tool_action_json(
+                        "recover context",
+                        reason="need context",
+                    )
+                }
+
+        self_graph = self.graph_main_agent
+
+        def validate_action(agent_state):
+            action_request = self_graph.parse_main_agent_action_request(
+                agent_state.raw_action_request
+            )
+            self_graph.apply_action_request_to_state(agent_state, action_request)
+            return agent_state
+
+        runner = self_graph.MainAgentGraphRunner(
+            call_main_agent=self.lc_main_agent.create_main_agent_lc_call_handler(
+                types.SimpleNamespace(main_llm_model="unused"),
+                llm=FakeLLM(),
+            ),
+            validate_action_request=validate_action,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertIn("read-only context", calls[0][1]["content"])
+        self.assertEqual(execution.result.action, self_graph.MainAgentAction.TOOL_REQUEST.value)
+        self.assertEqual(execution.result.requested_tool, self_graph.MainAgentToolName.DEV_CONTEXT.value)
+
+    def test_lc_tool_summary_handler_integrates_real_wrapper(self):
+        state = self.graph_main_agent.MainAgentState(
+            query="recover context",
+            tool_query="recover context",
+            tool_result="DevContextGraph result",
+            metadata={"agent_context": "read-only context"},
+        )
+        calls = []
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(messages)
+                return {"content": "自然总结。"}
+
+        handler = self.lc_main_agent.create_main_agent_tool_summary_lc_handler(
+            types.SimpleNamespace(main_llm_model="unused"),
+            llm=FakeLLM(),
+        )
+        result = asyncio.run(handler(state))
+
+        self.assertEqual(result.response_text, "自然总结。")
+        self.assertIn("DevContextGraph result", calls[0][1]["content"])
+
+    def test_invoke_main_llm_rejects_non_invokable_object(self):
+        with self.assertRaises(self.lc_main_agent.MainAgentLLMInvocationError):
+            asyncio.run(self.lc_main_agent.invoke_main_llm(object(), []))
 
 
 if __name__ == "__main__":

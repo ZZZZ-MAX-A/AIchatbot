@@ -21,6 +21,7 @@ class ConfigLoadingTests(unittest.TestCase):
         config = self.load_with_env({})
 
         self.assertFalse(config.enable_main_agent)
+        self.assertFalse(config.main_agent_use_llm)
         self.assertTrue(config.main_agent_owner_only)
         self.assertFalse(config.main_agent_allow_group)
         self.assertTrue(config.main_agent_require_approval_for_writes)
@@ -93,6 +94,7 @@ class ConfigLoadingTests(unittest.TestCase):
         config = self.load_with_env(
             {
                 "ENABLE_MAIN_AGENT": "yes",
+                "MAIN_AGENT_USE_LLM": "true",
                 "MAIN_AGENT_OWNER_ONLY": "false",
                 "MAIN_AGENT_ALLOW_GROUP": "on",
                 "MAIN_AGENT_MAX_STEPS": "9",
@@ -130,6 +132,7 @@ class ConfigLoadingTests(unittest.TestCase):
         )
 
         self.assertTrue(config.enable_main_agent)
+        self.assertTrue(config.main_agent_use_llm)
         self.assertFalse(config.main_agent_owner_only)
         self.assertTrue(config.main_agent_allow_group)
         self.assertEqual(config.main_agent_max_steps, 9)

@@ -7,7 +7,7 @@ from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_PATH = PROJECT_ROOT / "data" / "chatbot.db"
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "6"
 
 
 def utc_now() -> str:
@@ -207,6 +207,85 @@ def ensure_database() -> None:
                 used_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_session_status
+            ON agent_tasks (session_key, status, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_user_status
+            ON agent_tasks (user_id, status, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                step_index INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                tool_name TEXT,
+                input_json TEXT,
+                output_summary TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_task_events_task_step
+            ON agent_task_events (task_id, step_index, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_input_json TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                decided_at TEXT,
+                FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_approvals_task_status
+            ON agent_approvals (task_id, status, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_approvals_status_id
+            ON agent_approvals (status, id)
             """
         )
         connection.execute(

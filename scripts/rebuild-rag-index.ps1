@@ -6,6 +6,9 @@ param(
     [string]$QueryCombined = "",
     [string]$QueryDevContext = "",
     [string]$QueryMainAgent = "",
+    [switch]$MainAgentUseLlm,
+    [string]$MainAgentActionJson = "",
+    [string]$MainAgentActionJsonBase64 = "",
     [string]$Root = "",
     [int]$MaxChars = 1800,
     [int]$TopK = 0,
@@ -52,6 +55,17 @@ if ($QueryDevContext) {
 if ($QueryMainAgent) {
     $arguments += "--query-main-agent"
     $arguments += $QueryMainAgent
+}
+if ($MainAgentUseLlm) {
+    $arguments += "--main-agent-use-llm"
+}
+if ($MainAgentActionJson) {
+    $arguments += "--main-agent-action-json"
+    $arguments += $MainAgentActionJson
+}
+if ($MainAgentActionJsonBase64) {
+    $arguments += "--main-agent-action-json-base64"
+    $arguments += $MainAgentActionJsonBase64
 }
 if ($Root) {
     $arguments += "--root"
