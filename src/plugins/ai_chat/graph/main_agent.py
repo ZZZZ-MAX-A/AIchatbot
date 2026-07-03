@@ -8,6 +8,12 @@ from enum import Enum
 from typing import Any
 from typing import TypeAlias
 
+from .tool_registry import (
+    ToolArgumentError,
+    ToolRegistry,
+    create_default_main_agent_tool_registry,
+)
+
 
 class MainAgentNode(str, Enum):
     VALIDATE_AGENT_REQUEST = "validate_agent_request"
@@ -104,7 +110,11 @@ async def _maybe_await(value):
     return value
 
 
-def parse_main_agent_action_request(raw: object) -> MainAgentActionRequest:
+def parse_main_agent_action_request(
+    raw: object,
+    *,
+    tool_registry: ToolRegistry | None = None,
+) -> MainAgentActionRequest:
     if isinstance(raw, str):
         try:
             payload = json.loads(raw)
@@ -142,11 +152,11 @@ def parse_main_agent_action_request(raw: object) -> MainAgentActionRequest:
     if action == MainAgentAction.TOOL_REQUEST:
         if not tool_name.strip():
             raise MainAgentActionRequestError("tool_request requires tool_name")
-        if tool_name.strip() != MainAgentToolName.DEV_CONTEXT.value:
-            raise MainAgentActionRequestError(f"unsupported tool: {tool_name}")
-        query = arguments.get("query")
-        if not isinstance(query, str) or not query.strip():
-            raise MainAgentActionRequestError("dev_context tool requires arguments.query")
+        registry = tool_registry or create_default_main_agent_tool_registry()
+        try:
+            arguments = registry.validate_arguments(tool_name.strip(), arguments)
+        except ToolArgumentError as exc:
+            raise MainAgentActionRequestError(str(exc)) from exc
     elif tool_name:
         raise MainAgentActionRequestError(f"{action.value} must not include tool_name")
 
@@ -175,6 +185,7 @@ def apply_action_request_to_state(
     state.action = action_request.action.value
     state.requested_tool = ""
     state.tool_query = ""
+    state.metadata.pop("tool_arguments", None)
 
     if action_request.action == MainAgentAction.FINAL_ANSWER:
         state.response_text = action_request.content
@@ -184,7 +195,9 @@ def apply_action_request_to_state(
         state.response_text = action_request.content or action_request.reason
     elif action_request.action == MainAgentAction.TOOL_REQUEST:
         state.requested_tool = action_request.tool_name
-        state.tool_query = str(action_request.arguments["query"]).strip()
+        state.metadata["tool_arguments"] = dict(action_request.arguments)
+        query = action_request.arguments.get("query")
+        state.tool_query = str(query).strip() if isinstance(query, str) else ""
     return state
 
 

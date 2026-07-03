@@ -128,6 +128,8 @@ dev_context
 
 它用于查询项目上下文，底层会走 CombinedRAG，把项目文档和语义记忆分区召回。注意，它仍然是只读工具，不执行 shell，不写文件，不写数据库，不发额外 QQ 消息。
 
+后来我把这一步补成了 ToolRegistry v0：主模型生成 `tool_request` 后，系统不是手写判断“是不是 dev_context”，而是先查工具注册表，确认工具存在、参数完整、没有多余参数，再把工具的风险等级交给 `ToolPolicyCheck`。真实 `/agent` runner 现在仍然只向 Main LLM 暴露 `dev_context`；`dry_run_write_file` 只在显式 dry-run/test registry 里注册，并且 `llm_visible=false`，用于审批链路测试，不会真的写文件。
+
 当前 MainAgentGraph 的核心流程是：
 
 ```text
@@ -342,7 +344,64 @@ QQ 侧先只做只读查看：
 /agent 审批详情 <审批ID>
 ```
 
+随后补上了审批决定命令：
+
+```text
+/agent 审批演练 <目标>
+/agent 确认 <审批ID>
+/agent 拒绝 <审批ID>
+```
+
+这些命令也仍然是固定解析，不交给 Main LLM 判断语义。`/agent 审批演练 <目标>` 只创建一个 dry-run 任务和 `dry_run_write_file` 审批请求，用来在 QQ 侧实测 Route B；它不会真的写文件。确认和拒绝只允许处理当前会话、当前用户的 `pending` 审批，更新 `agent_approvals.status / decided_at`，并往 `agent_task_events` 里追加一条审批决定事件。
+
+审批创建本身也会写任务事件。也就是说，未来执行器或工具策略发现某个动作需要审批时，会先调用审批创建链路：
+
+```text
+create_agent_approval
+  -> 写入 agent_approvals
+  -> 追加 agent_task_events: approval_requested
+  -> 返回审批请求回复
+```
+
+同时我把 PolicyEngine 的 `require_approval` 决策接到了一个通用适配层：
+
+```text
+create_tool_policy_checker
+  -> decide_tool_policy
+  -> require_approval
+  -> approval_required 中断
+  -> 返回审批请求
+  -> 不进入 execute_tool
+```
+
+这一步仍然没有开放写工具。它只是把“策略要求审批”变成一个明确中断点，方便后续执行器接入。
+
+任务详情里就能看到：
+
+```text
+0. created
+1. approval_requested
+2. approval_approved / approval_rejected
+```
+
 当前通常会显示“暂无审批”，这是正常的。因为还没有开放写文件、发 QQ、shell、git push 这类会产生审批的工具。
+
+如果要在 QQ 侧测试审批闭环，可以先用：
+
+```text
+/agent 审批演练 整理版本日志 dry-run
+```
+
+它会生成任务和审批请求，然后继续测试：
+
+```text
+/agent 审批状态
+/agent 审批详情 最新
+/agent 确认 最新
+/agent 任务详情 最新
+```
+
+确认之后也不会恢复执行，这正是当前阶段的预期。
 
 审批表的作用是给后续能力预留安全闸门。
 
@@ -376,7 +435,7 @@ QQ 侧先只做只读查看：
 /agent 确认 5
 ```
 
-系统才恢复执行。
+当前版本只会记录“审批 #5 已确认”这个决定，不会恢复执行。等后续有执行器 checkpoint 后，才会把“确认”接到恢复执行链路上。
 
 这就是任务和审批的区别：
 
@@ -426,6 +485,8 @@ L5：默认禁止。
 ```
 
 第一版实际只开放了只读工具。写工具和危险工具都没有开放。
+
+这里的“注册”已经不只是设计稿：ToolRegistry 会保存 `ToolSpec`，包括工具名、描述、风险等级、必填/可选参数、执行器、是否启用、是否对 LLM 可见、是否需要审批。未来记忆、诊断、权限等确定性能力如果要给 MainAgent 使用，也应该先拆成服务函数，再注册成受控工具，而不是让 MainAgent 直接调用 NoneBot handler。
 
 这就是为什么主 Agent 当前能查项目上下文，却不能执行 `dir`，也不能写文件。
 
@@ -485,6 +546,15 @@ L5：默认禁止。
 
 /agent 审批状态：
   只查看审批记录，不恢复执行。
+
+approval_requested：
+  创建审批时自动写入任务事件，用于审计“Agent 想做什么高风险动作”。
+
+/agent 确认 <审批ID>：
+  更新当前会话 pending 审批为已确认，记录事件，不恢复执行。
+
+/agent 拒绝 <审批ID>：
+  更新当前会话 pending 审批为已拒绝，记录事件，不恢复执行。
 ```
 
 当前仍不开放：
@@ -492,6 +562,7 @@ L5：默认禁止。
 ```text
 shell 工具
 写文件工具
+真实写文件工具，`dry_run_write_file` 只用于内部审批 dry-run
 数据库写工具，除了固定任务/审批记录链路
 额外 QQ 发送
 Agent API

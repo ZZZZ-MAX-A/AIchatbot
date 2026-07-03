@@ -148,6 +148,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.graph.main_agent_llm",
         AI_CHAT_ROOT / "graph" / "main_agent_llm.py",
     )
+    modules["tool_registry"] = load_module(
+        "src.plugins.ai_chat.graph.tool_registry",
+        AI_CHAT_ROOT / "graph" / "tool_registry.py",
+    )
     modules["policy_risk"] = load_module(
         "src.plugins.ai_chat.policy.risk",
         AI_CHAT_ROOT / "policy" / "risk.py",

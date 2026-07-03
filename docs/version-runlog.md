@@ -28,7 +28,8 @@
 /agent：
   QQ live 只读 MainAgent 已验证。
   真实 MainAgent LLM 可生成 ActionRequest。
-  只允许调用 dev_context。
+  真实可见工具只允许调用 dev_context。
+  ActionRequest tool_request 已改为 ToolRegistry-backed 校验。
   dev_context 返回后可进行 tool_result 二次总结。
   /agent 任务 <目标> 可创建 pending 任务记录。
   /agent 新增任务：<目标> 等明确本地别名可创建 pending 任务记录。
@@ -36,8 +37,13 @@
   /agent 任务状态 可查看当前会话任务。
   /agent 任务详情 <任务ID> 可查看任务和事件。
   /agent 取消任务 <任务ID> 可取消当前会话 pending 任务。
+  /agent 审批演练 <目标> 可创建 dry-run 任务和审批请求，用于 QQ 侧实测 Route B。
+  内部审批请求链路可生成 agent_approvals，并写入 approval_requested 任务事件。
+  ToolPolicyCheck 适配层可将 require_approval 转为 approval_required 中断。
   /agent 审批状态 可查看当前会话审批记录。
   /agent 审批详情 <审批ID> 可查看审批详情。
+  /agent 确认 <审批ID> 可确认当前会话 pending 审批，但不恢复执行。
+  /agent 拒绝 <审批ID> 可拒绝当前会话 pending 审批，但不恢复执行。
   shell 越权请求已验证会拒绝。
 
 项目文档 RAG：
@@ -50,6 +56,7 @@
 ```text
 shell 工具
 写文件工具
+真实写文件工具（dry_run_write_file 只用于内部 dry-run 审批测试，不写文件，且不对 LLM 可见）
 数据库写工具（除 /agent 任务固定命令和内部审批记录链路写 agent_tasks / agent_task_events / agent_approvals）
 额外 QQ 发送
 Agent API
@@ -332,6 +339,7 @@ RuntimeIntent.MAIN_AGENT。
 DevContextGraph。
 MainAgentGraph。
 ActionRequest schema。
+ToolRegistry v0。
 ToolPolicyCheck。
 CALL_MAIN_AGENT stub。
 MainAgent LLM adapter。
@@ -349,6 +357,7 @@ shell 越权请求拒绝验证。
 agent_tasks 表。
 agent_task_events 表。
 agent_approvals 表。
+approval_requested 任务事件。
 /agent 任务 <目标> 固定命令。
 /agent 新增任务：<目标>、/agent 记录任务：<目标>、/agent 把“目标”加入任务 等固定本地别名。
 /agent 任务状态 固定命令。
@@ -372,8 +381,17 @@ agent_approvals 表。
 /agent 任务状态 只列出当前会话任务，不触发 LLM 或 dev_context。
 /agent 任务详情 <任务ID> 只展示任务记录和事件，不触发 LLM 或 dev_context。
 /agent 取消任务 <任务ID> 只把当前会话 pending 任务标记为 cancelled，并记录 cancelled 事件。
+/agent 审批演练 <目标> 创建 dry-run 任务和 dry_run_write_file 审批请求，只用于实测审批闭环，不执行工具。
+审批演练回复会明确显示 任务ID：#X 和 审批ID：#Y，并支持 审批详情 最新、确认 最新、拒绝 最新、任务详情 最新。
+内部审批请求创建会写入 agent_approvals，并追加 approval_requested 任务事件，不触发执行。
+PolicyEngine 返回 require_approval 时，create_tool_policy_checker 会触发 approval_required 中断，不进入 execute_tool。
 /agent 审批状态 只列出当前会话审批，不触发 LLM 或 dev_context。
 /agent 审批详情 <审批ID> 只展示审批记录，不恢复执行。
+/agent 确认 <审批ID> 只把当前会话 pending 审批标记为 approved，并记录审批决定事件，不恢复执行。
+/agent 拒绝 <审批ID> 只把当前会话 pending 审批标记为 rejected，并记录审批决定事件，不恢复执行。
+/agent 审批详情 最新、/agent 确认 最新、/agent 拒绝 最新、/agent 任务详情 最新 可直接操作当前会话最近记录，避免手动查 ID。
+MainAgentGraph 的 tool_request 现在通过 ToolRegistry 校验注册工具、参数和风险等级；真实 registry 只向 LLM 暴露 dev_context。
+dry_run_write_file 只在显式 dry-run/test registry 中注册，llm_visible=false，risk_level=write_local，进入 approval_required 中断但不执行真实写入。
 ```
 
 当前 `/agent 状态` 会显示：
@@ -382,8 +400,9 @@ agent_approvals 表。
 入口是否开启。
 只读模式。
 可用工具 dev_context。
+ToolRegistry v0，当前真实可见工具仍只有 dev_context。
 任务状态和事件记录能力。
-审批记录只读查看能力。
+审批请求生成、查看、确认和拒绝能力；确认或拒绝不恢复执行。
 Main LLM 是否接入 ActionRequest 生成。
 主模型名。
 主模型 Key 是否配置。
