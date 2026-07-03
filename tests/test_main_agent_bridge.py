@@ -12,6 +12,8 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         cls.modules = load_pure_graph_modules()
         cls.main_agent = cls.modules["main_agent"]
         cls.main_agent_bridge = cls.modules["main_agent_bridge"]
+        cls.policy_risk = cls.modules["policy_risk"]
+        cls.tool_registry = cls.modules["tool_registry"]
 
     def test_read_only_runner_executes_dev_context_for_owner_private_chat(self):
         calls = []
@@ -246,6 +248,171 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                 self.main_agent.MainAgentNode.EXECUTE_TOOL,
             ),
         )
+
+    def test_generic_policy_checker_turns_require_approval_into_interrupt(self):
+        calls = []
+
+        def call_agent(agent_state):
+            agent_state.action = self.main_agent.MainAgentAction.TOOL_REQUEST.value
+            agent_state.requested_tool = "write_file"
+            agent_state.tool_query = "docs/example.md"
+            return agent_state
+
+        async def request_approval(agent_state, risk_level, policy_reason):
+            calls.append((agent_state.requested_tool, risk_level.value, policy_reason))
+            return "Agent 请求审批 #42\n/agent 确认 42\n/agent 拒绝 42"
+
+        async def execute_tool(_agent_state):
+            raise AssertionError("execute_tool should not run before approval")
+
+        runner = self.main_agent.MainAgentGraphRunner(
+            call_main_agent=call_agent,
+            check_tool_policy=self.main_agent_bridge.create_tool_policy_checker(
+                risk_level_for_tool=lambda _state: self.policy_risk.RiskLevel.WRITE_LOCAL,
+                enable_local_write=True,
+                request_approval=request_approval,
+            ),
+            execute_tool=execute_tool,
+        )
+        state = self.main_agent.MainAgentState(
+            query="write docs/example.md",
+            is_owner=True,
+            is_group=False,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(execution.result.policy_reason, "local writes require approval")
+        self.assertIn("Agent 请求审批 #42", execution.result.response_text)
+        self.assertEqual(calls, [("write_file", "write_local", "local writes require approval")])
+        self.assertTrue(execution.result.metadata["approval_required"])
+        self.assertEqual(execution.result.metadata["approval_tool_name"], "write_file")
+        self.assertEqual(execution.result.metadata["risk_level"], "write_local")
+        self.assertEqual(
+            execution.node_trace,
+            (
+                self.main_agent.MainAgentNode.VALIDATE_AGENT_REQUEST,
+                self.main_agent.MainAgentNode.BUILD_AGENT_CONTEXT,
+                self.main_agent.MainAgentNode.CALL_MAIN_AGENT,
+                self.main_agent.MainAgentNode.VALIDATE_ACTION_REQUEST,
+                self.main_agent.MainAgentNode.CHECK_TOOL_POLICY,
+            ),
+        )
+
+    def test_tool_registry_accepts_dry_run_only_when_registered(self):
+        raw = {
+            "action": "tool_request",
+            "tool_name": "dry_run_write_file",
+            "arguments": {
+                "path": "docs/version-runlog.md",
+                "content_summary": "append Route B dry-run note",
+            },
+        }
+
+        with self.assertRaises(self.main_agent.MainAgentActionRequestError):
+            self.main_agent.parse_main_agent_action_request(raw)
+
+        registry = self.tool_registry.create_default_main_agent_tool_registry(
+            include_dry_run_tools=True
+        )
+        action_request = self.main_agent.parse_main_agent_action_request(
+            raw,
+            tool_registry=registry,
+        )
+
+        self.assertEqual(action_request.tool_name, "dry_run_write_file")
+        self.assertEqual(action_request.arguments["path"], "docs/version-runlog.md")
+        self.assertEqual(registry.require("dry_run_write_file").risk_level.value, "write_local")
+
+    def test_tool_registry_validates_required_and_unknown_arguments(self):
+        registry = self.tool_registry.create_default_main_agent_tool_registry()
+
+        with self.assertRaises(self.tool_registry.ToolArgumentError) as missing:
+            registry.validate_arguments("dev_context", {})
+        self.assertIn("requires arguments.query", str(missing.exception))
+
+        with self.assertRaises(self.tool_registry.ToolArgumentError) as unknown:
+            registry.validate_arguments(
+                "dev_context",
+                {"query": "recover context", "extra": "not allowed"},
+            )
+        self.assertIn("unsupported arguments: extra", str(unknown.exception))
+
+        self.assertEqual(
+            registry.validate_arguments("dev_context", {"query": "recover context"}),
+            {"query": "recover context"},
+        )
+
+    def test_tool_registry_rejects_duplicate_registration(self):
+        risk = self.policy_risk.RiskLevel.READ_LOCAL
+        spec = self.tool_registry.ToolSpec(
+            name="snapshot",
+            description="Read a snapshot.",
+            risk_level=risk,
+        )
+        registry = self.tool_registry.ToolRegistry([spec])
+
+        with self.assertRaises(ValueError) as duplicate:
+            registry.register(spec)
+        self.assertIn("duplicate tool registered: snapshot", str(duplicate.exception))
+
+    def test_tool_registry_hides_internal_dry_run_tool_from_llm_visible_list(self):
+        registry = self.tool_registry.create_default_main_agent_tool_registry(
+            include_dry_run_tools=True
+        )
+
+        self.assertEqual(registry.visible_tool_names(), ["dev_context"])
+        self.assertTrue(registry.require("dry_run_write_file").requires_approval)
+        self.assertFalse(registry.require("dry_run_write_file").llm_visible)
+
+    def test_registry_backed_policy_interrupts_dry_run_write_before_execution(self):
+        registry = self.tool_registry.create_default_main_agent_tool_registry(
+            include_dry_run_tools=True
+        )
+
+        def call_agent(agent_state):
+            agent_state.raw_action_request = {
+                "action": "tool_request",
+                "tool_name": "dry_run_write_file",
+                "arguments": {
+                    "path": "docs/version-runlog.md",
+                    "content_summary": "append Route B dry-run note",
+                },
+            }
+            return agent_state
+
+        async def request_approval(agent_state, risk_level, policy_reason):
+            return (
+                f"approval for {agent_state.requested_tool} "
+                f"{risk_level.value} {policy_reason}"
+            )
+
+        async def execute_tool(_agent_state):
+            raise AssertionError("dry_run_write_file should stop at approval")
+
+        runner = self.main_agent.MainAgentGraphRunner(
+            call_main_agent=call_agent,
+            validate_action_request=self.main_agent_bridge.create_main_agent_action_validator(
+                registry
+            ),
+            check_tool_policy=self.main_agent_bridge.create_tool_policy_checker(
+                risk_level_for_tool=lambda state: registry.require(state.requested_tool).risk_level,
+                enable_local_write=True,
+                request_approval=request_approval,
+            ),
+            execute_tool=execute_tool,
+        )
+
+        execution = asyncio.run(
+            runner.run(self.main_agent.MainAgentState(query="dry-run write", is_owner=True))
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertIn("approval for dry_run_write_file", execution.result.response_text)
+        self.assertEqual(execution.result.metadata["risk_level"], "write_local")
 
     def test_runtime_handler_dispatches_main_agent_intent_through_root_graph(self):
         state_mod = self.modules["state"]

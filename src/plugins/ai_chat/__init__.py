@@ -29,13 +29,19 @@ from .access_store import (
 )
 from .agent_tasks import (
     AGENT_TASK_COMMAND_APPROVAL_DETAIL,
+    AGENT_TASK_COMMAND_APPROVAL_APPROVE,
+    AGENT_TASK_COMMAND_APPROVAL_REJECT,
+    AGENT_TASK_COMMAND_APPROVAL_DRILL,
     AGENT_TASK_COMMAND_APPROVAL_STATUS,
     AGENT_TASK_COMMAND_CANCEL,
     AGENT_TASK_COMMAND_CREATE,
     AGENT_TASK_COMMAND_DETAIL,
     AGENT_TASK_COMMAND_STATUS,
     cancel_agent_task,
+    create_agent_approval_drill_reply,
     create_agent_task,
+    decide_agent_approval,
+    format_agent_approval_decision,
     format_agent_task_cancelled,
     format_agent_task_created,
     format_agent_task_detail,
@@ -44,6 +50,7 @@ from .agent_tasks import (
     format_agent_approval_list,
     get_agent_approval,
     get_agent_task,
+    is_latest_agent_reference,
     list_agent_task_events,
     list_agent_approvals,
     list_agent_tasks,
@@ -3288,7 +3295,10 @@ def main_agent_help_reply() -> str:
             "/agent 任务详情 <任务ID>",
             "/agent 取消任务 <任务ID>",
             "/agent 审批状态",
+            "/agent 审批演练 <目标>",
             "/agent 审批详情 <审批ID>",
+            "/agent 确认 <审批ID>",
+            "/agent 拒绝 <审批ID>",
             "/agent 下一步",
             "/agent 查 <问题>",
             "/agent-debug <问题>",
@@ -3310,7 +3320,8 @@ def main_agent_status_reply() -> str:
             "模式：只读",
             "工具：dev_context",
             "任务：只记录状态和事件，不自动执行",
-            "审批：只读查看，不恢复执行",
+            "审批：可查看、确认、拒绝，但不恢复执行",
+            "演练：可生成 dry-run 审批请求，不执行工具",
             f"LLM：{'已接入 /agent ActionRequest 生成' if config.main_agent_use_llm else '未接入 /agent 默认路径'}",
             f"主模型：{config.main_llm_model or '未配置'}",
             f"主模型 Key：{'已配置' if config.main_llm_api_key else '未配置'}",
@@ -3325,6 +3336,7 @@ def main_agent_boundary_reply() -> str:
             "MainAgent 当前边界：",
             "允许：主人私聊调用 dev_context 只读工具。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
+            "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
             "禁止：MainAgent/LLM 执行 shell、写文件、写数据库、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
             "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
             "真实 LLM：只负责生成 ActionRequest 和总结只读工具结果。",
@@ -3345,6 +3357,24 @@ def main_agent_static_reply(query: str) -> str | None:
     return None
 
 
+def latest_agent_approval_id(event: MessageEvent) -> int | None:
+    approvals = list_agent_approvals(
+        session_key=session_key(event),
+        user_id=user_id(event),
+        limit=1,
+    )
+    return approvals[0].id if approvals else None
+
+
+def latest_agent_task_id(event: MessageEvent) -> int | None:
+    tasks = list_agent_tasks(
+        session_key=session_key(event),
+        user_id=user_id(event),
+        limit=1,
+    )
+    return tasks[0].id if tasks else None
+
+
 def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
     parsed = parse_agent_task_command(query)
     if parsed is None:
@@ -3358,10 +3388,24 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         )
         return format_agent_approval_list(approvals)
 
+    if action == AGENT_TASK_COMMAND_APPROVAL_DRILL:
+        if not goal:
+            return (
+                "请提供审批演练目标：/agent 审批演练 <目标>\n"
+                "该命令只创建 dry-run 任务和审批请求，不执行任何工具。"
+            )
+        return create_agent_approval_drill_reply(
+            session_key=session_key(event),
+            user_id=user_id(event),
+            goal=goal,
+        )
+
     if action == AGENT_TASK_COMMAND_APPROVAL_DETAIL:
         approval_id = parse_agent_task_id(goal)
+        if approval_id is None and is_latest_agent_reference(goal):
+            approval_id = latest_agent_approval_id(event)
         if approval_id is None:
-            return "请提供审批 ID：/agent 审批详情 <审批ID>"
+            return "请提供审批 ID：/agent 审批详情 <审批ID>\n也可以用：/agent 审批详情 最新"
         approval = get_agent_approval(
             approval_id,
             session_key=session_key(event),
@@ -3370,6 +3414,26 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         if approval is None:
             return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
         return format_agent_approval_detail(approval)
+
+    if action in {
+        AGENT_TASK_COMMAND_APPROVAL_APPROVE,
+        AGENT_TASK_COMMAND_APPROVAL_REJECT,
+    }:
+        approval_id = parse_agent_task_id(goal)
+        verb = "确认" if action == AGENT_TASK_COMMAND_APPROVAL_APPROVE else "拒绝"
+        if approval_id is None and is_latest_agent_reference(goal):
+            approval_id = latest_agent_approval_id(event)
+        if approval_id is None:
+            return f"请提供审批 ID：/agent {verb} <审批ID>\n也可以用：/agent {verb} 最新"
+        approval, changed = decide_agent_approval(
+            approval_id=approval_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+            approved=action == AGENT_TASK_COMMAND_APPROVAL_APPROVE,
+        )
+        if approval is None:
+            return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
+        return format_agent_approval_decision(approval, changed=changed)
 
     if action == AGENT_TASK_COMMAND_STATUS:
         tasks = list_agent_tasks(
@@ -3380,8 +3444,10 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
 
     if action == AGENT_TASK_COMMAND_DETAIL:
         task_id = parse_agent_task_id(goal)
+        if task_id is None and is_latest_agent_reference(goal):
+            task_id = latest_agent_task_id(event)
         if task_id is None:
-            return "请提供任务 ID：/agent 任务详情 <任务ID>"
+            return "请提供任务 ID：/agent 任务详情 <任务ID>\n也可以用：/agent 任务详情 最新"
         task = get_agent_task(
             task_id,
             session_key=session_key(event),

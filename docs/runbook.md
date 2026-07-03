@@ -673,11 +673,14 @@ logs/ai_chat_error.log
 
 `/agent` 是主人私聊显式触发的只读主 Agent 入口。当前 live 验证版本只允许调用 `dev_context`，用于查询项目文档和开发上下文；它不是普通聊天上下文的一部分。
 
+当前 MainAgentGraph 已接入 ToolRegistry v0。真实 `/agent` runner 只把 `dev_context` 注册为 LLM 可见工具；`ActionRequest` 的 `tool_request` 会先经过 registry 校验工具名、参数和工具风险等级，再进入 `ToolPolicyCheck`。`dry_run_write_file` 只在显式 dry-run/test registry 中存在，`llm_visible=false`，用于审批链路测试，不写文件。
+
 当前边界：
 
 ```text
 只允许主人私聊。
 只允许 dev_context 只读工具。
+ToolRegistry 真实可见工具只有 dev_context。
 允许 /agent 任务固定命令写入 agent_tasks / agent_task_events。
 ProjectDocRAG 只在 /agent 显式命令中使用，不进入普通聊天。
 不执行 shell。
@@ -712,8 +715,11 @@ QQ 测试：
 /agent 任务状态
 /agent 任务详情 1
 /agent 取消任务 1
+/agent 审批演练 整理版本日志 dry-run
 /agent 审批状态
-/agent 审批详情 1
+/agent 审批详情 最新
+/agent 确认 最新
+/agent 任务详情 最新
 /agent 下一步
 /agent-debug 下一步
 ```
@@ -746,8 +752,11 @@ QQ 测试顺序：
 /agent 任务状态
 /agent 任务详情 1
 /agent 取消任务 1
+/agent 审批演练 整理版本日志 dry-run
 /agent 审批状态
-/agent 审批详情 1
+/agent 审批详情 最新
+/agent 确认 最新
+/agent 任务详情 最新
 /agent-debug MainAgentGraph 当前状态
 /agent 查 MainAgentGraph 当前状态
 /agent 帮我执行 dir
@@ -786,14 +795,40 @@ QQ 测试顺序：
   会写入 cancelled 事件。
   不执行任何工具。
 
+/agent 审批演练 <目标>
+  创建一个 Route B dry-run 任务和一个 dry_run_write_file 审批请求。
+  回复会明确显示 任务ID：#X 和 审批ID：#Y。
+  会写入 created 和 approval_requested 事件。
+  不调用 Main LLM 或 dev_context。
+  不写文件、不执行 shell、不发送额外 QQ 消息、不恢复执行。
+  这是当前推荐的 QQ 侧审批闭环实测入口。
+
 /agent 审批状态
   列出当前会话和当前用户最近审批记录。
-  当前版本通常为空，因为还没有开放真实写工具和审批恢复。
+  未执行审批演练时通常为空，因为还没有开放真实写工具。
+  如果内部链路创建了审批请求，会同时写入 approval_requested 任务事件。
   该命令不触发 Main LLM 或 dev_context。
 
 /agent 审批详情 <审批ID>
   展示当前会话审批详情。
-  只查看记录，不确认、不拒绝、不恢复执行。
+  也可以用 /agent 审批详情 最新 查看当前会话最近审批。
+  该命令不触发 Main LLM 或 dev_context。
+
+/agent 确认 <审批ID>
+/agent 拒绝 <审批ID>
+  只允许决定当前会话、当前用户的 pending 审批。
+  也可以用 /agent 确认 最新 或 /agent 拒绝 最新 操作当前会话最近审批。
+  会更新 agent_approvals.status / decided_at，并写入 agent_task_events 审批决定事件。
+  当前版本只记录审批决定，不恢复执行任何工具。
+  该命令不触发 Main LLM 或 dev_context。
+
+内部审批请求链路：
+  create_agent_approval 会写入 agent_approvals。
+  同时追加 agent_task_events: approval_requested。
+  可用 format_agent_approval_requested 生成给主人看的审批请求回复。
+  create_tool_policy_checker 会把 PolicyEngine 的 require_approval 决策转换为 approval_required 中断。
+  中断阶段只返回审批请求，不进入 execute_tool。
+  当前仍不开放自动恢复执行。
 
 /agent-debug ...
   返回原始 dev_context / CombinedRAG 召回。

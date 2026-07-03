@@ -5,7 +5,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import TypeAlias
 
-from ..policy.engine import ToolPolicyInput, decide_tool_policy
+from ..policy.engine import PolicyDecisionType, ToolPolicyInput, decide_tool_policy
 from ..policy.risk import RiskLevel
 from .main_agent import (
     MainAgentAction,
@@ -21,9 +21,20 @@ from .main_agent import (
 from .main_agent_llm import MainAgentLLMCall, create_main_agent_call_handler
 from .runtime import RuntimeResponse
 from .state import ActorRole, RuntimeState, SessionType
+from .tool_registry import (
+    ToolContext,
+    ToolExecutionError,
+    ToolRegistry,
+    create_default_main_agent_tool_registry,
+)
 
 
 ReadOnlyDevContextTool: TypeAlias = Callable[[str, bool], str | Awaitable[str]]
+ToolRiskResolver: TypeAlias = Callable[[MainAgentState], RiskLevel]
+ApprovalRequestHandler: TypeAlias = Callable[
+    [MainAgentState, RiskLevel, str],
+    str | Awaitable[str],
+]
 
 
 async def _maybe_await(value):
@@ -45,6 +56,7 @@ def create_read_only_main_agent_runner(
         agent_call = create_main_agent_call_handler(llm_call)
     if agent_call is None:
         agent_call = call_dev_context_stub_agent
+    tool_registry = create_read_only_main_agent_tool_registry(retrieve_dev_context)
 
     render_agent_response = (
         render_concise_read_only_agent_response
@@ -59,11 +71,13 @@ def create_read_only_main_agent_runner(
 
     return MainAgentGraphRunner(
         validate_agent_request=validate_read_only_agent_request,
-        build_agent_context=build_read_only_agent_context,
+        build_agent_context=create_read_only_agent_context_builder(tool_registry),
         call_main_agent=agent_call,
-        validate_action_request=validate_main_agent_action_request,
-        check_tool_policy=check_read_only_tool_policy,
-        execute_tool=create_read_only_tool_executor(retrieve_dev_context),
+        validate_action_request=create_main_agent_action_validator(tool_registry),
+        check_tool_policy=create_tool_policy_checker(
+            risk_level_for_tool=lambda state: tool_registry.require(state.requested_tool).risk_level
+        ),
+        execute_tool=create_tool_registry_executor(tool_registry),
         render_agent_response=render_agent_response,
     )
 
@@ -124,19 +138,59 @@ def validate_read_only_agent_request(state: MainAgentState) -> MainAgentState:
 
 
 def build_read_only_agent_context(state: MainAgentState) -> MainAgentState:
-    state.metadata["mode"] = "read_only"
-    state.metadata["allowed_tools"] = [MainAgentToolName.DEV_CONTEXT.value]
-    state.metadata.setdefault(
-        "agent_context",
-        "\n".join(
-            [
-                "MainAgentGraph read-only local test mode.",
-                "Allowed tools: dev_context.",
-                "Disallowed: shell, file writes, QQ sends, external writes.",
-            ]
-        ),
+    return create_read_only_agent_context_builder(
+        create_default_main_agent_tool_registry()
+    )(state)
+
+
+def create_read_only_agent_context_builder(tool_registry: ToolRegistry) -> MainAgentHandler:
+    def build_context(state: MainAgentState) -> MainAgentState:
+        visible_tools = tool_registry.visible_tool_names()
+        state.metadata["mode"] = "read_only"
+        state.metadata["allowed_tools"] = visible_tools
+        state.metadata.setdefault(
+            "agent_context",
+            "\n".join(
+                [
+                    "MainAgentGraph read-only local test mode.",
+                    f"Allowed tools: {', '.join(visible_tools)}.",
+                    "Disallowed: shell, file writes, QQ sends, external writes.",
+                ]
+            ),
+        )
+        return state
+
+    return build_context
+
+
+def create_read_only_main_agent_tool_registry(
+    retrieve_dev_context: ReadOnlyDevContextTool,
+) -> ToolRegistry:
+    registry = create_default_main_agent_tool_registry()
+    spec = registry.require(MainAgentToolName.DEV_CONTEXT.value)
+
+    async def execute_dev_context(arguments, context: ToolContext):
+        return str(
+            await _maybe_await(
+                retrieve_dev_context(str(arguments["query"]).strip(), context.is_owner)
+            )
+        )
+
+    return ToolRegistry(
+        [
+            type(spec)(
+                name=spec.name,
+                description=spec.description,
+                risk_level=spec.risk_level,
+                required_arguments=spec.required_arguments,
+                optional_arguments=spec.optional_arguments,
+                executor=execute_dev_context,
+                enabled=spec.enabled,
+                llm_visible=spec.llm_visible,
+                requires_approval=spec.requires_approval,
+            )
+        ]
     )
-    return state
 
 
 def call_dev_context_stub_agent(state: MainAgentState) -> MainAgentState:
@@ -148,13 +202,23 @@ def call_dev_context_stub_agent(state: MainAgentState) -> MainAgentState:
 
 
 def validate_main_agent_action_request(state: MainAgentState) -> MainAgentState:
-    try:
-        action_request = parse_main_agent_action_request(state.raw_action_request)
-    except MainAgentActionRequestError as exc:
-        state.response_text = f"MainAgentGraph rejected: {exc}"
-        state.error = "invalid_action_request"
-        return state
-    return apply_action_request_to_state(state, action_request)
+    return create_main_agent_action_validator(create_default_main_agent_tool_registry())(state)
+
+
+def create_main_agent_action_validator(tool_registry: ToolRegistry) -> MainAgentHandler:
+    def validate_action_request(state: MainAgentState) -> MainAgentState:
+        try:
+            action_request = parse_main_agent_action_request(
+                state.raw_action_request,
+                tool_registry=tool_registry,
+            )
+        except MainAgentActionRequestError as exc:
+            state.response_text = f"MainAgentGraph rejected: {exc}"
+            state.error = "invalid_action_request"
+            return state
+        return apply_action_request_to_state(state, action_request)
+
+    return validate_action_request
 
 
 def check_read_only_tool_policy(state: MainAgentState) -> MainAgentState:
@@ -176,21 +240,92 @@ def check_read_only_tool_policy(state: MainAgentState) -> MainAgentState:
     return state
 
 
+def create_tool_policy_checker(
+    *,
+    risk_level_for_tool: ToolRiskResolver,
+    request_approval: ApprovalRequestHandler | None = None,
+    enable_external_read: bool = False,
+    enable_local_write: bool = False,
+    enable_external_write: bool = False,
+) -> MainAgentHandler:
+    async def check_tool_policy(state: MainAgentState) -> MainAgentState:
+        if state.action != MainAgentAction.TOOL_REQUEST.value:
+            return state
+
+        risk_level = risk_level_for_tool(state)
+        decision = decide_tool_policy(
+            ToolPolicyInput(
+                risk_level=risk_level,
+                is_owner=state.is_owner,
+                is_group=state.is_group,
+                enable_external_read=enable_external_read,
+                enable_local_write=enable_local_write,
+                enable_external_write=enable_external_write,
+            )
+        )
+        state.policy_decision = decision.type.value
+        state.policy_reason = decision.reason
+        state.metadata["risk_level"] = risk_level.value
+
+        if decision.allowed:
+            return state
+
+        if decision.type == PolicyDecisionType.REQUIRE_APPROVAL:
+            state.metadata["approval_required"] = True
+            state.metadata["approval_tool_name"] = state.requested_tool
+            state.metadata["approval_reason"] = decision.reason
+            if request_approval is not None:
+                state.response_text = str(
+                    await _maybe_await(request_approval(state, risk_level, decision.reason))
+                )
+            else:
+                state.response_text = (
+                    "MainAgentGraph approval required: "
+                    f"{decision.reason or risk_level.value}"
+                )
+            state.error = "approval_required"
+            return state
+
+        state.response_text = f"MainAgentGraph rejected: {decision.reason}"
+        state.error = "policy_denied"
+        return state
+
+    return check_tool_policy
+
+
 def create_read_only_tool_executor(
     retrieve_dev_context: ReadOnlyDevContextTool,
 ) -> MainAgentHandler:
+    return create_tool_registry_executor(
+        create_read_only_main_agent_tool_registry(retrieve_dev_context)
+    )
+
+
+def create_tool_registry_executor(tool_registry: ToolRegistry) -> MainAgentHandler:
     async def execute_tool(state: MainAgentState) -> MainAgentState:
         if state.action != MainAgentAction.TOOL_REQUEST.value:
             return state
-        if state.requested_tool != MainAgentToolName.DEV_CONTEXT.value:
-            state.response_text = f"MainAgentGraph rejected: unregistered tool {state.requested_tool}"
-            state.error = "unknown_tool"
-            return state
 
         try:
-            state.tool_result = str(
-                await _maybe_await(retrieve_dev_context(state.tool_query, state.is_owner))
+            arguments = state.metadata.get("tool_arguments", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            result = await tool_registry.execute(
+                state.requested_tool,
+                dict(arguments),
+                ToolContext(
+                    query=state.query,
+                    is_owner=state.is_owner,
+                    is_group=state.is_group,
+                    metadata=dict(state.metadata),
+                ),
             )
+            state.tool_result = result.text
+            if result.metadata:
+                state.metadata["tool_result_metadata"] = dict(result.metadata)
+        except ToolExecutionError as exc:
+            state.response_text = f"MainAgentGraph tool failed: {exc}"
+            state.error = "tool_execution_failed"
         except Exception as exc:
             state.response_text = f"MainAgentGraph read-only tool failed: {exc}"
             state.error = "tool_execution_failed"

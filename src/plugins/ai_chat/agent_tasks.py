@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +23,9 @@ AGENT_TASK_COMMAND_DETAIL = "detail"
 AGENT_TASK_COMMAND_CANCEL = "cancel"
 AGENT_TASK_COMMAND_APPROVAL_STATUS = "approval_status"
 AGENT_TASK_COMMAND_APPROVAL_DETAIL = "approval_detail"
+AGENT_TASK_COMMAND_APPROVAL_APPROVE = "approval_approve"
+AGENT_TASK_COMMAND_APPROVAL_REJECT = "approval_reject"
+AGENT_TASK_COMMAND_APPROVAL_DRILL = "approval_drill"
 AGENT_APPROVAL_PENDING = "pending"
 AGENT_APPROVAL_APPROVED = "approved"
 AGENT_APPROVAL_REJECTED = "rejected"
@@ -125,11 +129,26 @@ def parse_agent_task_command(query: str) -> tuple[str, str] | None:
         return None
     if lowered in {"审批状态", "审批列表", "approvals", "approval status", "approval list"}:
         return (AGENT_TASK_COMMAND_APPROVAL_STATUS, "")
+    if lowered in {"审批演练", "模拟审批", "approval drill"}:
+        return (AGENT_TASK_COMMAND_APPROVAL_DRILL, "")
+    for prefix in ("审批演练 ", "模拟审批 ", "approval drill "):
+        if lowered.startswith(prefix.lower()):
+            return (AGENT_TASK_COMMAND_APPROVAL_DRILL, stripped[len(prefix):].strip())
     if lowered in {"审批详情", "查看审批", "approval detail"}:
         return (AGENT_TASK_COMMAND_APPROVAL_DETAIL, "")
     for prefix in ("审批详情 ", "查看审批 ", "approval detail "):
         if lowered.startswith(prefix.lower()):
             return (AGENT_TASK_COMMAND_APPROVAL_DETAIL, stripped[len(prefix):].strip())
+    if lowered in {"确认", "确认审批", "approve", "approve approval"}:
+        return (AGENT_TASK_COMMAND_APPROVAL_APPROVE, "")
+    for prefix in ("确认审批 ", "确认 ", "approve approval ", "approve "):
+        if lowered.startswith(prefix.lower()):
+            return (AGENT_TASK_COMMAND_APPROVAL_APPROVE, stripped[len(prefix):].strip())
+    if lowered in {"拒绝", "拒绝审批", "reject", "reject approval"}:
+        return (AGENT_TASK_COMMAND_APPROVAL_REJECT, "")
+    for prefix in ("拒绝审批 ", "拒绝 ", "reject approval ", "reject "):
+        if lowered.startswith(prefix.lower()):
+            return (AGENT_TASK_COMMAND_APPROVAL_REJECT, stripped[len(prefix):].strip())
     if lowered in {"任务状态", "任务列表", "查看任务", "tasks", "task status", "task list"}:
         return (AGENT_TASK_COMMAND_STATUS, "")
     if lowered in {"任务详情", "任务事件", "task detail", "task events"}:
@@ -192,6 +211,10 @@ def parse_agent_task_id(value: str) -> int | None:
         return None
     task_id = int(stripped)
     return task_id if task_id > 0 else None
+
+
+def is_latest_agent_reference(value: str) -> bool:
+    return value.strip().lower() in {"最新", "最近", "最后", "last", "latest", "newest"}
 
 
 def _task_from_row(row: Any) -> AgentTask:
@@ -412,6 +435,10 @@ def create_agent_approval(
 ) -> int:
     ensure_database()
     now = utc_now()
+    stripped_tool_name = tool_name.strip()
+    stripped_tool_input_json = tool_input_json.strip()
+    stripped_risk_level = risk_level.strip()
+    stripped_reason = reason.strip()
     with connect() as connection:
         cursor = connection.execute(
             """
@@ -430,17 +457,71 @@ def create_agent_approval(
             """,
             (
                 task_id,
-                tool_name.strip(),
-                tool_input_json.strip(),
-                risk_level.strip(),
-                reason.strip(),
+                stripped_tool_name,
+                stripped_tool_input_json,
+                stripped_risk_level,
+                stripped_reason,
                 AGENT_APPROVAL_PENDING,
                 now,
                 expires_at,
                 None,
             ),
         )
-        return int(cursor.lastrowid)
+        approval_id = int(cursor.lastrowid)
+        connection.execute(
+            """
+            UPDATE agent_tasks
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (now, task_id),
+        )
+        step_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(step_index), -1) + 1 AS next_step
+            FROM agent_task_events
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        next_step = int(step_row["next_step"])
+        event_input_json = json.dumps(
+            {
+                "approval_id": approval_id,
+                "tool_input": stripped_tool_input_json,
+                "risk_level": stripped_risk_level,
+                "reason": stripped_reason,
+            },
+            ensure_ascii=False,
+        )
+        connection.execute(
+            """
+            INSERT INTO agent_task_events (
+                task_id,
+                step_index,
+                kind,
+                tool_name,
+                input_json,
+                output_summary,
+                status,
+                error,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                next_step,
+                "approval_requested",
+                stripped_tool_name,
+                event_input_json,
+                f"Agent 请求审批 #{approval_id}，等待主人确认；当前版本不自动执行。",
+                AGENT_TASK_PENDING,
+                None,
+                now,
+            ),
+        )
+        return approval_id
 
 
 def get_agent_approval(
@@ -513,6 +594,107 @@ def list_agent_approvals(
             tuple(params),
         ).fetchall()
     return [_approval_from_row(row) for row in rows]
+
+
+def decide_agent_approval(
+    *,
+    approval_id: int,
+    session_key: str,
+    user_id: str,
+    approved: bool,
+) -> tuple[AgentApproval | None, bool]:
+    ensure_database()
+    now = utc_now()
+    next_status = AGENT_APPROVAL_APPROVED if approved else AGENT_APPROVAL_REJECTED
+    event_kind = "approval_approved" if approved else "approval_rejected"
+    decision_text = "确认" if approved else "拒绝"
+
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT a.id, a.task_id, t.title AS task_title, a.tool_name,
+                   a.tool_input_json, a.risk_level, a.reason, a.status,
+                   a.created_at, a.expires_at, a.decided_at
+            FROM agent_approvals AS a
+            JOIN agent_tasks AS t ON t.id = a.task_id
+            WHERE a.id = ? AND t.session_key = ? AND t.user_id = ?
+            """,
+            (approval_id, session_key, user_id),
+        ).fetchone()
+        if row is None:
+            return None, False
+
+        approval = _approval_from_row(row)
+        if approval.status != AGENT_APPROVAL_PENDING:
+            return approval, False
+
+        connection.execute(
+            """
+            UPDATE agent_approvals
+            SET status = ?, decided_at = ?
+            WHERE id = ?
+            """,
+            (next_status, now, approval_id),
+        )
+        connection.execute(
+            """
+            UPDATE agent_tasks
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (now, approval.task_id),
+        )
+        step_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(step_index), -1) + 1 AS next_step
+            FROM agent_task_events
+            WHERE task_id = ?
+            """,
+            (approval.task_id,),
+        ).fetchone()
+        next_step = int(step_row["next_step"])
+        event_input_json = json.dumps(
+            {
+                "approval_id": approval.id,
+                "approval_status": next_status,
+                "tool_input": approval.tool_input_json,
+            },
+            ensure_ascii=False,
+        )
+        connection.execute(
+            """
+            INSERT INTO agent_task_events (
+                task_id,
+                step_index,
+                kind,
+                tool_name,
+                input_json,
+                output_summary,
+                status,
+                error,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                approval.task_id,
+                next_step,
+                event_kind,
+                approval.tool_name,
+                event_input_json,
+                f"主人{decision_text}审批 #{approval.id}；当前版本只记录决定，不恢复执行。",
+                AGENT_TASK_PENDING,
+                None,
+                now,
+            ),
+        )
+
+    updated = get_agent_approval(
+        approval_id,
+        session_key=session_key,
+        user_id=user_id,
+    )
+    return updated, True
 
 
 def cancel_agent_task(
@@ -672,8 +854,9 @@ def format_agent_task_list(tasks: list[AgentTask]) -> str:
         return "Agent 任务状态：\n暂无任务。"
     lines = ["Agent 任务状态："]
     for task in tasks:
-        lines.append(f"#{task.id} [{agent_task_status_label(task.status)}] {task.title}")
+        lines.append(f"任务ID：#{task.id} [{agent_task_status_label(task.status)}] {task.title}")
     lines.append("")
+    lines.append("可用 /agent 任务详情 最新 查看最近任务。")
     lines.append("当前版本只记录任务，不自动执行。")
     return "\n".join(lines)
 
@@ -684,10 +867,11 @@ def format_agent_approval_list(approvals: list[AgentApproval]) -> str:
     lines = ["Agent 审批状态："]
     for approval in approvals:
         lines.append(
-            f"#{approval.id} [{agent_approval_status_label(approval.status)}] "
-            f"任务 #{approval.task_id} {approval.tool_name} / {approval.risk_level}"
+            f"审批ID：#{approval.id} [{agent_approval_status_label(approval.status)}] "
+            f"任务ID：#{approval.task_id} {approval.tool_name} / {approval.risk_level}"
         )
     lines.append("")
+    lines.append("可用 /agent 审批详情 最新、/agent 确认 最新 或 /agent 拒绝 最新 操作最近审批。")
     lines.append("当前版本只记录审批请求，不恢复执行。")
     return "\n".join(lines)
 
@@ -695,8 +879,10 @@ def format_agent_approval_list(approvals: list[AgentApproval]) -> str:
 def format_agent_approval_detail(approval: AgentApproval) -> str:
     lines = [
         f"Agent 审批 #{approval.id}",
+        f"审批ID：#{approval.id}",
         f"状态：{agent_approval_status_label(approval.status)}",
-        f"任务：#{approval.task_id} {approval.task_title}",
+        f"任务ID：#{approval.task_id}",
+        f"任务：{approval.task_title}",
         f"工具：{approval.tool_name}",
         f"风险：{approval.risk_level}",
         f"原因：{approval.reason}",
@@ -710,3 +896,122 @@ def format_agent_approval_detail(approval: AgentApproval) -> str:
     lines.append("")
     lines.append("当前版本只展示审批记录，不会恢复或执行任何工具。")
     return "\n".join(lines)
+
+
+def format_agent_approval_requested(approval: AgentApproval) -> str:
+    return "\n".join(
+        [
+            f"Agent 请求审批 #{approval.id}",
+            f"审批ID：#{approval.id}",
+            f"任务ID：#{approval.task_id}",
+            f"任务：{approval.task_title}",
+            f"工具：{approval.tool_name}",
+            f"风险：{approval.risk_level}",
+            f"原因：{approval.reason}",
+            f"输入摘要：{_shorten_text(approval.tool_input_json)}",
+            "",
+            "回复：",
+            f"/agent 确认 {approval.id}",
+            f"/agent 拒绝 {approval.id}",
+            "也可以直接回复：/agent 确认 最新 或 /agent 拒绝 最新",
+            "",
+            "当前版本确认后也不会自动恢复执行。",
+        ]
+    )
+
+
+def create_agent_approval_request_reply(
+    *,
+    task_id: int,
+    session_key: str,
+    user_id: str,
+    tool_name: str,
+    tool_input_json: str,
+    risk_level: str,
+    reason: str,
+    expires_at: str | None = None,
+) -> str:
+    approval_id = create_agent_approval(
+        task_id=task_id,
+        tool_name=tool_name,
+        tool_input_json=tool_input_json,
+        risk_level=risk_level,
+        reason=reason,
+        expires_at=expires_at,
+    )
+    approval = get_agent_approval(
+        approval_id,
+        session_key=session_key,
+        user_id=user_id,
+    )
+    if approval is None:
+        raise RuntimeError(f"created agent approval #{approval_id} was not found")
+    return format_agent_approval_requested(approval)
+
+
+def create_agent_approval_drill_reply(
+    *,
+    session_key: str,
+    user_id: str,
+    goal: str,
+) -> str:
+    stripped_goal = goal.strip()
+    if not stripped_goal:
+        raise ValueError("agent approval drill goal must be non-empty")
+
+    task_id = create_agent_task(
+        session_key=session_key,
+        user_id=user_id,
+        goal=f"审批演练：{stripped_goal}",
+        title=make_agent_task_title(f"审批演练：{stripped_goal}"),
+    )
+    tool_input_json = json.dumps(
+        {
+            "dry_run": True,
+            "goal": stripped_goal,
+            "would_write": False,
+            "note": "Route B approval drill only; no file, shell, database, or QQ side effect.",
+        },
+        ensure_ascii=False,
+    )
+    approval_reply = create_agent_approval_request_reply(
+        task_id=task_id,
+        session_key=session_key,
+        user_id=user_id,
+        tool_name="dry_run_write_file",
+        tool_input_json=tool_input_json,
+        risk_level="write_local",
+        reason="Route B 审批演练：模拟本地写入审批，不执行任何写入。",
+    )
+    return "\n".join(
+        [
+            f"已创建 Route B 审批演练任务 #{task_id}。",
+            f"任务ID：#{task_id}",
+            "这是 dry-run，不会写文件、执行 shell、写数据库业务数据或发送额外 QQ 消息。",
+            "不用手动找编号：可以直接用 /agent 审批详情 最新、/agent 确认 最新、/agent 任务详情 最新。",
+            "",
+            approval_reply,
+        ]
+    )
+
+
+def format_agent_approval_decision(approval: AgentApproval, *, changed: bool) -> str:
+    if changed:
+        action = "确认" if approval.status == AGENT_APPROVAL_APPROVED else "拒绝"
+        return "\n".join(
+            [
+                f"已{action} Agent 审批 #{approval.id}。",
+                f"审批ID：#{approval.id}",
+                f"状态：{agent_approval_status_label(approval.status)}",
+                f"任务ID：#{approval.task_id}",
+                f"任务：{approval.task_title}",
+                "当前版本只记录审批决定，不恢复执行任何工具。",
+            ]
+        )
+    return "\n".join(
+        [
+            f"Agent 审批 #{approval.id} 当前状态：{agent_approval_status_label(approval.status)}",
+            "只有待审批记录可以确认或拒绝。",
+            "当前版本不会恢复执行任何工具。",
+        ]
+    )

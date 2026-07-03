@@ -198,14 +198,129 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
             assert approval is not None
             formatted_list = self.agent_tasks.format_agent_approval_list(approvals)
             formatted_detail = self.agent_tasks.format_agent_approval_detail(approval)
+            formatted_requested = self.agent_tasks.format_agent_approval_requested(approval)
+            events = self.agent_tasks.list_agent_task_events(task_id)
+            requested_reply = self.agent_tasks.create_agent_approval_request_reply(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_name="write_file",
+                tool_input_json='{"path":"docs/another.md"}',
+                risk_level="L3_WRITE_LOCAL",
+                reason="需要再次写入文档",
+            )
+            events_after_reply = self.agent_tasks.list_agent_task_events(task_id)
 
         self.assertIsNotNone(approval)
         self.assertIsNone(missing)
         self.assertEqual(approval.status, self.agent_tasks.AGENT_APPROVAL_PENDING)
         self.assertEqual([item.id for item in approvals], [approval_id])
         self.assertNotIn(f"#{other_approval_id}", formatted_list)
+        self.assertEqual([event.kind for event in events], ["created", "approval_requested"])
+        self.assertEqual(events[-1].tool_name, "write_file")
+        self.assertIn(f"审批 #{approval_id}", events[-1].output_summary)
         self.assertIn("待审批", formatted_detail)
         self.assertIn("只展示审批记录", formatted_detail)
+        self.assertIn("Agent 请求审批", formatted_requested)
+        self.assertIn(f"审批ID：#{approval_id}", formatted_requested)
+        self.assertIn(f"任务ID：#{task_id}", formatted_requested)
+        self.assertIn(f"/agent 确认 {approval_id}", formatted_requested)
+        self.assertIn("/agent 确认 最新", formatted_requested)
+        self.assertIn(f"/agent 拒绝 {approval_id}", formatted_requested)
+        self.assertIn("Agent 请求审批", requested_reply)
+        self.assertIn("docs/another.md", requested_reply)
+        self.assertEqual(events_after_reply[-1].kind, "approval_requested")
+
+    def test_agent_approval_decision_is_scoped_and_records_event(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="需要审批决定的任务",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="write_file",
+                tool_input_json='{"path":"docs/example.md"}',
+                risk_level="L3_WRITE_LOCAL",
+                reason="需要写入文档",
+            )
+
+            missing, missing_changed = self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:20002",
+                user_id="20002",
+                approved=True,
+            )
+            approval, changed = self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            again, again_changed = self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=False,
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+            assert approval is not None
+            formatted = self.agent_tasks.format_agent_approval_decision(
+                approval,
+                changed=changed,
+            )
+
+        self.assertIsNone(missing)
+        self.assertFalse(missing_changed)
+        self.assertIsNotNone(approval)
+        self.assertTrue(changed)
+        self.assertEqual(approval.status, self.agent_tasks.AGENT_APPROVAL_APPROVED)
+        self.assertTrue(approval.decided_at)
+        self.assertIsNotNone(again)
+        self.assertFalse(again_changed)
+        self.assertEqual(
+            [event.kind for event in events],
+            ["created", "approval_requested", "approval_approved"],
+        )
+        self.assertEqual(events[-1].tool_name, "write_file")
+        self.assertIn("只记录决定", events[-1].output_summary)
+        self.assertIn("已确认 Agent 审批", formatted)
+
+    def test_agent_approval_drill_creates_task_approval_and_requested_event(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            reply = self.agent_tasks.create_agent_approval_drill_reply(
+                session_key="private:10001",
+                user_id="10001",
+                goal="整理版本日志 dry-run",
+            )
+            tasks = self.agent_tasks.list_agent_tasks(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            approvals = self.agent_tasks.list_agent_approvals(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            assert tasks
+            events = self.agent_tasks.list_agent_task_events(tasks[0].id)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("审批演练", tasks[0].goal)
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0].tool_name, "dry_run_write_file")
+        self.assertEqual(approvals[0].risk_level, "write_local")
+        self.assertIn('"dry_run": true', approvals[0].tool_input_json)
+        self.assertEqual([event.kind for event in events], ["created", "approval_requested"])
+        self.assertIn("dry-run", reply)
+        self.assertIn("任务ID：#", reply)
+        self.assertIn("审批ID：#", reply)
+        self.assertIn("审批详情 最新", reply)
+        self.assertIn("/agent 确认", reply)
+        self.assertIn("/agent 确认 最新", reply)
+        self.assertIn("/agent 拒绝", reply)
 
     def test_agent_task_command_parser(self):
         parse = self.agent_tasks.parse_agent_task_command
@@ -217,8 +332,21 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(parse("任务状态"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
         self.assertEqual(parse("task status"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
         self.assertEqual(parse("审批状态"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_STATUS, ""))
+        self.assertEqual(parse("审批演练"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DRILL, ""))
+        self.assertEqual(
+            parse("审批演练 写入版本日志"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DRILL, "写入版本日志"),
+        )
+        self.assertEqual(
+            parse("approval drill write version log"),
+            (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DRILL, "write version log"),
+        )
         self.assertEqual(parse("审批详情 #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DETAIL, "#7"))
         self.assertEqual(parse("审批详情"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DETAIL, ""))
+        self.assertEqual(parse("确认 7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_APPROVE, "7"))
+        self.assertEqual(parse("确认审批 #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_APPROVE, "#7"))
+        self.assertEqual(parse("拒绝 7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_REJECT, "7"))
+        self.assertEqual(parse("reject approval #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_REJECT, "#7"))
         self.assertEqual(parse("任务详情 #12"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, "#12"))
         self.assertEqual(parse("任务详情"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, ""))
         self.assertEqual(parse("取消任务 12"), (self.agent_tasks.AGENT_TASK_COMMAND_CANCEL, "12"))
@@ -241,6 +369,9 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertEqual(self.agent_tasks.parse_agent_task_id("#12"), 12)
         self.assertIsNone(self.agent_tasks.parse_agent_task_id("abc"))
+        self.assertTrue(self.agent_tasks.is_latest_agent_reference("最新"))
+        self.assertTrue(self.agent_tasks.is_latest_agent_reference("latest"))
+        self.assertFalse(self.agent_tasks.is_latest_agent_reference("审批最新"))
         self.assertEqual(parse("任务"), (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, ""))
         self.assertIsNone(parse("后面是不是该整理任务系统？"))
         self.assertIsNone(parse("后面记得做一下审批流"))
