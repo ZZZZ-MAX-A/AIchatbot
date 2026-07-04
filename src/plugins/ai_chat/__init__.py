@@ -3410,6 +3410,8 @@ def main_agent_help_reply() -> str:
         [
             "MainAgent /agent 可用命令：",
             "/agent 状态",
+            "/agent 工具状态",
+            "/agent 能力列表",
             "/agent 边界",
             "/agent 任务 <目标>",
             "/agent 新增任务：<目标>",
@@ -3431,6 +3433,72 @@ def main_agent_help_reply() -> str:
             "/agent 帮我创建一个任务：<目标> / 取消最新任务 / 确认最新审批 / 拒绝最新审批",
             "/agent-debug <问题>",
             "边界：只读 dev_context、owner_read_command、agent_task_read；agent_task_command 仅任务/审批控制面；owner_write_command 只走审批恢复，不执行 shell。",
+        ]
+    )
+
+
+def main_agent_tool_status_reply() -> str:
+    return "\n".join(
+        [
+            "MainAgent 当前开放能力：",
+            "",
+            "1. dev_context",
+            "风险：read_local",
+            "可见性：LLM 可见",
+            "审批：不需要",
+            "用途：只读查询项目开发上下文和 RAG 召回。",
+            "例子：/agent 查 MainAgent 当前状态",
+            "例子：/agent 下一步",
+            "",
+            "2. owner_read_command",
+            "风险：read_local",
+            "可见性：LLM 可见 + 确定性语义优先",
+            "审批：不需要",
+            "用途：主人管理只读控制台，不改状态。",
+            "例子：/agent 看看最近错误",
+            "例子：/agent 角色卡列表",
+            "例子：/agent 模型配置",
+            "例子：/agent 访问控制",
+            "例子：/agent RAG 索引详情",
+            "例子：/agent MainAgent 最近观测",
+            "",
+            "3. agent_task_read",
+            "风险：read_local",
+            "可见性：LLM 可见 + 确定性语义优先",
+            "审批：不需要",
+            "用途：只读查看任务和审批记录。",
+            "例子：/agent 看看任务表",
+            "例子：/agent 最新任务详情",
+            "例子：/agent 有没有待审批",
+            "例子：/agent 最新审批详情",
+            "",
+            "4. agent_task_command",
+            "风险：internal",
+            "可见性：LLM 不可见，仅确定性语义命中",
+            "审批：控制面命令本身不需要；确认审批后可能恢复已批准工具。",
+            "用途：创建/取消任务，确认/拒绝审批，创建审批演练。",
+            "例子：/agent 帮我创建一个任务：整理下一步",
+            "例子：/agent 取消最新任务",
+            "例子：/agent 确认最新审批",
+            "例子：/agent 拒绝审批 #7",
+            "例子：/agent 创建审批演练：写入版本日志",
+            "",
+            "5. owner_write_command",
+            "风险：write_local",
+            "可见性：LLM 可见 + 确定性语义优先",
+            "审批：必须审批；确认后只恢复已注册且 approval_resume_enabled=true 的工具。",
+            "用途：第一批主人管理写工具。",
+            "当前开放：clear_image_cache、clear_error_log",
+            "例子：/agent 帮我清空图片缓存",
+            "例子：/agent 帮我清空错误日志",
+            "",
+            "隐藏演练工具：dry_run_write_file",
+            "风险：write_local",
+            "可见性：LLM 不可见",
+            "审批：必须审批；仅用于 /agent 审批演练，不写文件。",
+            "",
+            "当前不开放：shell、真实写文件、任意数据库写入、白名单/黑名单修改、角色卡切换、删除记忆、清空全部上下文。",
+            "边界：普通聊天不触发这些工具；固定 QQ 命令继续保留作为 fallback。",
         ]
     )
 
@@ -3481,6 +3549,8 @@ def main_agent_static_reply(query: str) -> str | None:
     normalized = query.strip().lower()
     if not normalized:
         return main_agent_help_reply()
+    if normalized in {"工具状态", "能力列表", "工具列表", "tools", "tool status", "capabilities"}:
+        return main_agent_tool_status_reply()
     if normalized in {"状态", "status"}:
         return main_agent_status_reply()
     if normalized in {"边界", "boundary", "boundaries"}:
