@@ -28,9 +28,14 @@
 /agent：
   QQ live 只读 MainAgent 已验证。
   真实 MainAgent LLM 可生成 ActionRequest。
-  真实可见工具只允许调用 dev_context。
+  真实可见工具包括 dev_context、owner_read_command、agent_task_read、owner_write_command。
+  隐藏的确定性控制面工具包括 agent_task_command，用于语义创建/取消任务、确认/拒绝审批、创建审批演练。
   ActionRequest tool_request 已改为 ToolRegistry-backed 校验。
-  dev_context 返回后可进行 tool_result 二次总结。
+  dev_context 返回后可进行 tool_result 二次总结；本地管理工具结果直接返回，避免角色卡语气污染。
+  owner_read_command 可语义触发诊断、最近错误、角色卡、角色卡列表、模型配置、访问控制、摘要、RAG、RAG索引详情、MainAgent观测、白名单等只读主人管理查询。
+  agent_task_read 可语义触发任务列表、任务详情、审批列表、审批详情。
+  agent_task_command 可语义触发任务/审批控制面操作，但不暴露给 LLM 工具契约。
+  owner_write_command 第一批仅开放清空图片缓存、清空错误日志；必须先生成审批，确认后才恢复执行。
   /agent 任务 <目标> 可创建 pending 任务记录。
   /agent 新增任务：<目标> 等明确本地别名可创建 pending 任务记录。
   /agent 把“目标”加入任务 等明确本地别名可创建 pending 任务记录。
@@ -42,8 +47,8 @@
   ToolPolicyCheck 适配层可将 require_approval 转为 approval_required 中断。
   /agent 审批状态 可查看当前会话审批记录。
   /agent 审批详情 <审批ID> 可查看审批详情。
-  /agent 确认 <审批ID> 可确认当前会话 pending 审批，但不恢复执行。
-  /agent 拒绝 <审批ID> 可拒绝当前会话 pending 审批，但不恢复执行。
+  /agent 确认 <审批ID> 可确认当前会话 pending 审批；仅已注册且启用 approval_resume_enabled 的工具会受控恢复。
+  /agent 拒绝 <审批ID> 可拒绝当前会话 pending 审批，不恢复执行。
   shell 越权请求已验证会拒绝。
 
 项目文档 RAG：
@@ -57,14 +62,16 @@
 shell 工具
 写文件工具
 真实写文件工具（dry_run_write_file 只用于内部 dry-run 审批测试，不写文件，且不对 LLM 可见）
-数据库写工具（除 /agent 任务固定命令和内部审批记录链路写 agent_tasks / agent_task_events / agent_approvals）
+数据库写工具（除 /agent 任务固定命令、agent_task_command 控制面语义命令和内部审批记录链路写 agent_tasks / agent_task_events / agent_approvals）
 额外 QQ 发送
 Agent API
 多步 agent loop
-任务执行链路
-审批恢复执行链路
+通用真实任务执行链路
+通用真实审批恢复执行链路（目前仅 owner_write_command 第一批安全命令和 dry_run_write_file 可恢复）
 长期记忆自动写入
 角色卡自动修改
+白名单/黑名单写入
+清空全部上下文或删除记忆
 ```
 
 ## v0.1 基础聊天
@@ -386,8 +393,8 @@ approval_requested 任务事件。
 内部审批请求创建会写入 agent_approvals，并追加 approval_requested 任务事件，不触发执行。
 PolicyEngine 返回 require_approval 时，create_tool_policy_checker 会触发 approval_required 中断，不进入 execute_tool。
 /agent 审批状态 只列出当前会话审批，不触发 LLM 或 dev_context。
-/agent 审批详情 <审批ID> 只展示审批记录，不恢复执行。
-/agent 确认 <审批ID> 只把当前会话 pending 审批标记为 approved，并记录审批决定事件，不恢复执行。
+/agent 审批详情 <审批ID> 展示审批记录；不会触发执行。
+/agent 确认 <审批ID> 把当前会话 pending 审批标记为 approved；仅 dry_run_write_file 会进入受控 dry-run resume。
 /agent 拒绝 <审批ID> 只把当前会话 pending 审批标记为 rejected，并记录审批决定事件，不恢复执行。
 /agent 审批详情 最新、/agent 确认 最新、/agent 拒绝 最新、/agent 任务详情 最新 可直接操作当前会话最近记录，避免手动查 ID。
 MainAgentGraph 的 tool_request 现在通过 ToolRegistry 校验注册工具、参数和风险等级；真实 registry 只向 LLM 暴露 dev_context。
@@ -402,7 +409,7 @@ dry_run_write_file 只在显式 dry-run/test registry 中注册，llm_visible=fa
 可用工具 dev_context。
 ToolRegistry v0，当前真实可见工具仍只有 dev_context。
 任务状态和事件记录能力。
-审批请求生成、查看、确认和拒绝能力；确认或拒绝不恢复执行。
+审批请求生成、查看、确认和拒绝能力；确认后仅 dry-run 工具会受控恢复。
 Main LLM 是否接入 ActionRequest 生成。
 主模型名。
 主模型 Key 是否配置。
@@ -429,8 +436,50 @@ shell 工具。
 额外 QQ 发送。
 Agent API。
 多步 agent loop。
-任务执行链路。
-审批恢复执行链路。
+真实任务执行链路。
+真实审批恢复执行链路。
+```
+
+### 2026-07-04 Route B dry-run resume update
+
+```text
+MainAgent Route B now supports a narrow approval resume path for dry-run tools.
+/agent approve/confirm still scopes approvals by current session and user.
+Only approved dry_run_write_file approvals can resume.
+The resume path uses ToolRegistry to require and validate the registered tool.
+It records tool_resume_started and tool_resume_finished task events.
+It marks the drill task done with the dry-run ToolResult.
+It is idempotent: repeated resume attempts do not execute again.
+Unapproved approvals, non-current-session approvals, repeated resume attempts, and non-dry-run tools do not resume.
+No real file writes, shell commands, database business writes, extra QQ sends, or LLM-visible write tools were opened.
+QQ live verified:
+  /agent approval drill xxx
+  /agent confirm latest
+  /agent task detail latest
+Result:
+  task reached done
+  events include approval_requested, approval_approved, tool_resume_started, tool_resume_finished
+  dry_run_write_file returned side_effect: none
+```
+
+### 2026-07-04 Approval Resume Runner safety gate
+
+```text
+The approval resume path has been extracted behind resume_agent_approval(...).
+resume_agent_approval_dry_run(...) remains as a compatibility wrapper.
+ToolSpec now has approval_resume_enabled, default false.
+dev_context keeps approval_resume_enabled=false.
+dry_run_write_file has approval_resume_enabled=true, requires_approval=true, llm_visible=false.
+/agent confirm now calls the generic registry-backed resume runner.
+The runner requires:
+  current session/user scoped approval
+  approved approval status
+  registered enabled tool
+  approval_resume_enabled=true
+  validated ToolRegistry arguments
+Repeated resume attempts remain idempotent.
+Tools registered without approval_resume_enabled do not resume even after approval.
+No real write, shell, database business write, extra QQ send, or LLM-visible write tool was opened.
 ```
 
 ## v1.4 语义记忆检索与项目文档 RAG
@@ -529,6 +578,207 @@ ProjectDocRAG 只在本地开发命令或 /agent owner 显式命令下通过 dev
 
 ```text
 docs/project-rag-usage.md
+```
+
+## MainAgent owner_read_command 语义只读管理工具
+
+状态：第一批只读语义主人命令骨架已落地，保留原 QQ 斜杠命令。
+
+本次完成：
+
+```text
+ToolRegistry 新增 owner_read_command 可见工具。
+owner_read_command 仅开放只读诊断/状态类命令：
+  diagnostics
+  config_status
+  vision_status
+  recent_errors
+  image_cache_status
+  memory_status
+  bot_status
+  rag_status
+  summary_status
+  view_summaries
+  view_gap_scene_summaries
+  view_long_term_memory
+  view_persona
+  tts_status
+  group_whitelist
+  private_whitelist
+  blacklist
+/agent 语义入口可把“帮我看一下最近错误”等请求映射到 owner_read_command。
+ToolRegistry 新增 agent_task_read 可见工具。
+agent_task_read 仅开放任务/审批只读查询：
+  list_tasks
+  task_detail
+  list_approvals
+  approval_detail
+可语义触发：
+  /agent 看看任务表
+  /agent 最新任务详情
+  /agent 有没有待审批的东西
+  /agent 最新审批详情
+语义只读工具现在在 LLM/dev_context 前置拦截。
+当 MAIN_AGENT_USE_LLM=true 时，明确命中的只读管理/任务查询不会先交给主模型去做项目 RAG 检索。
+owner_read_command / agent_task_read 的工具结果现在直接返回，不再交给 LLM 二次总结。
+原因：角色卡查看等管理输出如果被 LLM 总结，模型可能模仿角色卡语气；管理命令必须保持操作台式原文输出。
+任务语义增加“任务卡/任务表/任务列表”说法，默认映射到 list_tasks。
+原有 /诊断、/配置状态、/视觉状态、/最近错误、/图片缓存状态、/记忆状态 继续保留。
+QQ RuntimeState 已把 message_id、session_key、session_type、user_id、actor_role、group_id、raw_text 注入 ToolContext.metadata。
+```
+
+边界：
+
+```text
+owner_read_command risk_level=read_local。
+agent_task_read risk_level=read_local。
+仍然只允许主人私聊默认执行。
+owner_read_command 本身不清空日志，不清空图片缓存，不写数据库，不改白名单/黑名单，不切换角色卡。
+agent_task_read 不创建任务、不取消任务、不确认审批、不拒绝审批、不恢复执行。
+有副作用的主人管理命令必须走 owner_write_command 审批任务链路。
+ProjectDocRAG 仍只通过 dev_context 进入 /agent，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_llm -v
+```
+
+## MainAgent owner_read_command 第二批只读工具
+
+状态：第二批只读主人控制台查询已接入 owner_read_command，仍保留原 QQ 固定命令。
+
+本次完成：
+
+```text
+新增只读命令：
+  role_card_list
+  model_config_status
+  access_overview
+  rag_index_detail
+  main_agent_observations
+
+可语义触发：
+  /agent 看看有哪些角色卡
+  /agent 角色卡列表
+  /agent 看看模型配置
+  /agent 当前主模型是什么
+  /agent 看看访问控制
+  /agent 权限状态
+  /agent 看看项目文档索引
+  /agent 看看记忆索引
+  /agent RAG 索引详情
+  /agent MainAgent 最近失败
+  /agent 最近 agent 观测
+
+role_card_list 只展示角色卡 key/title 和当前启用项，不输出角色卡正文。
+model_config_status 只展示模型、base_url、超时和 Key 是否配置，不泄露 Key。
+access_overview 汇总主人配置状态、私聊/群聊开关、白名单/黑名单数量和列表。
+rag_index_detail 汇总 MemoryRAG / ProjectDocRAG 开关、embedding 配置和 rag_documents/rag_embeddings 分 namespace 统计。
+main_agent_observations 从错误日志里筛选 MainAgent/LLM/tool summary 相关观测，方便定位语义命令是否误路由。
+```
+
+边界：
+
+```text
+全部 risk_level=read_local。
+不切换角色卡，不修改模型配置，不修改白名单/黑名单，不重建索引，不清理日志。
+普通聊天不触发这些工具。
+本地管理工具结果继续直接返回，不交给 LLM 二次总结。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+```
+
+## MainAgent owner_write_command 审批门控主人管理工具
+
+状态：第一批有副作用语义主人命令已接入 ToolRegistry 和审批恢复链路，保留原 QQ 固定命令作为 fallback。
+
+本次完成：
+
+```text
+ToolRegistry 新增 owner_write_command 可见工具。
+owner_write_command risk_level=write_local，requires_approval=true，approval_resume_enabled=true。
+当前只开放第一批低风险本地命令：
+  clear_image_cache
+  clear_error_log
+
+/agent 语义入口可把下列请求映射为 owner_write_command：
+  /agent 帮我清空图片缓存
+  /agent 帮我清空错误日志
+
+命中后不会立刻执行工具，而是创建 agent_tasks + agent_approvals，并返回审批提示。
+/agent 确认 <审批ID> 或 /agent 确认 最新 会在确认后通过注册表恢复执行对应工具。
+恢复执行会写入 tool_resume_started / tool_resume_finished 事件。
+重复确认同一个审批不会重复执行；已有 tool_resume_finished 时直接跳过。
+拒绝审批后不会恢复执行。
+```
+
+边界：
+
+```text
+owner_write_command 仍只允许主人私聊走 /agent 入口。
+普通聊天不触发 ProjectDocRAG，也不触发主人管理工具。
+不开放清空全部上下文、删除记忆、修改白名单/黑名单、切换角色卡、shell、真实写文件或数据库写入。
+LLM 即使生成 tool_request，也必须通过 ToolRegistry 参数校验和 ToolPolicyCheck 审批中断。
+只有注册且 approval_resume_enabled=true 的工具可以在审批确认后恢复。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge tests.test_persistence_units -v
+```
+
+## MainAgent agent_task_command 语义任务/审批控制面工具
+
+状态：任务和审批控制面已接入确定性语义工具；原固定命令继续保留。
+
+本次完成：
+
+```text
+ToolRegistry 新增 agent_task_command 工具。
+agent_task_command risk_level=internal，llm_visible=false。
+它不出现在主模型工具契约里，只由本地确定性语义分类器命中。
+
+当前开放命令：
+  create_task
+  cancel_task
+  approve_approval
+  reject_approval
+  create_approval_drill
+
+可语义触发：
+  /agent 帮我创建一个任务：整理审批流
+  /agent 把整理 Route B 加入任务
+  /agent 取消最新任务
+  /agent 帮我确认最新审批
+  /agent 拒绝审批 #7
+  /agent 创建审批演练：写入版本日志
+
+agent_task_command 在 agent_task_read 前面拦截，避免“确认最新审批”被误判成审批详情查询。
+确认审批时沿用现有审批恢复链路；如果对应审批已执行过，不会重复执行。
+```
+
+边界：
+
+```text
+只允许主人私聊 /agent 入口。
+不交给 LLM 自由选择，避免模型误确认或误取消。
+只操作 agent_tasks / agent_task_events / agent_approvals 控制面记录。
+确认审批可能恢复已经批准的注册工具，但仍受 approval_resume_enabled 和幂等事件保护。
+普通聊天不触发 agent_task_command。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
 ```
 
 ## 后续整理规则

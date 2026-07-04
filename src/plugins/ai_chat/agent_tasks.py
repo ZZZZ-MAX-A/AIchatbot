@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from .database import connect, ensure_database, utc_now
+from .graph.tool_registry import (
+    ToolContext,
+    ToolArgumentError,
+    ToolResult,
+    ToolRegistry,
+    create_default_main_agent_tool_registry,
+)
 
 
 AGENT_TASK_PENDING = "pending"
@@ -36,6 +44,7 @@ AGENT_APPROVAL_STATUSES = {
     AGENT_APPROVAL_REJECTED,
     AGENT_APPROVAL_EXPIRED,
 }
+DRY_RUN_WRITE_FILE_TOOL_NAME = "dry_run_write_file"
 
 _CREATE_PREFIXES = (
     "任务",
@@ -515,7 +524,7 @@ def create_agent_approval(
                 "approval_requested",
                 stripped_tool_name,
                 event_input_json,
-                f"Agent 请求审批 #{approval_id}，等待主人确认；当前版本不自动执行。",
+                f"Agent 请求审批 #{approval_id}，等待主人确认；确认后仅已注册且启用审批恢复的工具会受控恢复。",
                 AGENT_TASK_PENDING,
                 None,
                 now,
@@ -682,7 +691,7 @@ def decide_agent_approval(
                 event_kind,
                 approval.tool_name,
                 event_input_json,
-                f"主人{decision_text}审批 #{approval.id}；当前版本只记录决定，不恢复执行。",
+                f"主人{decision_text}审批 #{approval.id}；仅已注册且启用审批恢复的工具会受控恢复。",
                 AGENT_TASK_PENDING,
                 None,
                 now,
@@ -695,6 +704,297 @@ def decide_agent_approval(
         user_id=user_id,
     )
     return updated, True
+
+
+def resume_agent_approval(
+    *,
+    approval_id: int,
+    session_key: str,
+    user_id: str,
+    tool_registry: ToolRegistry | None = None,
+) -> tuple[AgentApproval | None, bool, str]:
+    approval = get_agent_approval(
+        approval_id,
+        session_key=session_key,
+        user_id=user_id,
+    )
+    if approval is None:
+        return None, False, "Agent approval was not found in the current session."
+    if approval.status != AGENT_APPROVAL_APPROVED:
+        return approval, False, "Agent approval is not approved; resume skipped."
+    registry = tool_registry or create_default_main_agent_tool_registry(
+        include_dry_run_tools=True
+    )
+    try:
+        spec = registry.require(approval.tool_name)
+    except ToolArgumentError as exc:
+        return approval, False, f"Agent approval tool is not registered: {exc}"
+    if not spec.approval_resume_enabled:
+        return approval, False, (
+            f"Agent approval #{approval.id} uses {approval.tool_name}; "
+            "this tool is not enabled for approval resume."
+        )
+
+    ensure_database()
+    with connect() as connection:
+        if _has_agent_task_event(
+            connection,
+            task_id=approval.task_id,
+            kind="tool_resume_finished",
+            tool_name=approval.tool_name,
+            approval_id=approval.id,
+        ):
+            return approval, False, (
+                f"Agent approval #{approval.id} approval resume was already completed."
+            )
+
+        now = utc_now()
+        started_step = _next_agent_task_step(connection, approval.task_id)
+        resume_arguments = _approval_tool_arguments_for_resume(approval, registry)
+        started_input_json = json.dumps(
+            {
+                "approval_id": approval.id,
+                "tool_arguments": resume_arguments,
+            },
+            ensure_ascii=False,
+        )
+        _insert_agent_task_event(
+            connection,
+            task_id=approval.task_id,
+            step_index=started_step,
+            kind="tool_resume_started",
+            tool_name=approval.tool_name,
+            input_json=started_input_json,
+            output_summary=f"Starting approval resume for approval #{approval.id}.",
+            status=AGENT_TASK_PENDING,
+            error=None,
+            created_at=now,
+        )
+
+        try:
+            tool_result = _execute_registered_resume_tool(
+                registry,
+                approval,
+                resume_arguments,
+                session_key=session_key,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            failed_step = _next_agent_task_step(connection, approval.task_id)
+            _insert_agent_task_event(
+                connection,
+                task_id=approval.task_id,
+                step_index=failed_step,
+                kind="tool_resume_failed",
+                tool_name=approval.tool_name,
+                input_json=started_input_json,
+                output_summary="Approval resume failed.",
+                status=AGENT_TASK_FAILED,
+                error=str(exc),
+                created_at=utc_now(),
+            )
+            connection.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?, result = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    AGENT_TASK_FAILED,
+                    f"Approval resume failed: {exc}",
+                    utc_now(),
+                    approval.task_id,
+                ),
+            )
+            return approval, False, f"Approval resume failed: {exc}"
+
+        finished_step = _next_agent_task_step(connection, approval.task_id)
+        result_text = tool_result.text.strip()
+        result_metadata = dict(tool_result.metadata)
+        finished_input_json = json.dumps(
+            {
+                "approval_id": approval.id,
+                "tool_arguments": resume_arguments,
+                "tool_result_metadata": result_metadata,
+            },
+            ensure_ascii=False,
+        )
+        _insert_agent_task_event(
+            connection,
+            task_id=approval.task_id,
+            step_index=finished_step,
+            kind="tool_resume_finished",
+            tool_name=approval.tool_name,
+            input_json=finished_input_json,
+            output_summary=result_text,
+            status=AGENT_TASK_DONE,
+            error=None,
+            created_at=utc_now(),
+        )
+        connection.execute(
+            """
+            UPDATE agent_tasks
+            SET status = ?, result = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (AGENT_TASK_DONE, result_text, utc_now(), approval.task_id),
+        )
+        return approval, True, format_agent_approval_dry_run_resume(approval, result_text)
+
+
+def resume_agent_approval_dry_run(
+    *,
+    approval_id: int,
+    session_key: str,
+    user_id: str,
+) -> tuple[AgentApproval | None, bool, str]:
+    return resume_agent_approval(
+        approval_id=approval_id,
+        session_key=session_key,
+        user_id=user_id,
+    )
+
+
+def _approval_tool_arguments_for_resume(
+    approval: AgentApproval,
+    registry: ToolRegistry,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(approval.tool_input_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("approval tool_input_json must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("approval tool_input_json must be a JSON object")
+
+    if approval.tool_name != DRY_RUN_WRITE_FILE_TOOL_NAME:
+        return registry.validate_arguments(approval.tool_name, dict(payload))
+
+    path_value = payload.get("path") or "docs/version-runlog.md"
+    summary_value = payload.get("content_summary") or payload.get("goal") or approval.reason
+    path = str(path_value).strip()
+    content_summary = str(summary_value).strip()
+    if not path:
+        raise ValueError("dry-run approval requires a non-empty path")
+    if not content_summary:
+        raise ValueError("dry-run approval requires a non-empty content_summary")
+    return registry.validate_arguments(
+        approval.tool_name,
+        {"path": path, "content_summary": content_summary},
+    )
+
+
+def _execute_registered_resume_tool(
+    registry: ToolRegistry,
+    approval: AgentApproval,
+    arguments: dict[str, Any],
+    *,
+    session_key: str,
+    user_id: str,
+) -> ToolResult:
+    spec = registry.require(approval.tool_name)
+    validated = registry.validate_arguments(approval.tool_name, dict(arguments))
+    if spec.executor is None:
+        raise RuntimeError(f"tool has no executor: {approval.tool_name}")
+    value = spec.executor(
+        validated,
+        ToolContext(
+            query=approval.reason,
+            is_owner=True,
+            is_group=False,
+            metadata={
+                "approval_id": approval.id,
+                "task_id": approval.task_id,
+                "session_key": session_key,
+                "user_id": user_id,
+                "resume_mode": "dry_run",
+            },
+        ),
+    )
+    if inspect.isawaitable(value):
+        raise RuntimeError("async approval resume tools are not supported yet")
+    if isinstance(value, ToolResult):
+        return value
+    return ToolResult(text=str(value))
+
+
+def _next_agent_task_step(connection: Any, task_id: int) -> int:
+    step_row = connection.execute(
+        """
+        SELECT COALESCE(MAX(step_index), -1) + 1 AS next_step
+        FROM agent_task_events
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    return int(step_row["next_step"])
+
+
+def _insert_agent_task_event(
+    connection: Any,
+    *,
+    task_id: int,
+    step_index: int,
+    kind: str,
+    tool_name: str | None,
+    input_json: str | None,
+    output_summary: str,
+    status: str,
+    error: str | None,
+    created_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_task_events (
+            task_id,
+            step_index,
+            kind,
+            tool_name,
+            input_json,
+            output_summary,
+            status,
+            error,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task_id,
+            step_index,
+            kind,
+            tool_name,
+            input_json,
+            output_summary,
+            status,
+            error,
+            created_at,
+        ),
+    )
+
+
+def _has_agent_task_event(
+    connection: Any,
+    *,
+    task_id: int,
+    kind: str,
+    tool_name: str,
+    approval_id: int,
+) -> bool:
+    rows = connection.execute(
+        """
+        SELECT input_json
+        FROM agent_task_events
+        WHERE task_id = ? AND kind = ? AND tool_name = ?
+        """,
+        (task_id, kind, tool_name),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(str(row["input_json"] or "{}"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("approval_id") == approval_id:
+            return True
+    return False
 
 
 def cancel_agent_task(
@@ -802,10 +1102,33 @@ def format_agent_task_created(task: AgentTask) -> str:
         [
             f"已创建只读 Agent 任务 #{task.id}：{task.title}",
             f"状态：{agent_task_status_label(task.status)}",
-            "当前版本只记录任务，不会自动执行 shell、写文件或写数据库。",
+            "当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。",
             "后续需要审批流和执行边界后，才会进入任务执行阶段。",
         ]
     )
+
+
+def format_agent_approval_dry_run_resume(approval: AgentApproval, result_text: str) -> str:
+    if approval.tool_name != DRY_RUN_WRITE_FILE_TOOL_NAME:
+        return "\n".join(
+            [
+                f"Approval resume completed for Agent approval #{approval.id}.",
+                f"Task ID: #{approval.task_id}",
+                f"Tool: {approval.tool_name}",
+                "",
+                result_text.strip(),
+            ]
+        ).strip()
+    return "\n".join(
+        [
+            f"Dry-run resume completed for Agent approval #{approval.id}.",
+            f"Task ID: #{approval.task_id}",
+            f"Tool: {approval.tool_name}",
+            "Side effect: none",
+            "",
+            result_text.strip(),
+        ]
+    ).strip()
 
 
 def format_agent_task_cancelled(task: AgentTask, *, changed: bool) -> str:
@@ -813,7 +1136,7 @@ def format_agent_task_cancelled(task: AgentTask, *, changed: bool) -> str:
         return "\n".join(
             [
                 f"已取消 Agent 任务 #{task.id}：{task.title}",
-                "当前版本只记录任务，不自动执行。",
+                "当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。",
             ]
         )
     return "\n".join(
@@ -845,7 +1168,7 @@ def format_agent_task_detail(task: AgentTask, events: list[AgentTaskEvent]) -> s
     else:
         lines.append("- 暂无事件。")
     lines.append("")
-    lines.append("当前版本只记录任务，不自动执行。")
+    lines.append("当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。")
     return "\n".join(lines)
 
 
@@ -857,7 +1180,7 @@ def format_agent_task_list(tasks: list[AgentTask]) -> str:
         lines.append(f"任务ID：#{task.id} [{agent_task_status_label(task.status)}] {task.title}")
     lines.append("")
     lines.append("可用 /agent 任务详情 最新 查看最近任务。")
-    lines.append("当前版本只记录任务，不自动执行。")
+    lines.append("当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。")
     return "\n".join(lines)
 
 
@@ -872,7 +1195,7 @@ def format_agent_approval_list(approvals: list[AgentApproval]) -> str:
         )
     lines.append("")
     lines.append("可用 /agent 审批详情 最新、/agent 确认 最新 或 /agent 拒绝 最新 操作最近审批。")
-    lines.append("当前版本只记录审批请求，不恢复执行。")
+    lines.append("当前版本仅允许已注册且启用审批恢复的工具在确认后受控恢复。")
     return "\n".join(lines)
 
 
@@ -894,7 +1217,7 @@ def format_agent_approval_detail(approval: AgentApproval) -> str:
     if approval.decided_at:
         lines.append(f"决定：{approval.decided_at}")
     lines.append("")
-    lines.append("当前版本只展示审批记录，不会恢复或执行任何工具。")
+    lines.append("当前版本仅允许已注册且启用审批恢复的工具在确认后受控恢复。")
     return "\n".join(lines)
 
 
@@ -915,7 +1238,7 @@ def format_agent_approval_requested(approval: AgentApproval) -> str:
             f"/agent 拒绝 {approval.id}",
             "也可以直接回复：/agent 确认 最新 或 /agent 拒绝 最新",
             "",
-            "当前版本确认后也不会自动恢复执行。",
+            "当前版本确认后仅已注册且启用审批恢复的工具会受控恢复。",
         ]
     )
 
@@ -969,6 +1292,8 @@ def create_agent_approval_drill_reply(
         {
             "dry_run": True,
             "goal": stripped_goal,
+            "path": "docs/version-runlog.md",
+            "content_summary": stripped_goal,
             "would_write": False,
             "note": "Route B approval drill only; no file, shell, database, or QQ side effect.",
         },
@@ -1005,13 +1330,13 @@ def format_agent_approval_decision(approval: AgentApproval, *, changed: bool) ->
                 f"状态：{agent_approval_status_label(approval.status)}",
                 f"任务ID：#{approval.task_id}",
                 f"任务：{approval.task_title}",
-                "当前版本只记录审批决定，不恢复执行任何工具。",
+                "当前版本仅允许已注册且启用审批恢复的工具受控恢复。",
             ]
         )
     return "\n".join(
         [
             f"Agent 审批 #{approval.id} 当前状态：{agent_approval_status_label(approval.status)}",
             "只有待审批记录可以确认或拒绝。",
-            "当前版本不会恢复执行任何工具。",
+            "当前版本仅允许已注册且启用审批恢复的工具受控恢复。",
         ]
     )

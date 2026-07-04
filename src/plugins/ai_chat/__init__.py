@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,8 +38,10 @@ from .agent_tasks import (
     AGENT_TASK_COMMAND_CREATE,
     AGENT_TASK_COMMAND_DETAIL,
     AGENT_TASK_COMMAND_STATUS,
+    AGENT_APPROVAL_APPROVED,
     cancel_agent_task,
     create_agent_approval_drill_reply,
+    create_agent_approval_request_reply,
     create_agent_task,
     decide_agent_approval,
     format_agent_approval_decision,
@@ -56,6 +59,7 @@ from .agent_tasks import (
     list_agent_tasks,
     parse_agent_task_command,
     parse_agent_task_id,
+    resume_agent_approval,
 )
 from .base_prompt import load_base_chat_reminder
 from .chat_contracts import (
@@ -123,6 +127,7 @@ from .graph import (
     chat_state_with_runtime_result,
     chat_state_with_vision_result,
     create_read_only_main_agent_runtime_handler,
+    create_read_only_main_agent_tool_registry,
     persisted_turn_from_chat_turn,
     runtime_state_from_main_agent_command,
     runtime_state_from_chat_request,
@@ -145,7 +150,7 @@ from .manual_memory import (
     manual_memory_stats,
     memory_type_label,
 )
-from .main_agent_observability import build_main_llm_failure_log_message
+from .main_agent_observability import build_main_llm_failure_log_message, redacted_base_url
 from .llm import (
     active_persona_prompt_path,
     ask_llm,
@@ -2287,6 +2292,124 @@ def list_lines(title: str, items: frozenset[str]) -> str:
     return f"{title}：\n" + "\n".join(sorted(items))
 
 
+def role_card_list_lines() -> list[str]:
+    cards = list_role_cards()
+    active = active_role_card()
+    active_key = active.key if active is not None else ""
+    lines = [
+        "角色卡列表：",
+        f"可选数量：{len(cards)}",
+        f"当前启用：{active.title if active is not None else '未启用'}",
+    ]
+    if not cards:
+        lines.append("暂无可用角色卡。")
+        return lines
+    for card in cards:
+        marker = "（当前）" if card.key == active_key else ""
+        lines.append(f"- {card.key}：{card.title}{marker}")
+    return lines
+
+
+def model_config_status_lines() -> list[str]:
+    return [
+        "模型配置摘要：",
+        f"聊天模型：{config.chat_llm_model or config.openai_model or '未配置'}",
+        f"聊天接口：{redacted_base_url(config.chat_llm_base_url or config.openai_base_url)}",
+        f"聊天 Key：{'已配置' if (config.chat_llm_api_key or config.openai_api_key) else '未配置'}",
+        f"聊天超时：{config.chat_llm_timeout_seconds} 秒",
+        f"MainAgent LLM：{'开启' if config.main_agent_use_llm else '关闭'}",
+        f"MainAgent 模型：{config.main_llm_model or '未配置'}",
+        f"MainAgent 接口：{redacted_base_url(config.main_llm_base_url)}",
+        f"MainAgent Key：{'已配置' if config.main_llm_api_key else '未配置'}",
+        f"MainAgent 超时：{config.main_llm_timeout_seconds} 秒",
+        f"Embedding provider：{config.memory_rag_embedding_provider}",
+        f"Embedding model：{config.memory_rag_embedding_model}",
+        f"Embedding base_url：{redacted_base_url(config.memory_rag_embedding_base_url)}",
+    ]
+
+
+def access_overview_lines() -> list[str]:
+    access = current_access()
+    lines = [
+        "访问控制总览：",
+        f"主人：{'已配置' if config.bot_owner_qq else '未配置'}",
+        f"私聊：{'开启' if config.enable_private_chat else '关闭'}",
+        f"未知私聊：{'允许试用' if config.allow_unknown_private_chat else '拒绝'}",
+        f"群聊：{'开启' if config.enable_group_chat else '关闭'}",
+        f"私聊白名单：{len(access.private_whitelist)}",
+        f"群白名单：{len(access.group_whitelist)}",
+        f"黑名单：{len(access.user_blacklist)}",
+        "",
+        list_lines("私聊白名单", access.private_whitelist),
+        "",
+        list_lines("群白名单", access.group_whitelist),
+        "",
+        list_lines("黑名单", access.user_blacklist),
+    ]
+    return lines
+
+
+def rag_index_detail_lines() -> list[str]:
+    ensure_database()
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                d.namespace AS namespace,
+                d.source_type AS source_type,
+                COUNT(*) AS document_count,
+                SUM(CASE WHEN d.deleted_at IS NULL THEN 1 ELSE 0 END) AS active_document_count,
+                COUNT(e.id) AS embedding_count
+            FROM rag_documents d
+            LEFT JOIN rag_embeddings e ON e.document_id = d.id
+            GROUP BY d.namespace, d.source_type
+            ORDER BY d.namespace, d.source_type
+            """
+        ).fetchall()
+    lines = [
+        "RAG 索引详情：",
+        f"MemoryRAG：{'开启' if config.enable_memory_rag else '关闭'}",
+        f"ProjectDocRAG：{'开启' if config.enable_project_doc_rag else '关闭'}",
+        f"Embedding：{config.memory_rag_embedding_provider}/{config.memory_rag_embedding_model}",
+        f"Embedding base_url：{redacted_base_url(config.memory_rag_embedding_base_url)}",
+        f"MemoryRAG top_k/min_score/context：{config.memory_rag_top_k}/{config.memory_rag_min_score}/{config.memory_rag_max_context_chars}",
+        f"ProjectDocRAG top_k/min_score/context：{config.project_doc_rag_top_k}/{config.project_doc_rag_min_score}/{config.project_doc_rag_max_context_chars}",
+        "",
+        "索引记录：",
+    ]
+    if not rows:
+        lines.append("- 暂无 RAG 索引记录。")
+        return lines
+    for row in rows:
+        lines.append(
+            "- "
+            f"{row['namespace']}/{row['source_type']}："
+            f"documents={int(row['document_count'] or 0)}，"
+            f"active={int(row['active_document_count'] or 0)}，"
+            f"embeddings={int(row['embedding_count'] or 0)}"
+        )
+    return lines
+
+
+def recent_main_agent_observation_lines(limit: int = 8) -> list[str]:
+    markers = (
+        "main_agent",
+        "MainAgent",
+        "main_llm",
+        "tool_summary",
+    )
+    lines = [
+        line
+        for line in recent_error_lines(80)
+        if any(marker in line for marker in markers)
+    ][-limit:]
+    if not lines:
+        return ["MainAgent 最近观测：", "暂无。"]
+    output = ["MainAgent 最近观测："]
+    output.extend(f"{index}. {line}" for index, line in enumerate(lines, 1))
+    return output
+
+
 async def require_owner(event: MessageEvent, matcher: Matcher) -> None:
     if not is_owner(config, event):
         await matcher.finish("只有主人可以执行这个命令。")
@@ -3301,8 +3424,13 @@ def main_agent_help_reply() -> str:
             "/agent 拒绝 <审批ID>",
             "/agent 下一步",
             "/agent 查 <问题>",
+            "/agent 帮我看一下最近错误",
+            "/agent 看看诊断/配置/视觉/图片缓存/记忆/摘要/RAG/角色卡/白名单状态",
+            "/agent 角色卡列表 / 模型配置 / 访问控制 / RAG索引详情 / MainAgent最近观测",
+            "/agent 看看任务表 / 最新任务详情 / 有没有待审批 / 最新审批详情",
+            "/agent 帮我创建一个任务：<目标> / 取消最新任务 / 确认最新审批 / 拒绝最新审批",
             "/agent-debug <问题>",
-            "边界：只读 dev_context；任务命令只记录，不执行 shell，不写文件。",
+            "边界：只读 dev_context、owner_read_command、agent_task_read；agent_task_command 仅任务/审批控制面；owner_write_command 只走审批恢复，不执行 shell。",
         ]
     )
 
@@ -3317,11 +3445,12 @@ def main_agent_status_reply() -> str:
         [
             "MainAgent 当前状态：",
             f"入口：{'开启' if config.enable_main_agent else '关闭'}",
-            "模式：只读",
-            "工具：dev_context",
-            "任务：只记录状态和事件，不自动执行",
-            "审批：可查看、确认、拒绝，但不恢复执行",
-            "演练：可生成 dry-run 审批请求，不执行工具",
+            "模式：只读优先 + 审批门控写工具",
+            "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
+            "任务：记录状态和事件；仅已注册且启用审批恢复的工具可受控恢复",
+            "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
+            "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（首批仅清空图片缓存/错误日志）",
+            "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
             f"LLM：{'已接入 /agent ActionRequest 生成' if config.main_agent_use_llm else '未接入 /agent 默认路径'}",
             f"主模型：{config.main_llm_model or '未配置'}",
             f"主模型 Key：{'已配置' if config.main_llm_api_key else '未配置'}",
@@ -3335,6 +3464,10 @@ def main_agent_boundary_reply() -> str:
         [
             "MainAgent 当前边界：",
             "允许：主人私聊调用 dev_context 只读工具。",
+            "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
+            "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
+            "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
+            "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
             "禁止：MainAgent/LLM 执行 shell、写文件、写数据库、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
@@ -3373,6 +3506,26 @@ def latest_agent_task_id(event: MessageEvent) -> int | None:
         limit=1,
     )
     return tasks[0].id if tasks else None
+
+
+async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
+    return "dev_context is not available during approval resume."
+
+
+def execute_owner_write_command(command: str, _context) -> str:
+    if command == "clear_image_cache":
+        count = clear_image_cache()
+        return f"已清空图片缓存：{count} 条。"
+    if command == "clear_error_log":
+        return clear_error_log()
+    raise RuntimeError(f"unsupported owner write command: {command}")
+
+
+def create_main_agent_approval_resume_tool_registry():
+    return create_read_only_main_agent_tool_registry(
+        _resume_registry_dev_context,
+        execute_owner_write_command=execute_owner_write_command,
+    )
 
 
 def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
@@ -3433,7 +3586,17 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         )
         if approval is None:
             return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-        return format_agent_approval_decision(approval, changed=changed)
+        reply = format_agent_approval_decision(approval, changed=changed)
+        if action == AGENT_TASK_COMMAND_APPROVAL_APPROVE and approval.status == AGENT_APPROVAL_APPROVED:
+            _, resumed, resume_text = resume_agent_approval(
+                approval_id=approval.id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+                tool_registry=create_main_agent_approval_resume_tool_registry(),
+            )
+            if resumed or resume_text:
+                reply = f"{reply}\n\n{resume_text}"
+        return reply
 
     if action == AGENT_TASK_COMMAND_STATUS:
         tasks = list_agent_tasks(
@@ -3473,7 +3636,7 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
 
     if action == AGENT_TASK_COMMAND_CREATE:
         if not goal:
-            return "请提供任务目标：/agent 任务 <目标>\n当前版本只记录任务，不自动执行。"
+            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。"
         task_id = create_agent_task(
             session_key=session_key(event),
             user_id=user_id(event),
@@ -3580,6 +3743,207 @@ async def run_main_agent_qq_command(
             raise RuntimeError(execution.result.context_text or execution.result.error)
         return execution.result.context_text
 
+    async def execute_owner_read_command(command: str, _context) -> str:
+        views = {
+            "bot_status": "bot_status",
+            "diagnostics": None,
+            "config_status": DiagnosticsView.CONFIG,
+            "vision_status": DiagnosticsView.VISION,
+            "recent_errors": DiagnosticsView.RECENT_ERRORS,
+            "image_cache_status": DiagnosticsView.IMAGE_CACHE,
+            "memory_status": DiagnosticsView.MEMORY,
+            "tts_status": DiagnosticsView.TTS,
+        }
+        if command in views:
+            view = views[command]
+            if view == "bot_status":
+                return "\n".join(status_lines())
+            execution = (
+                await run_diagnostics_graph(event)
+                if view is None
+                else await run_diagnostics_graph(event, view)
+            )
+            if execution.result.error:
+                raise RuntimeError(execution.result.reply_text or execution.result.error)
+            return execution.result.reply_text
+        if command == "rag_status":
+            execution = await run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)
+            if execution.result.error:
+                raise RuntimeError(execution.result.reply_text or execution.result.error)
+            return execution.result.reply_text
+        memory_admin_actions = {
+            "summary_status": MemoryAdminAction.SUMMARY_STATUS,
+            "view_summaries": MemoryAdminAction.VIEW_SUMMARIES,
+            "view_gap_scene_summaries": MemoryAdminAction.VIEW_GAP_SCENE_SUMMARIES,
+            "view_long_term_memory": MemoryAdminAction.VIEW_LONG_TERM_MEMORY,
+        }
+        if command in memory_admin_actions:
+            execution = await run_memory_admin_graph(event, memory_admin_actions[command])
+            if execution.result.error:
+                raise RuntimeError(execution.result.reply_text or execution.result.error)
+            return execution.result.reply_text
+        if command == "view_persona":
+            prompt = load_persona_prompt()
+            if prompt:
+                return "当前角色卡内容：\n" + prompt
+            return "\n".join(persona_status_lines())
+        if command == "role_card_list":
+            return "\n".join(role_card_list_lines())
+        if command == "model_config_status":
+            return "\n".join(model_config_status_lines())
+        if command == "access_overview":
+            return "\n".join(access_overview_lines())
+        if command == "rag_index_detail":
+            return "\n".join(rag_index_detail_lines())
+        if command == "main_agent_observations":
+            return "\n".join(recent_main_agent_observation_lines())
+        if command == "group_whitelist":
+            return list_lines("群白名单", current_access().group_whitelist)
+        if command == "private_whitelist":
+            return list_lines("私聊白名单", current_access().private_whitelist)
+        if command == "blacklist":
+            return list_lines("黑名单", current_access().user_blacklist)
+        raise RuntimeError(f"unsupported owner read command: {command}")
+
+    async def execute_agent_task_read(command: str, reference: str, _context) -> str:
+        if command == "list_tasks":
+            tasks = list_agent_tasks(
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            return format_agent_task_list(tasks)
+        if command == "list_approvals":
+            approvals = list_agent_approvals(
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            return format_agent_approval_list(approvals)
+        if command == "task_detail":
+            task_id = parse_agent_task_id(reference)
+            if task_id is None and (not reference or is_latest_agent_reference(reference)):
+                task_id = latest_agent_task_id(event)
+            if task_id is None:
+                return "请提供任务 ID，或使用：/agent 最新任务详情"
+            task = get_agent_task(
+                task_id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            if task is None:
+                return f"未找到当前会话中的 Agent 任务 #{task_id}。"
+            events = list_agent_task_events(task.id)
+            return format_agent_task_detail(task, events)
+        if command == "approval_detail":
+            approval_id = parse_agent_task_id(reference)
+            if approval_id is None and (not reference or is_latest_agent_reference(reference)):
+                approval_id = latest_agent_approval_id(event)
+            if approval_id is None:
+                return "请提供审批 ID，或使用：/agent 最新审批详情"
+            approval = get_agent_approval(
+                approval_id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            if approval is None:
+                return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
+            return format_agent_approval_detail(approval)
+        raise RuntimeError(f"unsupported agent task read command: {command}")
+
+    async def execute_agent_task_command(
+        command: str,
+        reference: str,
+        goal: str,
+        _context,
+    ) -> str:
+        if command == "create_task":
+            if not goal:
+                return "请提供任务目标：/agent 帮我创建一个任务：<目标>"
+            task_id = create_agent_task(
+                session_key=session_key(event),
+                user_id=user_id(event),
+                goal=goal,
+            )
+            task = get_agent_task(task_id)
+            if task is None:
+                return "Agent 任务创建失败：任务记录未找到。"
+            return format_agent_task_created(task)
+
+        if command == "create_approval_drill":
+            if not goal:
+                return "请提供审批演练目标：/agent 创建审批演练：<目标>"
+            return create_agent_approval_drill_reply(
+                session_key=session_key(event),
+                user_id=user_id(event),
+                goal=goal,
+            )
+
+        if command == "cancel_task":
+            task_id = parse_agent_task_id(reference)
+            if task_id is None and (not reference or is_latest_agent_reference(reference)):
+                task_id = latest_agent_task_id(event)
+            if task_id is None:
+                return "请提供任务 ID，或使用：/agent 取消最新任务"
+            task, changed = cancel_agent_task(
+                task_id=task_id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            if task is None:
+                return f"未找到当前会话中的 Agent 任务 #{task_id}。"
+            return format_agent_task_cancelled(task, changed=changed)
+
+        if command in {"approve_approval", "reject_approval"}:
+            approval_id = parse_agent_task_id(reference)
+            if approval_id is None and (not reference or is_latest_agent_reference(reference)):
+                approval_id = latest_agent_approval_id(event)
+            verb = "确认" if command == "approve_approval" else "拒绝"
+            if approval_id is None:
+                return f"请提供审批 ID，或使用：/agent {verb}最新审批"
+            approval, changed = decide_agent_approval(
+                approval_id=approval_id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+                approved=command == "approve_approval",
+            )
+            if approval is None:
+                return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
+            reply = format_agent_approval_decision(approval, changed=changed)
+            if command == "approve_approval" and approval.status == AGENT_APPROVAL_APPROVED:
+                _, resumed, resume_text = resume_agent_approval(
+                    approval_id=approval.id,
+                    session_key=session_key(event),
+                    user_id=user_id(event),
+                    tool_registry=create_main_agent_approval_resume_tool_registry(),
+                )
+                if resumed or resume_text:
+                    reply = f"{reply}\n\n{resume_text}"
+            return reply
+
+        raise RuntimeError(f"unsupported agent task command: {command}")
+
+    async def request_agent_tool_approval(agent_state, risk_level, policy_reason) -> str:
+        arguments = agent_state.metadata.get("tool_arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
+        command = str(arguments.get("command") or agent_state.requested_tool).strip()
+        goal = f"语义主人管理审批：{command}"
+        if agent_state.query.strip():
+            goal = f"{goal} / {agent_state.query.strip()}"
+        task_id = create_agent_task(
+            session_key=session_key(event),
+            user_id=user_id(event),
+            goal=goal,
+        )
+        return create_agent_approval_request_reply(
+            task_id=task_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+            tool_name=agent_state.requested_tool,
+            tool_input_json=json.dumps(dict(arguments), ensure_ascii=False),
+            risk_level=risk_level.value,
+            reason=policy_reason or "owner write command requires approval",
+        )
+
     call_main_agent = None
     summarize_tool_result = None
     if config.main_agent_use_llm:
@@ -3592,6 +3956,11 @@ async def run_main_agent_qq_command(
 
     handler = create_read_only_main_agent_runtime_handler(
         retrieve_dev_context=retrieve_dev_context,
+        execute_owner_read_command=execute_owner_read_command,
+        execute_owner_write_command=execute_owner_write_command,
+        execute_agent_task_read=execute_agent_task_read,
+        execute_agent_task_command=execute_agent_task_command,
+        request_approval=request_agent_tool_approval,
         call_main_agent=call_main_agent,
         summarize_tool_result=summarize_tool_result,
         render_mode="raw" if raw_output else "concise",

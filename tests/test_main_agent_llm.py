@@ -13,6 +13,7 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
         cls.modules = load_pure_graph_modules()
         cls.main_agent = cls.modules["main_agent"]
         cls.main_agent_llm = cls.modules["main_agent_llm"]
+        cls.tool_registry = cls.modules["tool_registry"]
 
     def test_build_main_agent_action_messages_preserves_read_only_boundary(self):
         messages = self.main_agent_llm.build_main_agent_action_messages(
@@ -27,6 +28,40 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
         self.assertEqual(messages[1]["role"], "user")
         self.assertIn("project docs context", messages[1]["content"])
         self.assertIn("recover context", messages[1]["content"])
+
+    def test_tool_contract_is_rendered_from_visible_registry_specs(self):
+        registry = self.tool_registry.create_default_main_agent_tool_registry(
+            include_dry_run_tools=True
+        )
+
+        contract = self.main_agent_llm.render_main_agent_tool_contract(registry)
+
+        self.assertIn('tool_name "dev_context"', contract)
+        self.assertIn('"query": "..."', contract)
+        self.assertIn("read_local", contract)
+        self.assertNotIn("dry_run_write_file", contract)
+
+    def test_build_main_agent_action_messages_accepts_registry_tool_contract(self):
+        registry = self.tool_registry.ToolRegistry(
+            [
+                self.tool_registry.ToolSpec(
+                    name="snapshot",
+                    description="Read a local diagnostic snapshot.",
+                    risk_level=self.modules["policy_risk"].RiskLevel.READ_LOCAL,
+                    required_arguments=("target",),
+                )
+            ]
+        )
+
+        messages = self.main_agent_llm.build_main_agent_action_messages(
+            "read status",
+            "context",
+            tool_registry=registry,
+        )
+
+        self.assertIn('tool_name "snapshot"', messages[0]["content"])
+        self.assertIn('"target": "..."', messages[0]["content"])
+        self.assertNotIn('tool_name "dev_context"', messages[0]["content"])
 
     def test_build_tool_summary_messages_preserves_read_only_boundary(self):
         messages = self.main_agent_llm.build_main_agent_tool_summary_messages(
