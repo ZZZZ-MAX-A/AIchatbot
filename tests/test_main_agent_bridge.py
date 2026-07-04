@@ -79,6 +79,434 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertIn("/agent-debug", execution.result.response_text)
         self.assertNotIn("path: docs/runlog.md", execution.result.response_text)
 
+    def test_read_only_runner_executes_semantic_owner_read_command(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for owner command")
+
+        async def execute_owner_read_command(command, context):
+            calls.append((command, context.query, context.metadata["session_key"]))
+            return "最近错误：\n暂无。"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            render_mode="concise",
+        )
+        state = self.main_agent.MainAgentState(
+            query="帮我看一下最近错误",
+            is_owner=True,
+            metadata={"session_key": "private:10001"},
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "owner_read_command")
+        self.assertEqual(execution.result.metadata["tool_arguments"]["command"], "recent_errors")
+        self.assertEqual(calls, [("recent_errors", "帮我看一下最近错误", "private:10001")])
+        self.assertIn("最近错误", execution.result.response_text)
+        self.assertNotIn("/agent-debug", execution.result.response_text)
+        self.assertNotIn("MainAgentGraph read-only summary", execution.result.response_text)
+
+    def test_semantic_owner_read_runs_before_configured_llm_handler(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic owner read")
+
+        async def execute_owner_read_command(command, _context):
+            calls.append(command)
+            return "最近错误：\n暂无。"
+
+        async def configured_llm_handler(_state):
+            raise AssertionError("configured llm handler should not run for semantic owner read")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我看一下最近错误",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "owner_read_command")
+        self.assertEqual(calls, ["recent_errors"])
+
+    def test_owner_read_tool_is_visible_and_validates_command_in_executor(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            return "dev context"
+
+        async def execute_owner_read_command(_command, _context):
+            return "should not reach unsupported command"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+        )
+
+        self.assertEqual(
+            registry.visible_tool_names(),
+            ["dev_context", "owner_read_command"],
+        )
+        self.assertEqual(
+            registry.require("owner_read_command").risk_level,
+            self.policy_risk.RiskLevel.READ_LOCAL,
+        )
+
+        with self.assertRaises(self.tool_registry.ToolExecutionError):
+            asyncio.run(
+                registry.execute(
+                    "owner_read_command",
+                    {"command": "clear_image_cache"},
+                    self.tool_registry.ToolContext(is_owner=True),
+                )
+            )
+
+    def test_read_only_runner_executes_semantic_agent_task_read(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for task read")
+
+        async def execute_agent_task_read(command, reference, context):
+            calls.append((command, reference, context.query))
+            return "Agent 审批状态：\n暂无待查看审批。"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+            render_mode="concise",
+        )
+        state = self.main_agent.MainAgentState(
+            query="帮我看看有没有待审批的东西",
+            is_owner=True,
+        )
+
+        execution = asyncio.run(runner.run(state))
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "agent_task_read")
+        self.assertEqual(execution.result.metadata["tool_arguments"]["command"], "list_approvals")
+        self.assertEqual(calls, [("list_approvals", "", "帮我看看有没有待审批的东西")])
+        self.assertIn("Agent 审批状态", execution.result.response_text)
+
+    def test_semantic_task_read_runs_before_configured_llm_handler(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic task read")
+
+        async def execute_agent_task_read(command, reference, _context):
+            calls.append((command, reference))
+            return "Agent 任务状态：\n暂无任务。"
+
+        async def configured_llm_handler(_state):
+            raise AssertionError("configured llm handler should not run for semantic task read")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="看看现在任务表",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "agent_task_read")
+        self.assertEqual(calls, [("list_tasks", "")])
+
+    def test_local_management_tool_result_bypasses_llm_summary(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run")
+
+        async def execute_owner_read_command(_command, _context):
+            return "当前角色卡内容：\n不要模仿这张角色卡的说话方式。"
+
+        async def summarize_tool_result(_state):
+            raise AssertionError("local management tools should not be summarized by llm")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            summarize_tool_result=summarize_tool_result,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="看看角色卡",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "owner_read_command")
+        self.assertEqual(
+            execution.result.response_text,
+            "当前角色卡内容：\n不要模仿这张角色卡的说话方式。",
+        )
+
+    def test_agent_task_read_tool_supports_latest_detail_reference(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            return "dev context"
+
+        async def execute_agent_task_read(command, reference, _context):
+            return f"{command}:{reference}"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+        )
+
+        self.assertEqual(
+            registry.visible_tool_names(),
+            ["dev_context", "agent_task_read"],
+        )
+
+        result = asyncio.run(
+            registry.execute(
+                "agent_task_read",
+                {"command": "task_detail", "reference": "latest"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "task_detail:latest")
+
+        with self.assertRaises(self.tool_registry.ToolExecutionError):
+            asyncio.run(
+                registry.execute(
+                    "agent_task_read",
+                    {"command": "approval_approve"},
+                    self.tool_registry.ToolContext(is_owner=True),
+                )
+            )
+
+    def test_owner_read_classifier_covers_second_read_only_command_batch(self):
+        cases = {
+            "看看角色卡": "view_persona",
+            "看看有哪些角色卡": "role_card_list",
+            "查看长期记忆": "view_long_term_memory",
+            "摘要状态": "summary_status",
+            "看看群白名单": "group_whitelist",
+            "语音状态怎么样": "tts_status",
+            "RAG状态": "rag_status",
+            "看看访问控制": "access_overview",
+            "当前主模型是什么": "model_config_status",
+            "看看项目文档索引": "rag_index_detail",
+            "main agent 最近失败": "main_agent_observations",
+        }
+
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.main_agent_bridge.classify_owner_read_command(query),
+                    expected,
+                )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_read_command("帮我清空图片缓存"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_read_command("帮我选择角色卡"),
+            "",
+        )
+
+    def test_agent_task_read_classifier_accepts_task_card_wording(self):
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("看看任务卡"),
+            ("list_tasks", ""),
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("查看任务列表"),
+            ("list_tasks", ""),
+        )
+
+    def test_semantic_agent_task_command_runs_before_read_and_llm(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for task command")
+
+        async def execute_agent_task_read(_command, _reference, _context):
+            raise AssertionError("task read should not run for approval confirmation")
+
+        async def execute_agent_task_command(command, reference, goal, context):
+            calls.append((command, reference, goal, context.query))
+            return "已确认 Agent 审批 #42。\nApproval resume completed"
+
+        async def configured_llm_handler(_state):
+            raise AssertionError("configured llm handler should not run for task command")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+            execute_agent_task_command=execute_agent_task_command,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我确认最新审批",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "agent_task_command")
+        self.assertEqual(execution.result.policy_decision, "allow")
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"]["command"],
+            "approve_approval",
+        )
+        self.assertEqual(calls, [("approve_approval", "latest", "", "帮我确认最新审批")])
+        self.assertIn("已确认 Agent 审批", execution.result.response_text)
+
+    def test_agent_task_command_tool_is_hidden_from_llm_contract(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            return "dev context"
+
+        async def execute_agent_task_command(_command, _reference, _goal, _context):
+            return "ok"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_agent_task_command=execute_agent_task_command,
+        )
+
+        self.assertEqual(registry.visible_tool_names(), ["dev_context"])
+        self.assertEqual(
+            registry.require("agent_task_command").risk_level,
+            self.policy_risk.RiskLevel.INTERNAL,
+        )
+        result = asyncio.run(
+            registry.execute(
+                "agent_task_command",
+                {"command": "cancel_task", "reference": "latest"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "ok")
+
+    def test_agent_task_command_classifier_accepts_control_wording(self):
+        cases = {
+            "帮我确认最新审批": ("approve_approval", "latest", ""),
+            "拒绝审批 #7": ("reject_approval", "7", ""),
+            "取消最新任务": ("cancel_task", "latest", ""),
+            "帮我创建一个任务：整理审批流": ("create_task", "", "整理审批流"),
+            "把整理 Route B 加入任务": ("create_task", "", "整理 Route B"),
+            "创建审批演练：写入版本日志": ("create_approval_drill", "", "写入版本日志"),
+        }
+
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.main_agent_bridge.classify_agent_task_command(query),
+                    expected,
+                )
+        self.assertIsNone(
+            self.main_agent_bridge.classify_agent_task_command("看看任务卡")
+        )
+        self.assertIsNone(
+            self.main_agent_bridge.classify_agent_task_command("有没有待审批")
+        )
+
+    def test_semantic_owner_write_requires_approval_before_execution(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic write")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("write command should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append(
+                (
+                    state.requested_tool,
+                    state.metadata["tool_arguments"]["command"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #42\n/agent 确认 42\n/agent 拒绝 42"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我清空图片缓存",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "clear_image_cache",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #42", execution.result.response_text)
+
+    def test_owner_write_classifier_only_allows_first_safe_batch(self):
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我清空图片缓存"),
+            "clear_image_cache",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我清空错误日志"),
+            "clear_error_log",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我清空全部上下文"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我加入群白名单"),
+            "",
+        )
+
     def test_read_only_runner_can_render_llm_tool_summary(self):
         async def retrieve_dev_context(_query, _is_owner):
             return "DevContextGraph raw result"
@@ -364,8 +792,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual(registry.visible_tool_names(), ["dev_context"])
+        self.assertFalse(registry.require("dev_context").approval_resume_enabled)
         self.assertTrue(registry.require("dry_run_write_file").requires_approval)
         self.assertFalse(registry.require("dry_run_write_file").llm_visible)
+        self.assertTrue(registry.require("dry_run_write_file").approval_resume_enabled)
 
     def test_registry_backed_policy_interrupts_dry_run_write_before_execution(self):
         registry = self.tool_registry.create_default_main_agent_tool_registry(
@@ -462,6 +892,120 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             tuple(node.value for node in self.main_agent.MAIN_AGENT_NODE_SEQUENCE),
         )
         self.assertIn("metadata", runtime_state.artifacts["main_agent_graph"])
+
+    def test_runtime_handler_passes_qq_context_to_owner_read_tool(self):
+        state_mod = self.modules["state"]
+        runtime_mod = self.modules["runtime"]
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run")
+
+        async def execute_owner_read_command(command, context):
+            calls.append(
+                {
+                    "command": command,
+                    "query": context.query,
+                    "message_id": context.metadata["message_id"],
+                    "session_key": context.metadata["session_key"],
+                    "user_id": context.metadata["user_id"],
+                    "actor_role": context.metadata["actor_role"],
+                }
+            )
+            return "最近错误：\n暂无。"
+
+        handler = self.main_agent_bridge.create_read_only_main_agent_runtime_handler(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            render_mode="concise",
+        )
+        runtime_state = state_mod.RuntimeState(
+            event=state_mod.EventContext(
+                message_id="9005",
+                raw_text="/agent 帮我看一下最近错误",
+                plain_text="帮我看一下最近错误",
+            ),
+            actor=state_mod.ActorContext(
+                user_id="10001",
+                role=state_mod.ActorRole.OWNER,
+            ),
+            session=state_mod.SessionContext(
+                session_type=state_mod.SessionType.PRIVATE,
+                session_key="private:10001",
+            ),
+            intent=state_mod.RuntimeIntent.MAIN_AGENT,
+        )
+        runner = runtime_mod.RootGraphRunner(
+            handlers={state_mod.RuntimeIntent.MAIN_AGENT: handler}
+        )
+
+        response = asyncio.run(runner.run(runtime_state))
+
+        self.assertTrue(response.should_reply)
+        self.assertIn("最近错误", response.text)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "command": "recent_errors",
+                    "query": "帮我看一下最近错误",
+                    "message_id": "9005",
+                    "session_key": "private:10001",
+                    "user_id": "10001",
+                    "actor_role": "owner",
+                }
+            ],
+        )
+
+    def test_runtime_handler_dispatches_semantic_task_read_tool(self):
+        state_mod = self.modules["state"]
+        runtime_mod = self.modules["runtime"]
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run")
+
+        async def execute_agent_task_read(command, reference, context):
+            calls.append(
+                (
+                    command,
+                    reference,
+                    context.metadata["session_key"],
+                    context.metadata["user_id"],
+                )
+            )
+            return "Agent 任务状态：\n暂无任务。"
+
+        handler = self.main_agent_bridge.create_read_only_main_agent_runtime_handler(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+            render_mode="concise",
+        )
+        runtime_state = state_mod.RuntimeState(
+            event=state_mod.EventContext(
+                message_id="9006",
+                raw_text="/agent 看看现在任务表",
+                plain_text="看看现在任务表",
+            ),
+            actor=state_mod.ActorContext(
+                user_id="10001",
+                role=state_mod.ActorRole.OWNER,
+            ),
+            session=state_mod.SessionContext(
+                session_type=state_mod.SessionType.PRIVATE,
+                session_key="private:10001",
+            ),
+            intent=state_mod.RuntimeIntent.MAIN_AGENT,
+        )
+        runner = runtime_mod.RootGraphRunner(
+            handlers={state_mod.RuntimeIntent.MAIN_AGENT: handler}
+        )
+
+        response = asyncio.run(runner.run(runtime_state))
+
+        self.assertTrue(response.should_reply)
+        self.assertIn("Agent 任务状态", response.text)
+        self.assertEqual(calls, [("list_tasks", "", "private:10001", "10001")])
 
     def test_agent_command_adapter_feeds_root_main_agent_dispatch(self):
         adapters = self.modules["adapters"]

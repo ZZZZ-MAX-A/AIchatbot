@@ -47,6 +47,7 @@ class ToolSpec:
     enabled: bool = True
     llm_visible: bool = True
     requires_approval: bool = False
+    approval_resume_enabled: bool = False
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         allowed = set(self.required_arguments) | set(self.optional_arguments)
@@ -127,6 +128,7 @@ def create_default_main_agent_tool_registry(
             enabled=True,
             llm_visible=True,
             requires_approval=False,
+            approval_resume_enabled=False,
         )
     ]
     if include_dry_run_tools:
@@ -140,6 +142,7 @@ def create_default_main_agent_tool_registry(
                 enabled=True,
                 llm_visible=False,
                 requires_approval=True,
+                approval_resume_enabled=True,
             )
         )
     return ToolRegistry(specs)

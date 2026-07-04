@@ -112,8 +112,8 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn(str(other_id), formatted_list)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, "created")
-        self.assertIn("只记录任务", formatted_created)
-        self.assertIn("不自动执行", formatted_list)
+        self.assertIn("启用审批恢复", formatted_created)
+        self.assertIn("不执行任意 shell", formatted_list)
         self.assertIn("事件：", formatted_detail)
 
     def test_agent_task_cancel_is_scoped_and_records_event(self):
@@ -220,7 +220,7 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(events[-1].tool_name, "write_file")
         self.assertIn(f"审批 #{approval_id}", events[-1].output_summary)
         self.assertIn("待审批", formatted_detail)
-        self.assertIn("只展示审批记录", formatted_detail)
+        self.assertIn("启用审批恢复", formatted_detail)
         self.assertIn("Agent 请求审批", formatted_requested)
         self.assertIn(f"审批ID：#{approval_id}", formatted_requested)
         self.assertIn(f"任务ID：#{task_id}", formatted_requested)
@@ -285,7 +285,7 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
             ["created", "approval_requested", "approval_approved"],
         )
         self.assertEqual(events[-1].tool_name, "write_file")
-        self.assertIn("只记录决定", events[-1].output_summary)
+        self.assertIn("启用审批恢复", events[-1].output_summary)
         self.assertIn("已确认 Agent 审批", formatted)
 
     def test_agent_approval_drill_creates_task_approval_and_requested_event(self):
@@ -321,6 +321,282 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("/agent 确认", reply)
         self.assertIn("/agent 确认 最新", reply)
         self.assertIn("/agent 拒绝", reply)
+
+    def test_agent_approval_dry_run_resume_executes_after_approval_once(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            self.agent_tasks.create_agent_approval_drill_reply(
+                session_key="private:10001",
+                user_id="10001",
+                goal="append dry-run note",
+            )
+            approval = self.agent_tasks.list_agent_approvals(
+                session_key="private:10001",
+                user_id="10001",
+            )[0]
+
+            decided, changed = self.agent_tasks.decide_agent_approval(
+                approval_id=approval.id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            resumed_approval, resumed, resume_text = self.agent_tasks.resume_agent_approval_dry_run(
+                approval_id=approval.id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            resumed_again, resumed_again_changed, resumed_again_text = (
+                self.agent_tasks.resume_agent_approval_dry_run(
+                    approval_id=approval.id,
+                    session_key="private:10001",
+                    user_id="10001",
+                )
+            )
+            task = self.agent_tasks.get_agent_task(
+                approval.task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            events = self.agent_tasks.list_agent_task_events(approval.task_id)
+
+        self.assertIsNotNone(decided)
+        self.assertTrue(changed)
+        self.assertIsNotNone(resumed_approval)
+        self.assertTrue(resumed)
+        self.assertIn("Dry-run resume completed", resume_text)
+        self.assertIn("side_effect: none", resume_text)
+        self.assertIsNotNone(resumed_again)
+        self.assertFalse(resumed_again_changed)
+        self.assertIn("already completed", resumed_again_text)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertIn("dry_run_write_file result", task.result)
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "created",
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            ],
+        )
+        self.assertEqual(events[-1].tool_name, "dry_run_write_file")
+        self.assertIn("side_effect: none", events[-1].output_summary)
+
+    def test_agent_approval_dry_run_resume_skips_rejected_and_non_dry_run_tools(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            rejected_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="rejected dry run",
+            )
+            rejected_approval_id = self.agent_tasks.create_agent_approval(
+                task_id=rejected_task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"path":"docs/version-runlog.md","content_summary":"skip"}',
+                risk_level="write_local",
+                reason="dry-run should be rejected",
+            )
+            write_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="real write stays blocked",
+            )
+            write_approval_id = self.agent_tasks.create_agent_approval(
+                task_id=write_task_id,
+                tool_name="write_file",
+                tool_input_json='{"path":"docs/version-runlog.md","content_summary":"blocked"}',
+                risk_level="write_local",
+                reason="unsupported real write",
+            )
+
+            self.agent_tasks.decide_agent_approval(
+                approval_id=rejected_approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=False,
+            )
+            rejected_approval, rejected_resumed, rejected_text = (
+                self.agent_tasks.resume_agent_approval_dry_run(
+                    approval_id=rejected_approval_id,
+                    session_key="private:10001",
+                    user_id="10001",
+                )
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=write_approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            write_approval, write_resumed, write_text = (
+                self.agent_tasks.resume_agent_approval_dry_run(
+                    approval_id=write_approval_id,
+                    session_key="private:10001",
+                    user_id="10001",
+                )
+            )
+            rejected_events = self.agent_tasks.list_agent_task_events(rejected_task_id)
+            write_events = self.agent_tasks.list_agent_task_events(write_task_id)
+
+        self.assertIsNotNone(rejected_approval)
+        self.assertFalse(rejected_resumed)
+        self.assertIn("not approved", rejected_text)
+        self.assertEqual(
+            [event.kind for event in rejected_events],
+            ["created", "approval_requested", "approval_rejected"],
+        )
+        self.assertIsNotNone(write_approval)
+        self.assertFalse(write_resumed)
+        self.assertIn("not registered", write_text)
+        self.assertEqual(
+            [event.kind for event in write_events],
+            ["created", "approval_requested", "approval_approved"],
+        )
+
+    def test_agent_approval_resume_requires_registry_resume_flag(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="registered but disabled resume",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"path":"docs/version-runlog.md","content_summary":"blocked"}',
+                risk_level="write_local",
+                reason="registered dry run with disabled resume flag",
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            base_spec = self.agent_tasks.create_default_main_agent_tool_registry(
+                include_dry_run_tools=True
+            ).require("dry_run_write_file")
+            registry = self.agent_tasks.ToolRegistry(
+                [
+                    type(base_spec)(
+                        name=base_spec.name,
+                        description=base_spec.description,
+                        risk_level=base_spec.risk_level,
+                        required_arguments=base_spec.required_arguments,
+                        optional_arguments=base_spec.optional_arguments,
+                        executor=base_spec.executor,
+                        enabled=base_spec.enabled,
+                        llm_visible=base_spec.llm_visible,
+                        requires_approval=base_spec.requires_approval,
+                        approval_resume_enabled=False,
+                    )
+                ]
+            )
+
+            approval, resumed, resume_text = self.agent_tasks.resume_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_registry=registry,
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIsNotNone(approval)
+        self.assertFalse(resumed)
+        self.assertIn("not enabled for approval resume", resume_text)
+        self.assertEqual(
+            [event.kind for event in events],
+            ["created", "approval_requested", "approval_approved"],
+        )
+
+    def test_agent_approval_resume_executes_registered_owner_write_tool(self):
+        temp_dir, patcher = self.temp_database()
+        calls = []
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="clear image cache after approval",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"clear_image_cache"}',
+                risk_level="write_local",
+                reason="local writes require approval",
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            base_spec = self.agent_tasks.create_default_main_agent_tool_registry(
+                include_dry_run_tools=True
+            ).require("dry_run_write_file")
+
+            def execute_owner_write(arguments, context):
+                calls.append(
+                    (
+                        arguments["command"],
+                        context.metadata["approval_id"],
+                        context.metadata["task_id"],
+                    )
+                )
+                return self.agent_tasks.ToolResult(
+                    text="已清空图片缓存：3 条。",
+                    metadata={"command": arguments["command"]},
+                )
+
+            registry = self.agent_tasks.ToolRegistry(
+                [
+                    type(base_spec)(
+                        name="owner_write_command",
+                        description="Run approved owner write command.",
+                        risk_level=base_spec.risk_level,
+                        required_arguments=("command",),
+                        executor=execute_owner_write,
+                        enabled=True,
+                        llm_visible=True,
+                        requires_approval=True,
+                        approval_resume_enabled=True,
+                    )
+                ]
+            )
+
+            approval, resumed, resume_text = self.agent_tasks.resume_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_registry=registry,
+            )
+            task = self.agent_tasks.get_agent_task(task_id)
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIsNotNone(approval)
+        self.assertTrue(resumed)
+        self.assertEqual(calls, [("clear_image_cache", approval_id, task_id)])
+        self.assertIn("Approval resume completed", resume_text)
+        self.assertIn("已清空图片缓存：3 条。", resume_text)
+        self.assertNotIn("Side effect: none", resume_text)
+        self.assertIsNotNone(task)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "created",
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            ],
+        )
 
     def test_agent_task_command_parser(self):
         parse = self.agent_tasks.parse_agent_task_command
