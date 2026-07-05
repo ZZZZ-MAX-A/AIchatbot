@@ -13,6 +13,7 @@ SHADOW_CHAT_STAGES: tuple[str, ...] = (
     "result",
     "finalizing",
 )
+KNOWN_PRODUCTION_ROUTES = frozenset({"legacy_chat_runtime", "root_graph_chat"})
 PROMPT_READY_STAGES = frozenset({"prompt", "result", "finalizing"})
 RESULT_READY_STAGES = frozenset({"result", "finalizing"})
 
@@ -103,7 +104,7 @@ def validate_shadow_chat_snapshot(snapshot: ShadowChatSnapshot) -> ShadowChatVal
         errors.append("unknown shadow stage")
     if not snapshot.production_route:
         errors.append("missing production route")
-    elif snapshot.production_route != "legacy_chat_runtime":
+    elif snapshot.production_route not in KNOWN_PRODUCTION_ROUTES:
         warnings.append("unexpected production route")
     if not snapshot.session_key:
         errors.append("missing session key")

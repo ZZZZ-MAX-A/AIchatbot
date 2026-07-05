@@ -140,7 +140,14 @@ from .retrieval import (
     MemoryRetrievalNode,
     MemoryRetrievalState,
 )
-from .root import ROOT_NODE_SEQUENCE, RouteDecision, route_from_explicit_intent
+from .root import (
+    ROOT_NODE_SEQUENCE,
+    RootPolicyDecision,
+    RouteDecision,
+    evaluate_hard_policy,
+    route_from_explicit_intent,
+    runtime_context_level_for_intent,
+)
 from .runtime import AgentRuntime, RootGraphRunner, RuntimeResponse
 from .shadow import (
     ShadowChatSnapshot,
@@ -250,6 +257,7 @@ __all__ = [
     "NotificationState",
     "PersistedTurn",
     "ROOT_NODE_SEQUENCE",
+    "RootPolicyDecision",
     "RouteDecision",
     "RootGraphRunner",
     "RuntimeIntent",
@@ -301,6 +309,7 @@ __all__ = [
     "create_tool_policy_checker",
     "create_tool_registry_executor",
     "create_tool_summary_renderer",
+    "evaluate_hard_policy",
     "extract_main_llm_text",
     "format_main_llm_failure_reply",
     "format_concise_dev_context_result",
@@ -311,6 +320,7 @@ __all__ = [
     "dev_context_tool_action_json",
     "parse_main_agent_action_request",
     "route_from_explicit_intent",
+    "runtime_context_level_for_intent",
     "runtime_state_from_main_agent_command",
     "runtime_state_from_chat_request",
     "shadow_chat_snapshot_from_state",

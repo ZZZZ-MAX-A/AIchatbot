@@ -60,6 +60,7 @@ OWNER_READ_COMMANDS: tuple[str, ...] = (
     "recent_errors",
     "image_cache_status",
     "memory_status",
+    "memory_retrieval",
     "rag_status",
     "summary_status",
     "view_summaries",
@@ -75,6 +76,7 @@ OWNER_READ_COMMANDS: tuple[str, ...] = (
     "model_config_status",
     "rag_index_detail",
     "main_agent_observations",
+    "root_graph_observations",
 )
 AGENT_TASK_READ_COMMANDS: tuple[str, ...] = (
     "list_tasks",
@@ -92,6 +94,25 @@ AGENT_TASK_COMMANDS: tuple[str, ...] = (
 OWNER_WRITE_COMMANDS: tuple[str, ...] = (
     "clear_image_cache",
     "clear_error_log",
+    "select_persona",
+    "add_fact_memory",
+    "add_preference_memory",
+    "clear_session_summaries",
+    "delete_session_summary",
+    "allow_group",
+    "deny_group",
+    "allow_private",
+    "deny_private",
+    "block_user",
+    "unblock_user",
+)
+ACCESS_WRITE_COMMANDS: tuple[str, ...] = (
+    "allow_group",
+    "deny_group",
+    "allow_private",
+    "deny_private",
+    "block_user",
+    "unblock_user",
 )
 
 
@@ -358,11 +379,15 @@ def create_read_only_main_agent_tool_registry(
                     "Request approval for a side-effecting owner QQ management command. "
                     "Use arguments.command as one of: "
                     f"{', '.join(OWNER_WRITE_COMMANDS)}. "
+                    "select_persona also requires arguments.target. "
+                    "add_fact_memory and add_preference_memory also require arguments.content. "
+                    "delete_session_summary also requires arguments.summary_id. "
+                    "access-control commands also require numeric arguments.target. "
                     "This tool must stop for owner approval before execution."
                 ),
                 risk_level=RiskLevel.WRITE_LOCAL,
                 required_arguments=("command",),
-                optional_arguments=("query",),
+                optional_arguments=("query", "target", "content", "summary_id"),
                 executor=create_owner_write_command_executor(execute_owner_write_command),
                 enabled=True,
                 llm_visible=True,
@@ -435,7 +460,31 @@ def create_owner_write_command_executor(
             raise ToolExecutionError(
                 f"unsupported owner write command: {command}; allowed: {allowed}"
             )
-        return execute_owner_write_command(command, context)
+        if command == "select_persona" and not str(arguments.get("target") or "").strip():
+            raise ToolExecutionError("select_persona requires arguments.target")
+        if command in {"add_fact_memory", "add_preference_memory"} and not str(
+            arguments.get("content") or ""
+        ).strip():
+            raise ToolExecutionError(f"{command} requires arguments.content")
+        if command == "delete_session_summary":
+            summary_id = str(arguments.get("summary_id") or "").strip()
+            if not summary_id.isdigit():
+                raise ToolExecutionError(
+                    "delete_session_summary requires numeric arguments.summary_id"
+                )
+        if command in ACCESS_WRITE_COMMANDS:
+            target = str(arguments.get("target") or "").strip()
+            if not target.isdigit():
+                raise ToolExecutionError(f"{command} requires numeric arguments.target")
+        metadata = dict(context.metadata)
+        metadata["tool_arguments"] = dict(arguments)
+        next_context = ToolContext(
+            query=context.query,
+            is_owner=context.is_owner,
+            is_group=context.is_group,
+            metadata=metadata,
+        )
+        return execute_owner_write_command(command, next_context)
 
     return execute_owner_write
 
@@ -486,18 +535,29 @@ def plan_semantic_read_tool_request(
     if tool_registry.get(OWNER_READ_COMMAND_TOOL_NAME) is not None:
         command = classify_owner_read_command(state.query)
         if command:
+            tool_query = (
+                extract_owner_memory_retrieval_query(state.query)
+                if command == "memory_retrieval"
+                else state.query
+            )
             state.raw_action_request = owner_read_command_action_json(
                 command,
-                query=state.query,
+                query=tool_query,
                 reason="semantic owner read-only QQ management command",
             )
             return True
     if tool_registry.get(OWNER_WRITE_COMMAND_TOOL_NAME) is not None:
         command = classify_owner_write_command(state.query)
         if command:
+            target = extract_owner_write_command_target(command, state.query)
+            content = extract_owner_write_command_content(command, state.query)
+            summary_id = extract_owner_write_command_summary_id(command, state.query)
             state.raw_action_request = owner_write_command_action_json(
                 command,
                 query=state.query,
+                target=target,
+                content=content,
+                summary_id=summary_id,
                 reason="semantic owner side-effect QQ management command",
             )
             return True
@@ -574,11 +634,20 @@ def owner_write_command_action_json(
     command: str,
     *,
     query: str = "",
+    target: str = "",
+    content: str = "",
+    summary_id: str = "",
     reason: str = "",
 ) -> str:
     arguments = {"command": command}
     if query.strip():
         arguments["query"] = query.strip()
+    if target.strip():
+        arguments["target"] = target.strip()
+    if content.strip():
+        arguments["content"] = content.strip()
+    if summary_id.strip():
+        arguments["summary_id"] = summary_id.strip()
     return json.dumps(
         {
             "action": MainAgentAction.TOOL_REQUEST.value,
@@ -603,6 +672,8 @@ def classify_owner_read_command(query: str) -> str:
     compact = re.sub(r"\s+", "", normalized)
     if not compact:
         return ""
+    if is_owner_memory_retrieval_query(query, compact):
+        return "memory_retrieval"
     if any(
         marker in compact
         for marker in (
@@ -610,6 +681,11 @@ def classify_owner_read_command(query: str) -> str:
             "删除",
             "加入",
             "移出",
+            "允许",
+            "拉黑",
+            "解除拉黑",
+            "放进",
+            "踢出",
             "选择",
             "切换",
             "启用",
@@ -693,6 +769,33 @@ def classify_owner_read_command(query: str) -> str:
     if any(
         marker in compact
         for marker in (
+            "rootgraph观测",
+            "rootgraph最近观测",
+            "rootgraph最新观测",
+            "rootgraph状态",
+            "rootgraph最近状态",
+            "rootgraph最新状态",
+            "rootgraph路由",
+            "rootgraph最近路由",
+            "rootgraph最新路由",
+            "rootgraph提交",
+            "rootgraph最近提交",
+            "rootgraph最新提交",
+            "rootgraphcommit",
+            "rootgraphruntime",
+            "普通聊天观测",
+            "聊天观测",
+            "聊天路由",
+            "聊天提交",
+            "chatruntime",
+            "chatcommit",
+            "chatroute",
+        )
+    ):
+        return "root_graph_observations"
+    if any(
+        marker in compact
+        for marker in (
             "agent观测",
             "agent失败",
             "agent错误",
@@ -716,6 +819,64 @@ def classify_owner_read_command(query: str) -> str:
     return ""
 
 
+def is_owner_memory_retrieval_query(query: str, compact: str) -> bool:
+    if any(
+        marker in compact
+        for marker in (
+            "记忆检索",
+            "检索记忆",
+            "搜索记忆",
+            "查找记忆",
+            "memoryretrieval",
+            "memorysearch",
+        )
+    ):
+        return True
+    if any(
+        marker in compact
+        for marker in ("记忆里有没有", "记忆中有没有", "记忆里是否有", "记忆中是否有")
+    ):
+        return True
+    return bool(
+        re.search(
+            r"^(?:帮我)?(?:查|找|检索|搜索)(?:一下)?(?:长期)?记忆(?:里|中)?[：:，,\s]+.+",
+            query.strip(),
+            re.IGNORECASE,
+        )
+    )
+
+
+def extract_owner_memory_retrieval_query(query: str) -> str:
+    markers = (
+        "帮我查一下记忆里有没有",
+        "帮我查一下记忆中有没有",
+        "查一下记忆里有没有",
+        "查一下记忆中有没有",
+        "帮我检索记忆",
+        "帮我搜索记忆",
+        "帮我查找记忆",
+        "帮我查记忆",
+        "记忆检索",
+        "检索记忆",
+        "搜索记忆",
+        "查找记忆",
+        "查记忆",
+        "memory retrieval",
+        "memory search",
+    )
+    goal = extract_semantic_goal_after_markers(query, markers)
+    if goal is not None:
+        return goal
+    match = re.search(
+        r"(?:记忆里|记忆中|长期记忆里|长期记忆中)(?:有没有|是否有|有无)(.+)",
+        query.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        return _strip_wrapping_punctuation(match.group(1))
+    return query.strip()
+
+
 def classify_owner_write_command(query: str) -> str:
     normalized = query.strip().lower()
     compact = re.sub(r"\s+", "", normalized)
@@ -725,6 +886,301 @@ def classify_owner_write_command(query: str) -> str:
         return "clear_image_cache"
     if any(marker in compact for marker in ("清空错误日志", "清理错误日志", "清除错误日志", "clearerrorlog")):
         return "clear_error_log"
+    if any(
+        marker in compact
+        for marker in (
+            "清空当前摘要",
+            "清除当前摘要",
+            "清理当前摘要",
+            "清空当前对话摘要",
+            "清空当前会话摘要",
+            "clearsessionsummaries",
+            "clearcurrentsummaries",
+        )
+    ):
+        return "clear_session_summaries"
+    if extract_owner_delete_summary_id(query):
+        return "delete_session_summary"
+    access_command = classify_owner_access_write_command(query)
+    if access_command:
+        return access_command
+    if extract_owner_fact_memory_content(query):
+        return "add_fact_memory"
+    if extract_owner_preference_memory_content(query):
+        return "add_preference_memory"
+    if extract_owner_persona_target(query):
+        return "select_persona"
+    return ""
+
+
+def extract_owner_write_command_target(command: str, query: str) -> str:
+    if command == "select_persona":
+        return extract_owner_persona_target(query) or ""
+    if command in ACCESS_WRITE_COMMANDS:
+        return extract_owner_access_target(command, query) or ""
+    return ""
+
+
+def extract_owner_write_command_content(command: str, query: str) -> str:
+    if command == "add_fact_memory":
+        return extract_owner_fact_memory_content(query) or ""
+    if command == "add_preference_memory":
+        return extract_owner_preference_memory_content(query) or ""
+    return ""
+
+
+def extract_owner_write_command_summary_id(command: str, query: str) -> str:
+    if command == "delete_session_summary":
+        return extract_owner_delete_summary_id(query) or ""
+    return ""
+
+
+def extract_owner_delete_summary_id(query: str) -> str:
+    stripped = query.strip()
+    if not stripped:
+        return ""
+    markers = (
+        "帮我删除当前会话摘要",
+        "帮我删除当前摘要",
+        "帮我删除摘要",
+        "帮我删掉当前会话摘要",
+        "帮我删掉当前摘要",
+        "帮我删掉摘要",
+        "删除当前会话摘要",
+        "删除当前摘要",
+        "删除摘要",
+        "删掉当前会话摘要",
+        "删掉当前摘要",
+        "删掉摘要",
+        "delete session summary",
+        "delete summary",
+        "remove session summary",
+        "remove summary",
+    )
+    goal = extract_semantic_goal_after_markers(stripped, markers)
+    if goal is not None:
+        match = re.search(r"(?:id\s*)?#?\s*(\d+)\b", goal, re.IGNORECASE)
+        return match.group(1) if match else ""
+    match = re.search(
+        r"^(?:帮我)?(?:把)?(?:当前会话)?摘要\s*(?:id\s*)?#?\s*(\d+)\s*(?:删除|删掉)$",
+        stripped,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    return ""
+
+
+def classify_owner_access_write_command(query: str) -> str:
+    for command in ACCESS_WRITE_COMMANDS:
+        if extract_owner_access_target(command, query):
+            return command
+    return ""
+
+
+def extract_owner_access_target(command: str, query: str) -> str:
+    markers_by_command = {
+        "allow_group": (
+            "帮我加入群白名单",
+            "帮我添加群白名单",
+            "帮我允许群",
+            "帮我启用群",
+            "加入群白名单",
+            "添加群白名单",
+            "允许群",
+            "启用群",
+            "allow group",
+            "enable group",
+        ),
+        "deny_group": (
+            "帮我移出群白名单",
+            "帮我删除群白名单",
+            "帮我禁用群",
+            "移出群白名单",
+            "删除群白名单",
+            "禁用群",
+            "deny group",
+            "disable group",
+            "remove group whitelist",
+        ),
+        "allow_private": (
+            "帮我加入私聊白名单",
+            "帮我添加私聊白名单",
+            "帮我允许私聊",
+            "加入私聊白名单",
+            "添加私聊白名单",
+            "允许私聊",
+            "allow private",
+            "allow user",
+        ),
+        "deny_private": (
+            "帮我移出私聊白名单",
+            "帮我删除私聊白名单",
+            "帮我禁用私聊",
+            "移出私聊白名单",
+            "删除私聊白名单",
+            "禁用私聊",
+            "deny private",
+            "remove private whitelist",
+        ),
+        "block_user": (
+            "帮我加入黑名单",
+            "帮我添加黑名单",
+            "帮我拉黑用户",
+            "帮我拉黑",
+            "加入黑名单",
+            "添加黑名单",
+            "拉黑用户",
+            "拉黑",
+            "block user",
+            "block",
+        ),
+        "unblock_user": (
+            "帮我移出黑名单",
+            "帮我删除黑名单",
+            "帮我解除拉黑",
+            "帮我取消拉黑",
+            "移出黑名单",
+            "删除黑名单",
+            "解除拉黑",
+            "取消拉黑",
+            "unblock user",
+            "unblock",
+        ),
+    }
+    markers = markers_by_command.get(command, ())
+    goal = extract_semantic_goal_after_markers(query, markers)
+    if goal is not None:
+        return extract_numeric_target(goal)
+
+    stripped = query.strip()
+    patterns_by_command = {
+        "allow_group": (
+            r"^(?:帮我)?(?:把|将)?(?:群|群号|group)?\s*(\d+)\s*(?:加入|添加到|加入到|放进|拉进|允许|启用)(?:群)?白名单$",
+            r"^(?:帮我)?(?:把|将)?(?:群|群号|group)?\s*(\d+)\s*(?:允许|启用)$",
+        ),
+        "deny_group": (
+            r"^(?:帮我)?(?:把|将)?(?:群|群号|group)?\s*(\d+)\s*(?:移出|删除)(?:群)?白名单$",
+            r"^(?:帮我)?(?:把|将)?(?:群|群号|group)?\s*(\d+)\s*(?:禁用|停用)$",
+        ),
+        "allow_private": (
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:加入|添加到|加入到|放进|拉进|允许)(?:私聊)?白名单$",
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:允许|启用)私聊$",
+        ),
+        "deny_private": (
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:移出|删除)(?:私聊)?白名单$",
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:禁用|停用)私聊$",
+        ),
+        "block_user": (
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:加入|添加到|加入到|放进)?黑名单$",
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:拉黑|屏蔽)$",
+        ),
+        "unblock_user": (
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:移出|删除)黑名单$",
+            r"^(?:帮我)?(?:把|将)?(?:用户|qq|qq号|user)?\s*(\d+)\s*(?:解除拉黑|取消拉黑|取消屏蔽)$",
+        ),
+    }
+    for pattern in patterns_by_command.get(command, ()):
+        match = re.search(pattern, stripped, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def extract_numeric_target(value: str) -> str:
+    match = re.search(r"(?:id|qq|qq号|群|群号|用户|user|group|#)?\s*[:：#]?\s*(\d+)", value, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def extract_owner_persona_target(query: str) -> str:
+    markers = (
+        "帮我选择角色卡",
+        "帮我切换角色卡",
+        "帮我切到角色卡",
+        "帮我换成角色卡",
+        "帮我使用角色卡",
+        "帮我启用角色卡",
+        "选择角色卡",
+        "切换角色卡",
+        "切到角色卡",
+        "换成角色卡",
+        "使用角色卡",
+        "启用角色卡",
+        "select persona",
+        "select role card",
+        "switch persona",
+        "switch role card",
+        "use persona",
+        "use role card",
+    )
+    goal = extract_semantic_goal_after_markers(query, markers)
+    if goal is not None:
+        return goal
+    match = re.search(
+        r"^(?:帮我)?(?:把)?角色卡(?:切换|切|换|选择|设置)(?:成|为|到)?(.+)$",
+        query.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        return _strip_wrapping_punctuation(match.group(1))
+    return ""
+
+
+def extract_owner_fact_memory_content(query: str) -> str:
+    markers = (
+        "帮我添加事实记忆",
+        "帮我新增事实记忆",
+        "帮我记录事实记忆",
+        "帮我记一条事实记忆",
+        "帮我记一个事实记忆",
+        "添加事实记忆",
+        "新增事实记忆",
+        "记录事实记忆",
+        "记一条事实记忆",
+        "记一个事实记忆",
+        "添加事实摘要",
+        "add fact memory",
+        "add fact",
+    )
+    goal = extract_semantic_goal_after_markers(query, markers)
+    if goal is not None:
+        return goal
+    match = re.search(
+        r"^(?:帮我)?把(.+?)(?:添加到|加入|记到|写入)(?:事实记忆|长期事实记忆)$",
+        query.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        return _strip_wrapping_punctuation(match.group(1))
+    return ""
+
+
+def extract_owner_preference_memory_content(query: str) -> str:
+    markers = (
+        "帮我添加偏好记忆",
+        "帮我新增偏好记忆",
+        "帮我记录偏好记忆",
+        "帮我记一条偏好记忆",
+        "帮我记一个偏好记忆",
+        "添加偏好记忆",
+        "新增偏好记忆",
+        "记录偏好记忆",
+        "记一条偏好记忆",
+        "记一个偏好记忆",
+        "添加偏好摘要",
+        "add preference memory",
+        "add preference",
+    )
+    goal = extract_semantic_goal_after_markers(query, markers)
+    if goal is not None:
+        return goal
+    match = re.search(
+        r"^(?:帮我)?把(.+?)(?:添加到|加入|记到|写入)(?:偏好记忆|长期偏好记忆)$",
+        query.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        return _strip_wrapping_punctuation(match.group(1))
     return ""
 
 
