@@ -57,6 +57,10 @@ class RootGraphRunnerTests(unittest.TestCase):
         )
         self.assertEqual(state.artifacts["root_graph"]["route"], "chat")
         self.assertTrue(state.artifacts["root_graph"]["dispatched"])
+        self.assertEqual(state.artifacts["policy"]["decision"], "allow")
+        self.assertEqual(state.artifacts["context"]["context_level"], "chat_context")
+        self.assertTrue(state.artifacts["context"]["memory_rag_enabled"])
+        self.assertTrue(state.artifacts["commit"]["handler_dispatched"])
 
     def test_root_graph_runner_ignores_missing_intent_without_dispatching(self):
         state = self.make_runtime_state(intent=None)
@@ -72,6 +76,210 @@ class RootGraphRunnerTests(unittest.TestCase):
         self.assertEqual(response.text, "")
         self.assertEqual(state.artifacts["root_graph"]["route"], "ignore")
         self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+        self.assertEqual(state.artifacts["policy"]["decision"], "ignore")
+        self.assertFalse(state.artifacts["policy"]["allow_dispatch"])
+
+    def test_root_graph_runner_dispatches_main_agent_for_owner_private(self):
+        calls = []
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.MAIN_AGENT)
+
+        async def main_agent_handler(runtime_state):
+            calls.append(runtime_state)
+            return self.runtime.RuntimeResponse("main agent reply")
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.MAIN_AGENT: main_agent_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertEqual(response.text, "main agent reply")
+        self.assertTrue(response.should_reply)
+        self.assertEqual(calls, [state])
+        self.assertEqual(state.artifacts["root_graph"]["route"], "main_agent")
+        self.assertTrue(state.artifacts["root_graph"]["dispatched"])
+        self.assertEqual(state.artifacts["context"]["context_level"], "minimal_context")
+        self.assertEqual(
+            state.artifacts["context"]["project_doc_rag_scope"],
+            "dev_context_tool_only",
+        )
+
+    def test_root_graph_runner_denies_non_owner_main_agent_before_handler(self):
+        calls = []
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.MAIN_AGENT)
+        state.actor = self.state.ActorContext(
+            user_id="20002",
+            role=self.state.ActorRole.USER,
+        )
+
+        async def main_agent_handler(_runtime_state):
+            calls.append("called")
+            return self.runtime.RuntimeResponse("unused")
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.MAIN_AGENT: main_agent_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertTrue(response.should_reply)
+        self.assertIn("owner access is required", response.text)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.error, "permission_denied")
+        self.assertEqual(state.artifacts["policy"]["decision"], "denied")
+        self.assertEqual(state.artifacts["root_graph"]["route"], "ignore")
+        self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+
+    def test_root_graph_runner_denies_chat_from_access_policy_before_handler(self):
+        calls = []
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+        state.artifacts["chat_access_policy"] = {
+            "allow_dispatch": False,
+            "decision": "rate_limited",
+            "reason": "chat rate limit is active",
+            "should_reply": True,
+            "response_text": "slow down",
+            "error": "rate_limited",
+        }
+
+        async def chat_handler(_runtime_state):
+            calls.append("called")
+            return self.runtime.RuntimeResponse("unused")
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertEqual(response.text, "slow down")
+        self.assertTrue(response.should_reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(state.error, "rate_limited")
+        self.assertEqual(state.artifacts["policy"]["decision"], "rate_limited")
+        self.assertEqual(state.artifacts["root_graph"]["route"], "ignore")
+        self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+
+    def test_root_graph_runner_silently_denies_chat_from_access_policy(self):
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+        state.artifacts["chat_access_policy"] = {
+            "allow_dispatch": False,
+            "decision": "group_denied",
+            "reason": "group chat is not allowed",
+            "should_reply": False,
+            "response_text": "",
+            "error": "permission_denied",
+        }
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={
+                self.state.RuntimeIntent.CHAT: lambda _: self.runtime.RuntimeResponse("unused")
+            }
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertEqual(response.text, "")
+        self.assertFalse(response.should_reply)
+        self.assertEqual(state.error, "permission_denied")
+        self.assertEqual(state.artifacts["policy"]["decision"], "group_denied")
+        self.assertFalse(state.artifacts["policy"]["allow_dispatch"])
+        self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+
+    def test_root_graph_runner_catches_handler_error_and_records_artifact(self):
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+
+        async def chat_handler(_runtime_state):
+            raise RuntimeError("boom")
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertTrue(response.should_reply)
+        self.assertIn("RuntimeError: boom", response.text)
+        self.assertEqual(state.error, "RuntimeError: boom")
+        self.assertEqual(state.artifacts["root_graph"]["error"], "RuntimeError: boom")
+        self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+
+    def test_root_graph_runner_can_passthrough_control_exceptions(self):
+        class ControlException(Exception):
+            pass
+
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+
+        async def chat_handler(_runtime_state):
+            raise ControlException("finish")
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler},
+            passthrough_exceptions=(ControlException,),
+        )
+
+        with self.assertRaises(ControlException):
+            asyncio.run(runner.run(state))
+
+    def test_root_graph_runner_keeps_side_effectful_chat_response_non_rendering(self):
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+
+        async def chat_handler(runtime_state):
+            runtime_state.response = "already sent"
+            runtime_state.artifacts["chat_graph"] = {"status": "complete"}
+            runtime_state.artifacts["chat_commit"] = {
+                "qq_reply_sent": True,
+                "persisted_turn_saved": True,
+                "trial_updated": True,
+                "compression_scheduled": True,
+                "tts_candidate_updated": True,
+            }
+            runtime_state.artifacts["chat_runtime"] = {"stage": "dispatched"}
+            return self.runtime.RuntimeResponse("already sent", should_reply=False)
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertEqual(response.text, "already sent")
+        self.assertFalse(response.should_reply)
+        self.assertEqual(state.response, "already sent")
+        self.assertTrue(state.artifacts["root_graph"]["dispatched"])
+        self.assertTrue(state.artifacts["commit"]["chat_graph_completed"])
+        self.assertFalse(state.artifacts["commit"]["should_reply"])
+        self.assertTrue(state.artifacts["commit"]["chat_reply_sent"])
+        self.assertTrue(state.artifacts["commit"]["chat_persisted"])
+        self.assertTrue(state.artifacts["commit"]["chat_trial_updated"])
+        self.assertTrue(state.artifacts["commit"]["chat_compression_scheduled"])
+        self.assertTrue(state.artifacts["commit"]["chat_tts_candidate_updated"])
+        self.assertEqual(state.artifacts["commit"]["chat_runtime_stage"], "dispatched")
+
+    def test_root_graph_commit_marks_deferred_chat_image_context(self):
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+
+        async def chat_handler(runtime_state):
+            runtime_state.artifacts["chat_runtime"] = {
+                "stage": "image_context_deferred"
+            }
+            runtime_state.artifacts["chat_commit"] = {
+                "image_context_deferred": True
+            }
+            return self.runtime.RuntimeResponse("", should_reply=False)
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertFalse(response.should_reply)
+        self.assertTrue(state.artifacts["commit"]["chat_image_context_deferred"])
+        self.assertEqual(
+            state.artifacts["commit"]["chat_runtime_stage"],
+            "image_context_deferred",
+        )
 
     def test_agent_runtime_uses_root_runner_and_preserves_existing_response_fallback(self):
         state = self.make_runtime_state(

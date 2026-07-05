@@ -143,12 +143,53 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(execution.result.requested_tool, "owner_read_command")
         self.assertEqual(calls, ["recent_errors"])
 
+    def test_semantic_memory_retrieval_owner_read_extracts_query(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic memory retrieval")
+
+        async def execute_owner_read_command(command, context):
+            arguments = context.metadata["tool_arguments"]
+            calls.append((command, arguments.get("query"), context.query))
+            return f"记忆检索结果：{arguments.get('query')}"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="记忆检索 Route B 审批流",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "owner_read_command")
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {"command": "memory_retrieval", "query": "Route B 审批流"},
+        )
+        self.assertEqual(
+            calls,
+            [("memory_retrieval", "Route B 审批流", "记忆检索 Route B 审批流")],
+        )
+        self.assertIn("记忆检索结果：Route B 审批流", execution.result.response_text)
+
     def test_owner_read_tool_is_visible_and_validates_command_in_executor(self):
+        calls = []
+
         async def retrieve_dev_context(_query, _is_owner):
             return "dev context"
 
-        async def execute_owner_read_command(_command, _context):
-            return "should not reach unsupported command"
+        async def execute_owner_read_command(command, _context):
+            calls.append(command)
+            return f"read:{command}"
 
         registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
             retrieve_dev_context,
@@ -163,6 +204,16 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             registry.require("owner_read_command").risk_level,
             self.policy_risk.RiskLevel.READ_LOCAL,
         )
+
+        result = asyncio.run(
+            registry.execute(
+                "owner_read_command",
+                {"command": "root_graph_observations"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "read:root_graph_observations")
+        self.assertEqual(calls, ["root_graph_observations"])
 
         with self.assertRaises(self.tool_registry.ToolExecutionError):
             asyncio.run(
@@ -315,6 +366,11 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "当前主模型是什么": "model_config_status",
             "看看项目文档索引": "rag_index_detail",
             "main agent 最近失败": "main_agent_observations",
+            "RootGraph 最近观测": "root_graph_observations",
+            "看看普通聊天路由": "root_graph_observations",
+            "chat commit 状态": "root_graph_observations",
+            "记忆检索 Route B 审批流": "memory_retrieval",
+            "查一下记忆里有没有审批流": "memory_retrieval",
         }
 
         for query, expected in cases.items():
@@ -329,6 +385,14 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertEqual(
             self.main_agent_bridge.classify_owner_read_command("帮我选择角色卡"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_read_command("重建记忆索引"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_read_command("帮我添加事实记忆"),
             "",
         )
 
@@ -489,6 +553,374 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertIn("Agent 请求审批 #42", execution.result.response_text)
 
+    def test_semantic_select_persona_requires_approval_and_keeps_target(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic persona switch")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("select_persona should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            arguments = state.metadata["tool_arguments"]
+            approvals.append(
+                (
+                    state.requested_tool,
+                    arguments["command"],
+                    arguments["target"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #43\n/agent 确认 43\n/agent 拒绝 43"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我选择角色卡 moyan",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {
+                "command": "select_persona",
+                "query": "帮我选择角色卡 moyan",
+                "target": "moyan",
+            },
+        )
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "select_persona",
+                    "moyan",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #43", execution.result.response_text)
+
+    def test_semantic_add_memory_requires_approval_and_keeps_content(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic memory write")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("memory writes should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            arguments = state.metadata["tool_arguments"]
+            approvals.append(
+                (
+                    state.requested_tool,
+                    arguments["command"],
+                    arguments["content"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #44\n/agent 确认 44\n/agent 拒绝 44"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我添加事实记忆 主人喜欢先看结论",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {
+                "command": "add_fact_memory",
+                "query": "帮我添加事实记忆 主人喜欢先看结论",
+                "content": "主人喜欢先看结论",
+            },
+        )
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "add_fact_memory",
+                    "主人喜欢先看结论",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #44", execution.result.response_text)
+
+    def test_semantic_clear_session_summaries_requires_approval(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic summary clear")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("clear_session_summaries should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            arguments = state.metadata["tool_arguments"]
+            approvals.append(
+                (
+                    state.requested_tool,
+                    arguments["command"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #45\n/agent 确认 45\n/agent 拒绝 45"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我清空当前摘要",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {
+                "command": "clear_session_summaries",
+                "query": "帮我清空当前摘要",
+            },
+        )
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "clear_session_summaries",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #45", execution.result.response_text)
+
+    def test_semantic_delete_session_summary_requires_approval_and_keeps_id(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic summary delete")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("delete_session_summary should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            arguments = state.metadata["tool_arguments"]
+            approvals.append(
+                (
+                    state.requested_tool,
+                    arguments["command"],
+                    arguments["summary_id"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #46\n/agent 确认 46\n/agent 拒绝 46"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我删除摘要 123",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {
+                "command": "delete_session_summary",
+                "query": "帮我删除摘要 123",
+                "summary_id": "123",
+            },
+        )
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "delete_session_summary",
+                    "123",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #46", execution.result.response_text)
+
+    def test_semantic_access_list_write_requires_approval_and_keeps_target(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for semantic access writes")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("access writes should not execute before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            arguments = state.metadata["tool_arguments"]
+            approvals.append(
+                (
+                    state.requested_tool,
+                    arguments["command"],
+                    arguments["target"],
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #47\n/agent 确认 47\n/agent 拒绝 47"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我把群 123456 加入群白名单",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {
+                "command": "allow_group",
+                "query": "帮我把群 123456 加入群白名单",
+                "target": "123456",
+            },
+        )
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    "allow_group",
+                    "123456",
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+        self.assertIn("Agent 请求审批 #47", execution.result.response_text)
+
+    def test_owner_write_executor_passes_full_arguments_to_resume_tool(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            return "dev context"
+
+        def execute_owner_write_command(command, context):
+            calls.append((command, dict(context.metadata["tool_arguments"])))
+            return "已选择角色卡：moyan，墨言"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+        )
+
+        result = asyncio.run(
+            registry.execute(
+                "owner_write_command",
+                {
+                    "command": "select_persona",
+                    "query": "帮我选择角色卡 moyan",
+                    "target": "moyan",
+                },
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+
+        self.assertEqual(result.text, "已选择角色卡：moyan，墨言")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "select_persona",
+                    {
+                        "command": "select_persona",
+                        "query": "帮我选择角色卡 moyan",
+                        "target": "moyan",
+                    },
+                )
+            ],
+        )
+
     def test_owner_write_classifier_only_allows_first_safe_batch(self):
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我清空图片缓存"),
@@ -499,11 +931,118 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "clear_error_log",
         )
         self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我选择角色卡 moyan"),
+            "select_persona",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我添加事实记忆 主人喜欢先看结论"),
+            "add_fact_memory",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我添加偏好记忆 技术讨论先给结论"),
+            "add_preference_memory",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我清空当前摘要"),
+            "clear_session_summaries",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我删除摘要 123"),
+            "delete_session_summary",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把群 123456 加入群白名单"),
+            "allow_group",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把群 123456 移出群白名单"),
+            "deny_group",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把用户 10001 加入私聊白名单"),
+            "allow_private",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把用户 10001 移出私聊白名单"),
+            "deny_private",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把用户 10002 加入黑名单"),
+            "block_user",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我解除拉黑 10002"),
+            "unblock_user",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_persona_target("帮我选择角色卡 moyan"),
+            "moyan",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_fact_memory_content(
+                "帮我添加事实记忆 主人喜欢先看结论"
+            ),
+            "主人喜欢先看结论",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_preference_memory_content(
+                "帮我添加偏好记忆 技术讨论先给结论"
+            ),
+            "技术讨论先给结论",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_delete_summary_id("帮我删除摘要 123"),
+            "123",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_delete_summary_id("把当前会话摘要 #456 删除"),
+            "456",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_access_target(
+                "allow_group",
+                "帮我把群 123456 加入群白名单",
+            ),
+            "123456",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_access_target("unblock_user", "解除拉黑 10002"),
+            "10002",
+        )
+        self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我清空全部上下文"),
             "",
         )
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我加入群白名单"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我启用本群"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我把张三加入黑名单"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我选择角色卡"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我添加事实记忆"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我清空全部摘要"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我删除摘要"),
+            "",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我删除摘要 最新"),
             "",
         )
 
@@ -1114,10 +1653,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertTrue(response.should_reply)
         self.assertIn("owner access is required", response.text)
         self.assertEqual(runtime_state.error, "permission_denied")
-        self.assertEqual(
-            runtime_state.artifacts["main_agent_graph"]["node_trace"],
-            (self.main_agent.MainAgentNode.VALIDATE_AGENT_REQUEST.value,),
-        )
+        self.assertNotIn("main_agent_graph", runtime_state.artifacts)
+        self.assertEqual(runtime_state.artifacts["policy"]["decision"], "denied")
+        self.assertEqual(runtime_state.artifacts["root_graph"]["route"], "ignore")
+        self.assertFalse(runtime_state.artifacts["root_graph"]["dispatched"])
 
 
 if __name__ == "__main__":

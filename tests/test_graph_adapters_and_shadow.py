@@ -366,6 +366,15 @@ class ShadowSnapshotTests(unittest.TestCase):
         self.assertEqual(validation.errors, ())
         self.assertEqual(validation.warnings, ())
 
+    def test_root_graph_chat_route_snapshot_is_valid(self):
+        snapshot = self.make_snapshot(production_route="root_graph_chat")
+
+        validation = self.shadow.validate_shadow_chat_snapshot(snapshot)
+
+        self.assertTrue(validation.is_valid)
+        self.assertEqual(validation.errors, ())
+        self.assertEqual(validation.warnings, ())
+
     def test_result_snapshot_requires_reply_and_persisted_turn(self):
         snapshot = self.make_snapshot(
             has_reply=False,

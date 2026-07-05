@@ -8,6 +8,7 @@ from time import monotonic
 import httpx
 from nonebot import get_driver, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment, PrivateMessageEvent
+from nonebot.exception import MatcherException, ProcessException
 from nonebot.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
@@ -117,6 +118,8 @@ from .graph import (
     NotificationGraphRunner,
     NotificationState,
     RootGraphRunner,
+    RuntimeResponse,
+    RuntimeState,
     RuntimeIntent,
     SessionType,
     ShadowChatSnapshot,
@@ -229,6 +232,7 @@ ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
 _last_shadow_chat_snapshot: ShadowChatSnapshot | None = None
 _last_shadow_chat_validation: ShadowChatValidation | None = None
+_last_root_graph_chat_observation: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -2611,10 +2615,170 @@ def event_message_id(event: MessageEvent) -> str:
     return str(getattr(event, "message_id", ""))
 
 
+LEGACY_CHAT_PRODUCTION_ROUTE = "legacy_chat_runtime"
+ROOT_GRAPH_CHAT_PRODUCTION_ROUTE = "root_graph_chat"
+CHAT_ACCESS_POLICY_ARTIFACT = "chat_access_policy"
+CHAT_COMMIT_ARTIFACT = "chat_commit"
+
+
+def deny_chat_access_policy(
+    *,
+    decision: str,
+    reason: str,
+    should_reply: bool = False,
+    response_text: str = "",
+    error: str = "permission_denied",
+    **extra,
+) -> dict[str, object]:
+    return {
+        "allow_dispatch": False,
+        "decision": decision,
+        "reason": reason,
+        "should_reply": should_reply,
+        "response_text": response_text if should_reply else "",
+        "error": error,
+        **extra,
+    }
+
+
+def build_chat_access_policy(
+    event: MessageEvent,
+    text: str,
+    options: ChatOptions,
+) -> dict[str, object]:
+    access = current_access()
+    base: dict[str, object] = {
+        "source": "qq_chat_preflight",
+        "session_type": graph_session_type_for_event(event).value,
+        "user_id": user_id(event),
+        "actor_role": graph_actor_role_for_event(event).value,
+        "silent_limit_rejection": options.silent_limit_rejection,
+    }
+
+    if isinstance(event, PrivateMessageEvent):
+        allowed, reason = can_private_chat(config, access, event)
+        if not allowed:
+            return deny_chat_access_policy(
+                decision="private_denied",
+                reason="private chat is not allowed",
+                should_reply=bool(reason),
+                response_text=reason or "",
+                **base,
+            )
+        if should_count_private_trial(event) and not can_use_private_trial(
+            user_id(event),
+            config.private_trial_messages,
+        ):
+            return deny_chat_access_policy(
+                decision="trial_exhausted",
+                reason="private trial quota exhausted",
+                should_reply=True,
+                response_text="私聊试用次数已用完，请联系主人加入白名单。",
+                error="trial_exhausted",
+                **base,
+            )
+    elif isinstance(event, GroupMessageEvent):
+        allowed, reason = can_group_chat(config, access, event)
+        if not allowed:
+            return deny_chat_access_policy(
+                decision="group_denied",
+                reason="group chat is not allowed",
+                should_reply=bool(reason),
+                response_text=reason or "",
+                **base,
+            )
+
+    limit = message_length_limit(config, event)
+    if limit > 0 and len(text) > limit:
+        return deny_chat_access_policy(
+            decision="message_too_long",
+            reason="message length exceeds configured limit",
+            should_reply=not options.silent_limit_rejection,
+            response_text=f"消息太长了，请控制在 {limit} 字以内。",
+            error="message_too_long",
+            message_length=len(text),
+            message_length_limit=limit,
+            **base,
+        )
+
+    if not is_owner(config, event):
+        rate_key = f"{event.message_type}:{event.user_id}"
+        rate_seconds = rate_limit_seconds(config, event)
+        ok, wait_seconds = check_rate_limit(rate_key, rate_seconds)
+        if not ok:
+            return deny_chat_access_policy(
+                decision="rate_limited",
+                reason="chat rate limit is active",
+                should_reply=not options.silent_limit_rejection,
+                response_text=f"说太快了，请等 {wait_seconds} 秒再试。",
+                error="rate_limited",
+                rate_key=rate_key,
+                rate_limit_seconds=rate_seconds,
+                wait_seconds=wait_seconds,
+                **base,
+            )
+
+    return {
+        "allow_dispatch": True,
+        "decision": "allow",
+        "reason": "chat access policy allows dispatch",
+        "should_reply": True,
+        "response_text": "",
+        "error": "",
+        "message_length": len(text),
+        "message_length_limit": limit,
+        **base,
+    }
+
+
+def build_chat_preflight_runtime_state(
+    event: MessageEvent,
+    text: str,
+    has_image: bool,
+    options: ChatOptions,
+) -> RuntimeState:
+    request = ChatRequest(
+        key=session_key(event),
+        text=text,
+        image_context=ChatImageContext(urls=[], has_context=has_image),
+    )
+    runtime = runtime_state_from_chat_request(
+        request,
+        user_id=user_id(event),
+        actor_role=graph_actor_role_for_event(event),
+        session_type=graph_session_type_for_event(event),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
+        message_id=event_message_id(event),
+        raw_text=command_text(event),
+    )
+    runtime.artifacts[CHAT_ACCESS_POLICY_ARTIFACT] = build_chat_access_policy(
+        event,
+        text,
+        options,
+    )
+    runtime.artifacts["chat_runtime"] = {
+        "entry": "root_graph",
+        "stage": "preflight",
+    }
+    return runtime
+
+
+def update_runtime_chat_commit(runtime: RuntimeState, **updates) -> None:
+    artifact = runtime.artifacts.setdefault(CHAT_COMMIT_ARTIFACT, {})
+    if isinstance(artifact, dict):
+        artifact.update(updates)
+
+
+def update_chat_commit(state: ChatState | None, **updates) -> None:
+    if state is not None:
+        update_runtime_chat_commit(state.runtime, **updates)
+
+
 def build_shadow_chat_state(
     event: MessageEvent,
     request: ChatRequest,
     options: ChatOptions,
+    runtime_artifacts: dict[str, object] | None = None,
 ) -> ChatState:
     runtime = runtime_state_from_chat_request(
         request,
@@ -2625,10 +2789,12 @@ def build_shadow_chat_state(
         message_id=event_message_id(event),
         raw_text=command_text(event),
     )
+    if runtime_artifacts:
+        runtime.artifacts.update(runtime_artifacts)
     runtime.artifacts["shadow_chat"] = {
         "enabled": True,
         "stage": "request",
-        "production_route": "legacy_chat_runtime",
+        "production_route": LEGACY_CHAT_PRODUCTION_ROUTE,
     }
     return chat_state_from_chat_request(runtime, request, options)
 
@@ -2637,9 +2803,10 @@ def safe_build_shadow_chat_state(
     event: MessageEvent,
     request: ChatRequest,
     options: ChatOptions,
+    runtime_artifacts: dict[str, object] | None = None,
 ) -> ChatState | None:
     try:
-        return build_shadow_chat_state(event, request, options)
+        return build_shadow_chat_state(event, request, options, runtime_artifacts)
     except Exception as exc:
         log_background_error(exc, event)
         return None
@@ -2649,6 +2816,12 @@ def mark_shadow_chat_stage(state: ChatState | None, stage: str) -> None:
     if state is not None:
         shadow_artifact = state.runtime.artifacts.setdefault("shadow_chat", {})
         shadow_artifact["stage"] = stage
+
+
+def mark_shadow_chat_production_route(state: ChatState | None, route: str) -> None:
+    if state is not None:
+        shadow_artifact = state.runtime.artifacts.setdefault("shadow_chat", {})
+        shadow_artifact["production_route"] = route
 
 
 def record_shadow_chat_snapshot(state: ChatState | None) -> None:
@@ -2672,6 +2845,184 @@ def last_shadow_chat_snapshot() -> ShadowChatSnapshot | None:
 
 def last_shadow_chat_validation() -> ShadowChatValidation | None:
     return _last_shadow_chat_validation
+
+
+def _artifact_dict(runtime: RuntimeState, name: str) -> dict[str, object]:
+    artifact = runtime.artifacts.get(name)
+    return dict(artifact) if isinstance(artifact, dict) else {}
+
+
+def _bool_text(value: object) -> str:
+    return "是" if bool(value) else "否"
+
+
+def record_root_graph_chat_observation(
+    runtime: RuntimeState,
+    event: MessageEvent,
+    state: ChatState | None,
+) -> None:
+    global _last_root_graph_chat_observation
+    root_graph = _artifact_dict(runtime, "root_graph")
+    policy = _artifact_dict(runtime, "policy")
+    route = _artifact_dict(runtime, "route")
+    context = _artifact_dict(runtime, "context")
+    commit = _artifact_dict(runtime, "commit")
+    chat_runtime = _artifact_dict(runtime, "chat_runtime")
+    chat_access_policy = _artifact_dict(runtime, CHAT_ACCESS_POLICY_ARTIFACT)
+    chat_commit = _artifact_dict(runtime, CHAT_COMMIT_ARTIFACT)
+
+    snapshot_dict: dict[str, object] = {}
+    validation_dict: dict[str, object] = {}
+    if state is not None:
+        try:
+            snapshot = shadow_chat_snapshot_from_state(state)
+            validation = validate_shadow_chat_snapshot(snapshot)
+            snapshot_dict = snapshot.as_dict()
+            validation_dict = validation.as_dict()
+        except Exception as exc:
+            log_background_error(exc, event)
+
+    _last_root_graph_chat_observation = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "message_id": runtime.event.message_id,
+        "session_key": runtime.session.session_key,
+        "session_type": runtime.session.session_type.value,
+        "group_id": runtime.session.group_id,
+        "user_id": runtime.actor.user_id,
+        "actor_role": runtime.actor.role.value,
+        "has_plain_text": bool(runtime.event.plain_text.strip()),
+        "has_image": runtime.event.has_image,
+        "error": runtime.error or "",
+        "root_graph": root_graph,
+        "policy": policy,
+        "route": route,
+        "context": context,
+        "commit": commit,
+        "chat_runtime": chat_runtime,
+        "chat_access_policy": chat_access_policy,
+        "chat_commit": chat_commit,
+        "shadow_snapshot": snapshot_dict,
+        "shadow_validation": validation_dict,
+    }
+
+
+def recent_root_graph_chat_observation_lines() -> list[str]:
+    observation = _last_root_graph_chat_observation
+    if observation is None:
+        return ["RootGraph/CHAT 最近观测：", "暂无。"]
+
+    root_graph = observation.get("root_graph", {})
+    policy = observation.get("policy", {})
+    route = observation.get("route", {})
+    context = observation.get("context", {})
+    commit = observation.get("commit", {})
+    chat_runtime = observation.get("chat_runtime", {})
+    chat_access_policy = observation.get("chat_access_policy", {})
+    chat_commit = observation.get("chat_commit", {})
+    shadow = observation.get("shadow_snapshot", {})
+    validation = observation.get("shadow_validation", {})
+    if not isinstance(root_graph, dict):
+        root_graph = {}
+    if not isinstance(policy, dict):
+        policy = {}
+    if not isinstance(route, dict):
+        route = {}
+    if not isinstance(context, dict):
+        context = {}
+    if not isinstance(commit, dict):
+        commit = {}
+    if not isinstance(chat_runtime, dict):
+        chat_runtime = {}
+    if not isinstance(chat_access_policy, dict):
+        chat_access_policy = {}
+    if not isinstance(chat_commit, dict):
+        chat_commit = {}
+    if not isinstance(shadow, dict):
+        shadow = {}
+    if not isinstance(validation, dict):
+        validation = {}
+
+    lines = [
+        "RootGraph/CHAT 最近观测：",
+        f"时间：{observation.get('created_at', '')}",
+        (
+            "会话："
+            f"{observation.get('session_type', '')} "
+            f"{observation.get('session_key', '')} "
+            f"group={observation.get('group_id', '') or '-'}"
+        ),
+        (
+            "消息："
+            f"id={observation.get('message_id', '') or '-'} "
+            f"text={_bool_text(observation.get('has_plain_text'))} "
+            f"image={_bool_text(observation.get('has_image'))}"
+        ),
+        (
+            "Actor："
+            f"user={observation.get('user_id', '')} "
+            f"role={observation.get('actor_role', '')}"
+        ),
+        (
+            "Policy："
+            f"{policy.get('decision', '') or chat_access_policy.get('decision', '')} "
+            f"allow={_bool_text(policy.get('allow_dispatch'))} "
+            f"reason={policy.get('reason', '') or chat_access_policy.get('reason', '')}"
+        ),
+        (
+            "Route："
+            f"intent={route.get('intent', root_graph.get('route', ''))} "
+            f"handler={route.get('selected_handler', '') or '-'} "
+            f"dispatched={_bool_text(route.get('dispatched', root_graph.get('dispatched')))}"
+        ),
+        (
+            "Context："
+            f"level={context.get('context_level', root_graph.get('context_level', ''))} "
+            f"memory_rag={_bool_text(context.get('memory_rag_enabled'))} "
+            f"project_doc_rag={_bool_text(context.get('project_doc_rag_enabled'))} "
+            f"vision={_bool_text(context.get('vision_used'))}"
+        ),
+        (
+            "Runtime："
+            f"stage={commit.get('chat_runtime_stage', chat_runtime.get('stage', '')) or '-'} "
+            f"handler={chat_runtime.get('handler', '') or '-'}"
+        ),
+        (
+            "Commit："
+            f"reply_sent={_bool_text(commit.get('chat_reply_sent'))} "
+            f"voice_sent={_bool_text(commit.get('chat_voice_sent'))} "
+            f"persisted={_bool_text(commit.get('chat_persisted'))} "
+            f"trial={_bool_text(commit.get('chat_trial_updated'))} "
+            f"compression={_bool_text(commit.get('chat_compression_scheduled'))} "
+            f"tts_candidate={_bool_text(commit.get('chat_tts_candidate_updated'))} "
+            f"image_deferred={_bool_text(commit.get('chat_image_context_deferred'))}"
+        ),
+    ]
+    if chat_commit:
+        lines.append(
+            "Commit detail："
+            f"reply_chars={chat_commit.get('reply_chars', 0)} "
+            f"stored_user_chars={chat_commit.get('stored_user_chars', 0)} "
+            f"stored_assistant_chars={chat_commit.get('stored_assistant_chars', 0)}"
+        )
+    if shadow:
+        lines.append(
+            "Shadow："
+            f"route={shadow.get('production_route', '')} "
+            f"stage={shadow.get('stage', '')} "
+            f"valid={_bool_text(validation.get('is_valid'))} "
+            f"mode={shadow.get('mode', '')} "
+            f"history={shadow.get('history_count', 0)} "
+            f"reply_chars={shadow.get('reply_chars', 0)}"
+        )
+    errors = validation.get("errors", ())
+    warnings = validation.get("warnings", ())
+    if errors:
+        lines.append("Shadow errors：" + "；".join(str(error) for error in errors))
+    if warnings:
+        lines.append("Shadow warnings：" + "；".join(str(warning) for warning in warnings))
+    if observation.get("error"):
+        lines.append(f"Error：{observation.get('error')}")
+    return lines
 
 
 def safe_apply_shadow_vision_result(
@@ -2890,11 +3241,24 @@ async def render_chat_result(
     matcher: Matcher,
     result: ChatRuntimeResult,
     options: ChatOptions,
+    state: ChatState | None = None,
 ) -> None:
     if options.semantic_voice:
+        update_chat_commit(
+            state,
+            qq_reply_sent=False,
+            semantic_voice_finish=True,
+            should_reply_text=False,
+        )
         await matcher.finish()
         return
     await matcher.send(result.reply)
+    update_chat_commit(
+        state,
+        qq_reply_sent=True,
+        reply_chars=len(result.reply),
+        should_reply_text=True,
+    )
 
 
 async def finalize_chat_result(
@@ -2905,6 +3269,7 @@ async def finalize_chat_result(
     user_content: ChatUserContent,
     result: ChatRuntimeResult,
     options: ChatOptions,
+    state: ChatState | None = None,
 ) -> None:
     turn = build_chat_turn(user_content.stored, result.stored_assistant)
     await persist_chat_turn(
@@ -2913,18 +3278,45 @@ async def finalize_chat_result(
         prompt_context,
         turn,
     )
+    update_chat_commit(
+        state,
+        persisted_turn_saved=True,
+        stored_user_chars=len(turn.stored_user),
+        stored_assistant_chars=len(turn.stored_assistant),
+    )
     if should_count_private_trial(event):
         increment_private_trial(prompt_context.user_id)
+        update_chat_commit(state, trial_updated=True)
     if options.semantic_voice:
         voice_text = result.voice_text if result.voice_text is not None else result.reply
         set_last_tts_candidate(voice_text, force_language="zh")
+        update_chat_commit(
+            state,
+            tts_candidate_updated=True,
+            tts_candidate_source="semantic_voice",
+            qq_reply_sent=False,
+            should_reply_text=False,
+        )
         await schedule_chat_compression(key, event)
+        update_chat_commit(state, compression_scheduled=True)
         await matcher.finish()
         return
     await matcher.send(result.reply)
+    update_chat_commit(
+        state,
+        qq_reply_sent=True,
+        reply_chars=len(result.reply),
+        should_reply_text=True,
+    )
     if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
         set_last_tts_candidate(result.reply)
+        update_chat_commit(
+            state,
+            tts_candidate_updated=True,
+            tts_candidate_source="owner_private_text",
+        )
     await schedule_chat_compression(key, event)
+    update_chat_commit(state, compression_scheduled=True)
 
 
 async def run_chat_graph_session_runtime(
@@ -2993,27 +3385,40 @@ async def run_chat_graph_session_runtime(
         )
 
     async def maybe_voice_response_node(
-        _: ChatState,
+        chat_state: ChatState,
         __: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
     ) -> ChatRuntimeResult | None:
         if options.semantic_voice and not send_voice:
             voice_text = result.voice_text if result.voice_text is not None else result.reply
+            update_chat_commit(
+                chat_state,
+                voice_response_sent=False,
+                voice_send_suppressed=True,
+                should_reply_text=False,
+            )
             return ChatRuntimeResult(
                 reply=result.reply,
                 stored_assistant=voice_text,
                 voice_text=voice_text,
             )
-        return await send_semantic_voice_response(
+        voice_result = await send_semantic_voice_response(
             bot,
             event,
             matcher,
             result,
             options,
         )
+        if options.semantic_voice and voice_result is not None:
+            update_chat_commit(
+                chat_state,
+                voice_response_sent=True,
+                should_reply_text=False,
+            )
+        return voice_result
 
     async def persist_turn_node(
-        _: ChatState,
+        chat_state: ChatState,
         prompt_bundle: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
         __,
@@ -3025,32 +3430,50 @@ async def run_chat_graph_session_runtime(
             prompt_bundle.prompt_context,
             turn,
         )
+        update_chat_commit(
+            chat_state,
+            persisted_turn_saved=True,
+            stored_user_chars=len(turn.stored_user),
+            stored_assistant_chars=len(turn.stored_assistant),
+        )
 
     def update_trial_accounting_node(
-        _: ChatState,
+        chat_state: ChatState,
         prompt_bundle: ChatGraphPromptBundle,
         __: ChatRuntimeResult,
     ) -> None:
         if should_count_private_trial(event):
             increment_private_trial(prompt_bundle.prompt_context.user_id)
+            update_chat_commit(chat_state, trial_updated=True)
 
     def update_tts_candidate_node(
-        _: ChatState,
+        chat_state: ChatState,
         __: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
     ) -> None:
         if options.semantic_voice:
             voice_text = result.voice_text if result.voice_text is not None else result.reply
             set_last_tts_candidate(voice_text, force_language="zh")
+            update_chat_commit(
+                chat_state,
+                tts_candidate_updated=True,
+                tts_candidate_source="semantic_voice",
+            )
         elif isinstance(event, PrivateMessageEvent) and is_owner(config, event):
             set_last_tts_candidate(result.reply)
+            update_chat_commit(
+                chat_state,
+                tts_candidate_updated=True,
+                tts_candidate_source="owner_private_text",
+            )
 
     async def schedule_compression_node(
-        _: ChatState,
+        chat_state: ChatState,
         __: ChatGraphPromptBundle,
         ___: ChatRuntimeResult,
     ) -> None:
         await schedule_chat_compression(request.key, event)
+        update_chat_commit(chat_state, compression_scheduled=True)
 
     return await run_chat_graph_session(
         shadow_state,
@@ -3074,8 +3497,10 @@ async def run_legacy_chat_session(
     matcher: Matcher,
     request: ChatRequest,
     options: ChatOptions,
-) -> None:
-    shadow_state = safe_build_shadow_chat_state(event, request, options)
+    shadow_state: ChatState | None = None,
+) -> ChatState | None:
+    if shadow_state is None:
+        shadow_state = safe_build_shadow_chat_state(event, request, options)
     safe_record_shadow_chat_snapshot(event, shadow_state)
     async with session_lock(request.key):
         if config.enable_chat_graph_runtime and shadow_state is not None:
@@ -3090,12 +3515,12 @@ async def run_legacy_chat_session(
                 )
             except ChatGraphSessionCommittedError as exc:
                 log_background_error(exc.__cause__ or exc, event)
-                return
+                return shadow_state
             except Exception as exc:
                 log_background_error(exc, event)
             else:
                 if graph_session is None:
-                    return
+                    return shadow_state
                 result = graph_session.runtime_result
                 shadow_state = safe_apply_shadow_runtime_result(
                     event,
@@ -3113,8 +3538,9 @@ async def run_legacy_chat_session(
                     matcher,
                     result,
                     options,
+                    shadow_state,
                 )
-                return
+                return shadow_state
 
         prompt_context = await build_chat_prompt_context(
             event,
@@ -3134,7 +3560,7 @@ async def run_legacy_chat_session(
             preserve_original=options.preserve_original,
         )
         if not user_content.for_llm:
-            return
+            return shadow_state
         shadow_state = safe_apply_shadow_prompt_context(
             event,
             shadow_state,
@@ -3152,7 +3578,7 @@ async def run_legacy_chat_session(
             options,
         )
         if result is None:
-            return
+            return shadow_state
         shadow_state = safe_apply_shadow_runtime_result(
             event,
             shadow_state,
@@ -3174,7 +3600,101 @@ async def run_legacy_chat_session(
             user_content,
             result,
             options,
+            shadow_state,
         )
+        return shadow_state
+
+
+async def run_chat_via_root_graph(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    text: str,
+    has_image: bool,
+    options: ChatOptions,
+) -> None:
+    runtime_state = build_chat_preflight_runtime_state(event, text, has_image, options)
+    shadow_state: ChatState | None = None
+
+    async def chat_handler(current_runtime):
+        nonlocal shadow_state
+        image_context = await resolve_chat_image_context(bot, event, text, has_image)
+        if not image_context.should_continue:
+            current_runtime.artifacts["chat_runtime"] = {
+                "entry": "root_graph",
+                "stage": "image_context_deferred",
+            }
+            update_runtime_chat_commit(
+                current_runtime,
+                image_context_deferred=True,
+                qq_reply_sent=False,
+                persisted_turn_saved=False,
+                compression_scheduled=False,
+            )
+            return RuntimeResponse("", should_reply=False)
+
+        request = ChatRequest(
+            key=session_key(event),
+            text=text,
+            image_context=image_context,
+        )
+        shadow_state = safe_build_shadow_chat_state(
+            event,
+            request,
+            options,
+            runtime_artifacts=dict(current_runtime.artifacts),
+        )
+        if shadow_state is None:
+            final_state = await run_legacy_chat_session(
+                bot,
+                event,
+                matcher,
+                request,
+                options,
+            )
+        else:
+            mark_shadow_chat_production_route(
+                shadow_state,
+                ROOT_GRAPH_CHAT_PRODUCTION_ROUTE,
+            )
+            final_state = await run_legacy_chat_session(
+                bot,
+                event,
+                matcher,
+                request,
+                options,
+                shadow_state=shadow_state,
+            )
+        if final_state is not None:
+            shadow_state = final_state
+            current_runtime.response = final_state.runtime.response
+            current_runtime.error = final_state.runtime.error
+            current_runtime.artifacts.update(final_state.runtime.artifacts)
+            current_runtime.tool_events = list(final_state.runtime.tool_events)
+        current_runtime.artifacts["chat_runtime"] = {
+            "entry": "root_graph",
+            "stage": "dispatched",
+            "handler": "legacy_chat_session",
+        }
+        return RuntimeResponse(current_runtime.response or "", should_reply=False)
+
+    runner = RootGraphRunner(
+        handlers={RuntimeIntent.CHAT: chat_handler},
+        passthrough_exceptions=(MatcherException, ProcessException),
+    )
+    try:
+        response = await runner.run(runtime_state)
+    except (MatcherException, ProcessException):
+        record_root_graph_chat_observation(runtime_state, event, shadow_state)
+        raise
+    record_root_graph_chat_observation(runtime_state, event, shadow_state)
+    if response.should_reply and response.text:
+        policy_artifact = runtime_state.artifacts.get("policy", {})
+        if isinstance(policy_artifact, dict) and policy_artifact.get("allow_dispatch") is False:
+            await matcher.finish(response.text)
+            return
+        log_background_error(RuntimeError(response.text), event)
+    safe_record_shadow_chat_snapshot(event, shadow_state)
 
 
 async def handle_chat(
@@ -3196,10 +3716,20 @@ async def handle_chat(
         preserve_original=preserve_original,
         tts_language=tts_language,
     )
-    request = await prepare_chat_request(bot, event, matcher, options)
-    if request is None:
+    if options.semantic_voice:
+        request = await prepare_chat_request(bot, event, matcher, options)
+        if request is None:
+            return
+        await run_legacy_chat_session(bot, event, matcher, request, options)
         return
-    await run_legacy_chat_session(bot, event, matcher, request, options)
+
+    if is_command_message(event):
+        return
+    text = clean_text(event)
+    has_image = event_has_image(event)
+    if not text and not has_image:
+        return
+    await run_chat_via_root_graph(bot, event, matcher, text, has_image, options)
 
 
 def group_auto_reply_decision(event: GroupMessageEvent, text: str) -> ReplyDecision:
@@ -3427,10 +3957,13 @@ def main_agent_help_reply() -> str:
             "/agent 下一步",
             "/agent 查 <问题>",
             "/agent 帮我看一下最近错误",
+            "/agent 记忆检索 <查询内容>",
             "/agent 看看诊断/配置/视觉/图片缓存/记忆/摘要/RAG/角色卡/白名单状态",
-            "/agent 角色卡列表 / 模型配置 / 访问控制 / RAG索引详情 / MainAgent最近观测",
+            "/agent 角色卡列表 / 模型配置 / 访问控制 / RAG索引详情 / MainAgent最近观测 / RootGraph最近观测",
             "/agent 看看任务表 / 最新任务详情 / 有没有待审批 / 最新审批详情",
             "/agent 帮我创建一个任务：<目标> / 取消最新任务 / 确认最新审批 / 拒绝最新审批",
+            "/agent 删除摘要 <摘要ID>",
+            "/agent 把群 <群号> 加入群白名单 / 把用户 <QQ号> 加入黑名单",
             "/agent-debug <问题>",
             "边界：只读 dev_context、owner_read_command、agent_task_read；agent_task_command 仅任务/审批控制面；owner_write_command 只走审批恢复，不执行 shell。",
         ]
@@ -3456,11 +3989,13 @@ def main_agent_tool_status_reply() -> str:
             "审批：不需要",
             "用途：主人管理只读控制台，不改状态。",
             "例子：/agent 看看最近错误",
+            "例子：/agent 记忆检索 版本计划",
             "例子：/agent 角色卡列表",
             "例子：/agent 模型配置",
             "例子：/agent 访问控制",
             "例子：/agent RAG 索引详情",
             "例子：/agent MainAgent 最近观测",
+            "例子：/agent RootGraph 最近观测",
             "",
             "3. agent_task_read",
             "风险：read_local",
@@ -3487,17 +4022,26 @@ def main_agent_tool_status_reply() -> str:
             "风险：write_local",
             "可见性：LLM 可见 + 确定性语义优先",
             "审批：必须审批；确认后只恢复已注册且 approval_resume_enabled=true 的工具。",
-            "用途：第一批主人管理写工具。",
-            "当前开放：clear_image_cache、clear_error_log",
+            "用途：审批门控主人管理写工具。",
+            "当前开放：clear_image_cache、clear_error_log、select_persona、add_fact_memory、add_preference_memory、clear_session_summaries、delete_session_summary、allow_group、deny_group、allow_private、deny_private、block_user、unblock_user",
             "例子：/agent 帮我清空图片缓存",
             "例子：/agent 帮我清空错误日志",
+            "例子：/agent 帮我选择角色卡 moyan",
+            "例子：/agent 帮我添加事实记忆 主人喜欢先看结论",
+            "例子：/agent 帮我添加偏好记忆 技术讨论先给结论",
+            "例子：/agent 帮我清空当前摘要",
+            "例子：/agent 删除摘要 123",
+            "例子：/agent 把群 123456 加入群白名单",
+            "例子：/agent 把用户 10001 移出私聊白名单",
+            "例子：/agent 把用户 10002 加入黑名单",
+            "例子：/agent 解除拉黑 10002",
             "",
             "隐藏演练工具：dry_run_write_file",
             "风险：write_local",
             "可见性：LLM 不可见",
             "审批：必须审批；仅用于 /agent 审批演练，不写文件。",
             "",
-            "当前不开放：shell、真实写文件、任意数据库写入、白名单/黑名单修改、角色卡切换、删除记忆、清空全部上下文。",
+            "当前不开放：shell、任意文件写入、任意数据库写入、删除长期记忆、清空全部摘要、清空全部上下文。",
             "边界：普通聊天不触发这些工具；固定 QQ 命令继续保留作为 fallback。",
         ]
     )
@@ -3517,7 +4061,7 @@ def main_agent_status_reply() -> str:
             "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
             "任务：记录状态和事件；仅已注册且启用审批恢复的工具可受控恢复",
             "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
-            "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（首批仅清空图片缓存/错误日志）",
+            "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（清空图片缓存/错误日志、选择角色卡、添加长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单）",
             "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
             f"LLM：{'已接入 /agent ActionRequest 生成' if config.main_agent_use_llm else '未接入 /agent 默认路径'}",
             f"主模型：{config.main_llm_model or '未配置'}",
@@ -3532,13 +4076,13 @@ def main_agent_boundary_reply() -> str:
         [
             "MainAgent 当前边界：",
             "允许：主人私聊调用 dev_context 只读工具。",
-            "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
+            "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
             "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
             "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
-            "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志，但必须先生成审批，确认后才恢复执行。",
+            "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
-            "禁止：MainAgent/LLM 执行 shell、写文件、写数据库、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
+            "禁止：MainAgent/LLM 执行 shell、任意文件写入、任意数据库写入、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
             "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
             "真实 LLM：只负责生成 ActionRequest 和总结只读工具结果。",
         ]
@@ -3588,6 +4132,118 @@ def execute_owner_write_command(command: str, _context) -> str:
         return f"已清空图片缓存：{count} 条。"
     if command == "clear_error_log":
         return clear_error_log()
+    access_operations = {
+        "allow_group": (
+            add_item,
+            "group_whitelist",
+            "群白名单",
+            "已加入群白名单",
+            "群已在白名单中",
+        ),
+        "deny_group": (
+            remove_item,
+            "group_whitelist",
+            "群白名单",
+            "已移出群白名单",
+            "动态群白名单中没有",
+        ),
+        "allow_private": (
+            add_item,
+            "private_whitelist",
+            "私聊白名单",
+            "已加入私聊白名单",
+            "用户已在私聊白名单中",
+        ),
+        "deny_private": (
+            remove_item,
+            "private_whitelist",
+            "私聊白名单",
+            "已移出私聊白名单",
+            "动态私聊白名单中没有",
+        ),
+        "block_user": (
+            add_item,
+            "user_blacklist",
+            "黑名单",
+            "已加入黑名单",
+            "用户已在黑名单中",
+        ),
+        "unblock_user": (
+            remove_item,
+            "user_blacklist",
+            "黑名单",
+            "已移出黑名单",
+            "动态黑名单中没有",
+        ),
+    }
+    if command in access_operations:
+        arguments = _context.metadata.get("tool_arguments", {})
+        target = ""
+        if isinstance(arguments, dict):
+            target = str(arguments.get("target") or "").strip()
+        if not target.isdigit():
+            raise RuntimeError(f"{command} requires numeric target")
+        operation, list_name, _label, changed_text, unchanged_text = access_operations[command]
+        changed = operation(list_name, target)
+        return f"{changed_text}：{target}" if changed else f"{unchanged_text}：{target}"
+    if command == "select_persona":
+        arguments = _context.metadata.get("tool_arguments", {})
+        target = ""
+        if isinstance(arguments, dict):
+            target = str(arguments.get("target") or "").strip()
+        if not target:
+            raise RuntimeError("select_persona requires target")
+        card = select_role_card(target)
+        if card is None:
+            return f"没有找到角色卡：{target}"
+        return f"已选择角色卡：{card.key}，{card.title}"
+    if command in {"add_fact_memory", "add_preference_memory"}:
+        arguments = _context.metadata.get("tool_arguments", {})
+        content = ""
+        if isinstance(arguments, dict):
+            content = str(arguments.get("content") or "").strip()
+        if not content:
+            raise RuntimeError(f"{command} requires content")
+        owner_user_id = str(_context.metadata.get("user_id") or config.bot_owner_qq).strip()
+        if not owner_user_id:
+            raise RuntimeError(f"{command} requires owner user_id")
+        memory_type = (
+            MANUAL_FACT_TYPE
+            if command == "add_fact_memory"
+            else MANUAL_PREFERENCE_TYPE
+        )
+        memory_id = add_manual_memory(
+            subject_type="user",
+            subject_id=owner_user_id,
+            content=content,
+            memory_type=memory_type,
+            source_session_key=str(_context.metadata.get("session_key") or "").strip() or None,
+        )
+        label = "事实摘要记忆" if command == "add_fact_memory" else "偏好摘要记忆"
+        return (
+            f"已添加{label}：ID {memory_id}，对象："
+            f"{subject_label('user', owner_user_id)}。"
+        )
+    if command == "clear_session_summaries":
+        key = str(_context.metadata.get("session_key") or "").strip()
+        if not key:
+            raise RuntimeError("clear_session_summaries requires session_key")
+        count = clear_session_summaries(key)
+        return f"已清空当前会话摘要：{count} 条。"
+    if command == "delete_session_summary":
+        key = str(_context.metadata.get("session_key") or "").strip()
+        if not key:
+            raise RuntimeError("delete_session_summary requires session_key")
+        arguments = _context.metadata.get("tool_arguments", {})
+        summary_id = ""
+        if isinstance(arguments, dict):
+            summary_id = str(arguments.get("summary_id") or "").strip()
+        if not summary_id.isdigit():
+            raise RuntimeError("delete_session_summary requires numeric summary_id")
+        deleted = delete_session_summary(key, int(summary_id))
+        if deleted:
+            return f"已删除当前会话摘要：ID {summary_id}。"
+        return f"没有找到当前会话摘要：{summary_id}"
     raise RuntimeError(f"unsupported owner write command: {command}")
 
 
@@ -3706,7 +4362,7 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
 
     if action == AGENT_TASK_COMMAND_CREATE:
         if not goal:
-            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、真实写文件或数据库写入。"
+            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、文件写入或数据库写入。"
         task_id = create_agent_task(
             session_key=session_key(event),
             user_id=user_id(event),
@@ -3841,6 +4497,17 @@ async def run_main_agent_qq_command(
             if execution.result.error:
                 raise RuntimeError(execution.result.reply_text or execution.result.error)
             return execution.result.reply_text
+        if command == "memory_retrieval":
+            arguments = _context.metadata.get("tool_arguments", {})
+            query = ""
+            if isinstance(arguments, dict):
+                query = str(arguments.get("query") or "").strip()
+            execution = await run_memory_retrieval_graph(
+                event,
+                MemoryRetrievalAction.QUERY,
+                query=query,
+            )
+            return execution.result.reply_text
         memory_admin_actions = {
             "summary_status": MemoryAdminAction.SUMMARY_STATUS,
             "view_summaries": MemoryAdminAction.VIEW_SUMMARIES,
@@ -3867,6 +4534,8 @@ async def run_main_agent_qq_command(
             return "\n".join(rag_index_detail_lines())
         if command == "main_agent_observations":
             return "\n".join(recent_main_agent_observation_lines())
+        if command == "root_graph_observations":
+            return "\n".join(recent_root_graph_chat_observation_lines())
         if command == "group_whitelist":
             return list_lines("群白名单", current_access().group_whitelist)
         if command == "private_whitelist":
