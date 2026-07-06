@@ -1,12 +1,17 @@
 import asyncio
 import base64
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import struct
+from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
+import time
+import zlib
 
 from nonebot.adapters.onebot.v11 import MessageEvent
 
@@ -78,6 +83,14 @@ DIRECT_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
 IMAGE_REF_FIELDS = ("file", "path", "file_id", "url")
 LOW_QUALITY_REPEAT_MIN_LENGTH = 12
 LOW_QUALITY_REPEAT_RATIO = 0.75
+VISION_INFERENCE_TEST_TIMEOUT_SECONDS = 45
+_DIAGNOSTIC_IMAGE_BASE64: str | None = None
+
+
+@dataclass(frozen=True)
+class VisionInferenceCheck:
+    ok: bool
+    detail: str
 
 
 def _segment_type(segment: Any) -> str:
@@ -174,6 +187,82 @@ def is_low_quality_vision_description(content: str) -> bool:
         1 for char in text if char.isalnum() or "\u4e00" <= char <= "\u9fff"
     )
     return informative_chars == 0 and len(unique_chars) <= 6
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    )
+
+
+def diagnostic_vision_image_base64() -> str:
+    global _DIAGNOSTIC_IMAGE_BASE64
+    if _DIAGNOSTIC_IMAGE_BASE64 is not None:
+        return _DIAGNOSTIC_IMAGE_BASE64
+
+    width = 32
+    height = 32
+    rows: list[bytes] = []
+    for y in range(height):
+        row = bytearray([0])
+        for x in range(width):
+            if x < 16 and y < 16:
+                row.extend((255, 0, 0))
+            elif x >= 16 and y < 16:
+                row.extend((0, 128, 255))
+            elif x < 16:
+                row.extend((0, 180, 80))
+            else:
+                row.extend((255, 255, 255))
+        rows.append(bytes(row))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + _png_chunk(b"IEND", b"")
+    )
+    _DIAGNOSTIC_IMAGE_BASE64 = base64.b64encode(png).decode("ascii")
+    return _DIAGNOSTIC_IMAGE_BASE64
+
+
+def check_vision_inference(config: AiChatConfig) -> VisionInferenceCheck:
+    if not getattr(config, "enable_vision", False):
+        return VisionInferenceCheck(False, "视觉未开启，未执行")
+    if not str(getattr(config, "vision_model", "") or "").strip():
+        return VisionInferenceCheck(False, "VISION_MODEL 未配置，未执行")
+
+    timeout_seconds = min(
+        max(int(getattr(config, "vision_timeout_seconds", 1) or 1), 1),
+        VISION_INFERENCE_TEST_TIMEOUT_SECONDS,
+    )
+    probe_config = SimpleNamespace(
+        vision_ollama_base_url=config.vision_ollama_base_url,
+        vision_model=config.vision_model,
+        vision_timeout_seconds=timeout_seconds,
+        vision_num_ctx=getattr(config, "vision_num_ctx", 0),
+    )
+
+    started = time.monotonic()
+    try:
+        description = _ollama_chat_vision(probe_config, diagnostic_vision_image_base64())
+    except VisionError as exc:
+        elapsed = time.monotonic() - started
+        return VisionInferenceCheck(False, f"失败：{exc}，用时 {elapsed:.1f} 秒")
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        message = str(exc).strip() or type(exc).__name__
+        return VisionInferenceCheck(False, f"失败：{message}，用时 {elapsed:.1f} 秒")
+
+    elapsed = time.monotonic() - started
+    return VisionInferenceCheck(
+        True,
+        f"正常，用时 {elapsed:.1f} 秒，返回 {len(description)} 字",
+    )
 
 
 async def describe_images(config: AiChatConfig, urls: list[str]) -> list[str]:

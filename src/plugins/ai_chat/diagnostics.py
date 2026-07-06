@@ -15,6 +15,7 @@ from .database import DATABASE_PATH, connect, ensure_database
 from .memory import memory_stats
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards
 from .trials import trial_stats
+from .vision import VisionInferenceCheck, check_vision_inference
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -275,6 +276,23 @@ def check_ollama(config: AiChatConfig) -> OllamaStatus:
     return OllamaStatus(CheckResult(True, "正常"), model_exists, models)
 
 
+def _skipped_vision_inference(detail: str) -> VisionInferenceCheck:
+    return VisionInferenceCheck(False, detail)
+
+
+def _vision_inference_check_for_status(
+    config: AiChatConfig,
+    status: OllamaStatus,
+) -> VisionInferenceCheck:
+    if not config.enable_vision:
+        return _skipped_vision_inference("视觉未开启，未执行")
+    if not status.service.ok:
+        return _skipped_vision_inference("Ollama 服务异常，未执行")
+    if status.model_exists is False:
+        return _skipped_vision_inference("视觉模型不存在，未执行")
+    return check_vision_inference(config)
+
+
 def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]) -> str:
     status = check_ollama(config) if config.enable_vision else OllamaStatus(CheckResult(False, "视觉未开启"), None)
     lines = [
@@ -294,6 +312,8 @@ def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]
         f"每轮最多图片：{config.vision_max_images}",
         f"单图大小上限：{config.vision_max_image_bytes} 字节",
     ]
+    inference = _vision_inference_check_for_status(config, status)
+    lines.insert(7, f"推理自检：{inference.detail}")
     if config.enable_vision and not status.service.ok:
         lines.extend(
             [

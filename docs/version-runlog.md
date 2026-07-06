@@ -18,6 +18,34 @@
   docs/project-rag-usage.md 保留为本地 RAG / DevContextGraph / Codex 恢复上下文手册。
 ```
 
+## v1.5 /视觉状态 推理自检
+
+状态：已落地。`/视觉状态` 现在除了检查 Ollama `/api/tags` 和视觉模型是否存在，还会用一张内置的小型 PNG 测试图执行一次真实的 Ollama 视觉推理。
+
+本次完成：
+```text
+新增 diagnostic_vision_image_base64，使用标准库生成 32x32 PNG 测试图，不依赖 Pillow/cv2。
+新增 check_vision_inference，复用真实 Ollama /api/chat 视觉链路。
+自检请求沿用 VISION_NUM_CTX，但将诊断超时上限限制为 45 秒，避免 /视觉状态 长时间卡死。
+/视觉状态 新增“推理自检”行，成功时只展示耗时和返回字数。
+如果 Ollama 服务异常、视觉模型不存在或视觉未开启，则跳过推理自检。
+如果模型返回 @@@@@@ 这类低质量重复内容，自检会显示失败原因。
+```
+
+边界：
+```text
+不记录测试图的模型描述正文。
+不读取用户图片，不记录图片 URL。
+不改变普通聊天图片识别链路。
+不改变 RootGraph 路由、聊天权限、图片缓存策略或视觉安全脱敏策略。
+```
+
+测试：
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_diagnostics_units tests.test_vision_voice_units -v
+Ran 24 tests OK
+```
+
 ## 当前总览
 
 ```text

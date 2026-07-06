@@ -132,6 +132,55 @@ class VisionPureUnitTests(unittest.TestCase):
             self.vision.is_low_quality_vision_description("画面中有一个红色方块和数字 123。")
         )
 
+    def test_diagnostic_vision_image_base64_builds_png(self):
+        image_base64 = self.vision.diagnostic_vision_image_base64()
+
+        self.assertTrue(base64.b64decode(image_base64).startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_check_vision_inference_uses_capped_timeout_and_num_ctx(self):
+        captured = {}
+
+        def fake_ollama_chat_vision(config, image_base64):
+            captured["image_base64"] = image_base64
+            captured["timeout"] = config.vision_timeout_seconds
+            captured["num_ctx"] = config.vision_num_ctx
+            return "画面中有红色、蓝色和绿色色块。"
+
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_ollama_base_url="http://127.0.0.1:11434",
+            vision_model="qwen2.5vl:3b",
+            vision_timeout_seconds=180,
+            vision_num_ctx=16384,
+        )
+
+        with patch.object(self.vision, "_ollama_chat_vision", fake_ollama_chat_vision):
+            result = self.vision.check_vision_inference(config)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(captured["timeout"], self.vision.VISION_INFERENCE_TEST_TIMEOUT_SECONDS)
+        self.assertEqual(captured["num_ctx"], 16384)
+        self.assertTrue(base64.b64decode(captured["image_base64"]).startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertNotIn("红色", result.detail)
+
+    def test_check_vision_inference_reports_ollama_failure(self):
+        def fake_ollama_chat_vision(config, image_base64):
+            raise self.vision.VisionError("Ollama 返回低质量重复内容")
+
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_ollama_base_url="http://127.0.0.1:11434",
+            vision_model="qwen2.5vl:3b",
+            vision_timeout_seconds=180,
+            vision_num_ctx=16384,
+        )
+
+        with patch.object(self.vision, "_ollama_chat_vision", fake_ollama_chat_vision):
+            result = self.vision.check_vision_inference(config)
+
+        self.assertFalse(result.ok)
+        self.assertIn("Ollama", result.detail)
+
     def test_download_image_base64_accepts_data_urls_without_network(self):
         payload = base64.b64encode(b"image-bytes").decode("ascii")
 
