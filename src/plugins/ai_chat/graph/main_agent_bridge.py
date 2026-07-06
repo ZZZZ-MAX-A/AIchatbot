@@ -54,6 +54,7 @@ AGENT_TASK_READ_TOOL_NAME = "agent_task_read"
 AGENT_TASK_COMMAND_TOOL_NAME = "agent_task_command"
 OWNER_READ_COMMANDS: tuple[str, ...] = (
     "bot_status",
+    "ops_health",
     "diagnostics",
     "config_status",
     "vision_status",
@@ -708,6 +709,8 @@ def classify_owner_read_command(query: str) -> str:
 
     if any(marker in compact for marker in ("整体状态", "机器人状态", "botstatus", "状态总览")):
         return "bot_status"
+    if is_owner_ops_health_query(compact):
+        return "ops_health"
     if any(marker in compact for marker in ("最近错误", "报错", "错误日志", "recenterror", "recenterrors")):
         return "recent_errors"
     if (
@@ -817,6 +820,42 @@ def classify_owner_read_command(query: str) -> str:
     if any(marker in compact for marker in ("诊断", "体检", "自检", "diagnostics", "diagnose")):
         return "diagnostics"
     return ""
+
+
+def is_owner_ops_health_query(compact: str) -> bool:
+    broad_markers = (
+        "综合诊断",
+        "聚合诊断",
+        "合并诊断",
+        "整体诊断",
+        "全局诊断",
+        "系统诊断",
+        "健康检查",
+        "健康状态",
+        "健康自检",
+        "排障",
+        "排查",
+        "opshealth",
+        "healthcheck",
+    )
+    if any(marker in compact for marker in broad_markers):
+        return True
+
+    vision_markers = ("视觉", "识图", "图片", "qwen", "qwen2.5", "vision")
+    rag_markers = ("rag", "记忆", "embedding", "bge", "bge-m3", "memory")
+    error_markers = ("错误", "报错", "失败", "问题", "异常")
+    check_markers = ("诊断", "检查", "自检", "状态", "看看", "看一下")
+
+    has_vision = any(marker in compact for marker in vision_markers)
+    has_rag = any(marker in compact for marker in rag_markers)
+    has_error = any(marker in compact for marker in error_markers)
+    has_check = any(marker in compact for marker in check_markers)
+
+    if has_vision and has_rag:
+        return True
+    if "ollama" in compact and (has_rag or has_vision or has_error or has_check):
+        return True
+    return (has_vision or has_rag) and has_error and has_check
 
 
 def is_owner_memory_retrieval_query(query: str, compact: str) -> bool:

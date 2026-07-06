@@ -208,12 +208,22 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         result = asyncio.run(
             registry.execute(
                 "owner_read_command",
+                {"command": "ops_health"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "read:ops_health")
+        self.assertEqual(calls, ["ops_health"])
+
+        result = asyncio.run(
+            registry.execute(
+                "owner_read_command",
                 {"command": "root_graph_observations"},
                 self.tool_registry.ToolContext(is_owner=True),
             )
         )
         self.assertEqual(result.text, "read:root_graph_observations")
-        self.assertEqual(calls, ["root_graph_observations"])
+        self.assertEqual(calls, ["ops_health", "root_graph_observations"])
 
         with self.assertRaises(self.tool_registry.ToolExecutionError):
             asyncio.run(
@@ -362,6 +372,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "看看群白名单": "group_whitelist",
             "语音状态怎么样": "tts_status",
             "RAG状态": "rag_status",
+            "诊断一下 Ollama": "ops_health",
+            "看一下视觉和记忆状态": "ops_health",
+            "最近图片和 RAG 有没有问题": "ops_health",
+            "做一次系统健康检查": "ops_health",
             "看看访问控制": "access_overview",
             "当前主模型是什么": "model_config_status",
             "看看项目文档索引": "rag_index_detail",

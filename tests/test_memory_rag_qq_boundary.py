@@ -69,6 +69,14 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn('"embedding_check": memory_rag_embedding_check_snapshot()', source)
         self.assertIn("Embedding 自检", source)
 
+    def test_agent_owner_read_includes_aggregate_ops_health(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn("agent_ops_health_reply", source)
+        self.assertIn('if command == "ops_health":', source)
+        self.assertIn("Agent 聚合诊断", source)
+        self.assertIn("视觉/Ollama、MemoryRAG/Embedding", source)
+
     def test_root_graph_observation_includes_structured_error_artifact(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
 
