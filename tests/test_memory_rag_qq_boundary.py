@@ -61,6 +61,25 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("is_owner=is_owner(config, event)", source)
         self.assertNotIn("is_owner=is_owner(event)", source)
 
+    def test_root_graph_observation_includes_structured_error_artifact(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn('error_artifact = _artifact_dict(runtime, "error")', source)
+        self.assertIn('"error_artifact": error_artifact', source)
+        self.assertIn('error_artifact = observation.get("error_artifact", {})', source)
+        self.assertIn("source={error_artifact.get('source', '') or '-'}", source)
+        self.assertIn("Error message：{error_message}", source)
+
+    def test_root_graph_observation_includes_vision_detail(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn("update_runtime_image_context_commit(current_runtime, image_context)", source)
+        self.assertIn("update_chat_image_description_commit", source)
+        self.assertIn("Vision detail：", source)
+        self.assertIn("image_context_url_count", source)
+        self.assertIn("vision_low_quality_count", source)
+        self.assertIn("vision_num_ctx", source)
+
 
 if __name__ == "__main__":
     unittest.main()

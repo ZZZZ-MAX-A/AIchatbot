@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pure_ai_chat_loader import load_legacy_media_modules
 
@@ -122,6 +124,14 @@ class VisionPureUnitTests(unittest.TestCase):
         self.assertEqual(len(sanitized), 180)
         self.assertTrue(sanitized.endswith("..."))
 
+    def test_low_quality_vision_description_detects_repeated_symbols(self):
+        self.assertTrue(
+            self.vision.is_low_quality_vision_description("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+        )
+        self.assertFalse(
+            self.vision.is_low_quality_vision_description("画面中有一个红色方块和数字 123。")
+        )
+
     def test_download_image_base64_accepts_data_urls_without_network(self):
         payload = base64.b64encode(b"image-bytes").decode("ascii")
 
@@ -154,6 +164,64 @@ class VisionPureUnitTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(self.vision.describe_images(disabled, ["http://example.test/a.png"])), [])
         self.assertEqual(asyncio.run(self.vision.describe_images(limited, ["http://example.test/a.png"])), [])
+
+    def test_ollama_chat_vision_sends_num_ctx_option(self):
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {"content": "画面中有一个红色方块。"}}).encode(
+                    "utf-8"
+                )
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return Response()
+
+        config = types.SimpleNamespace(
+            vision_ollama_base_url="http://127.0.0.1:11434",
+            vision_model="qwen2.5vl:3b",
+            vision_timeout_seconds=180,
+            vision_num_ctx=8192,
+        )
+
+        with patch.object(self.vision, "urlopen", fake_urlopen):
+            result = self.vision._ollama_chat_vision(config, "AAAA")
+
+        self.assertIn("红色方块", result)
+        self.assertEqual(captured["timeout"], 180)
+        self.assertEqual(captured["body"]["options"], {"num_ctx": 8192})
+
+    def test_ollama_chat_vision_rejects_repeated_symbol_output(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"message": {"content": "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"}}
+                ).encode("utf-8")
+
+        config = types.SimpleNamespace(
+            vision_ollama_base_url="http://127.0.0.1:11434",
+            vision_model="qwen2.5vl:3b",
+            vision_timeout_seconds=180,
+            vision_num_ctx=8192,
+        )
+
+        with patch.object(self.vision, "urlopen", lambda request, timeout: Response()):
+            with self.assertRaises(self.vision.VisionError):
+                self.vision._ollama_chat_vision(config, "AAAA")
 
 
 class VoicePureUnitTests(unittest.TestCase):

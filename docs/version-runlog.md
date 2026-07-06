@@ -1027,6 +1027,170 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 244 tests OK
 ```
 
+## v1.5 RootGraph error artifact 与审批恢复 metadata 清理
+
+状态：已落地。RootGraph 在已有 `root_graph.error` 之外，新增结构化 `error` artifact；审批恢复上下文的 `resume_mode` 命名也从 dry-run 专用语义收敛为通用审批恢复语义。
+
+本次完成：
+
+```text
+RootGraphRunner 在以下场景写入 artifacts["error"]：
+  policy 拒绝，例如 chat_access_policy 阻断 CHAT 分发
+  dispatch handler 抛出异常
+  handler 自身设置 state.error 但没有抛异常
+
+error artifact 字段：
+  source
+  message
+  route
+  policy_decision
+  dispatched
+  should_reply
+  response_text_set
+
+该 artifact 不记录用户原文，不记录 LLM 回复正文，只记录错误来源、路由和响应布尔状态。
+root_graph.error 继续保留，兼容已有 RootGraph 最近观测和测试。
+
+审批恢复 ToolContext.metadata：
+  resume_mode=approval_resume
+  resume_tool_name=<approval.tool_name>
+
+这样 owner_write_command 恢复执行时不再被标成 dry_run；dry_run_write_file 仍保持无副作用演练工具语义。
+```
+
+边界：
+
+```text
+本步不改变 RootGraph 路由策略。
+本步不迁移聊天副作用执行位置。
+本步不新增任何 LLM 可见工具。
+本步不开放 shell、任意文件写入、任意数据库写入或额外 QQ 发送。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners -v
+Ran 45 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 15 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 42 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 245 tests OK
+```
+
+## v1.5 RootGraph 最近观测展示 error artifact
+
+状态：已落地。`/agent RootGraph 最近观测` 现在会展示 RootGraph 结构化 `error` artifact 的摘要。
+
+本次完成：
+
+```text
+RootGraph/CHAT 观测快照新增 error_artifact。
+最近观测输出在存在 error_artifact 时展示：
+  source
+  route
+  policy
+  dispatched
+  should_reply
+  response_text
+  message
+
+该输出仍不记录用户原文，也不记录 LLM 回复正文。
+旧 observation.error fallback 保留；没有结构化 error_artifact 时继续按旧 Error 行输出。
+```
+
+边界：
+
+```text
+本步只增强只读观测输出。
+不改变 RootGraph 路由、权限、提交、副作用位置或审批策略。
+普通聊天仍不触发 MainAgent 工具。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 5 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.RootGraphRunnerTests -v
+Ran 12 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 246 tests OK
+```
+
+## v1.5 视觉电脑截图上下文与低质量输出兜底
+
+状态：已落地。电脑截图经 `qwen2.5vl:3b` 识别时，默认 Ollama 上下文可能触发重复符号输出；本次将视觉请求默认 `num_ctx` 提升到 16384，并把 `@@@@@@@@...` 这类低信息量重复内容判为视觉失败。
+
+本次完成：
+```text
+新增 VISION_NUM_CTX，默认 16384。
+Ollama /api/chat 视觉请求写入 options.num_ctx。
+新增低质量视觉描述检测，重复符号输出不再写入聊天上下文。
+/配置状态 和 /视觉状态 展示视觉上下文配置。
+.env.example、config/.env.example、docs/runbook.md 补充 VISION_NUM_CTX。
+```
+
+边界：
+```text
+不改变 RootGraph 路由、聊天权限、图片缓存策略和安全脱敏策略。
+不引入图像处理依赖，不做截图切片；本次只修 Ollama 上下文和坏输出兜底。
+```
+
+测试：
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_vision_voice_units -v
+Ran 19 tests OK
+```
+
+## v1.5 RootGraph 最近观测展示 vision detail
+
+状态：已落地。`/agent RootGraph 最近观测` 现在会展示普通聊天图片链路的非正文观测字段，便于定位图片未缓存、未解析、模型返回低质量内容或视觉上下文不足等问题。
+
+本次完成：
+```text
+chat_commit 新增图片上下文观测字段：
+  image_context_has_context
+  image_context_url_count
+  image_context_should_continue
+
+chat_commit 新增视觉描述统计字段：
+  vision_description_count
+  vision_error_count
+  vision_low_quality_count
+  vision_num_ctx
+
+/agent RootGraph 最近观测 新增 Vision detail 行：
+  context
+  urls
+  continue
+  descriptions
+  errors
+  low_quality
+  num_ctx
+```
+
+边界：
+```text
+只记录计数、布尔值和上下文配置。
+不记录图片 URL。
+不记录图片描述正文。
+不改变 RootGraph 路由、聊天权限、图片缓存策略或视觉模型调用策略。
+```
+
+测试：
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 6 tests OK
+```
+
 ## 后续整理规则
 
 从当前阶段开始：

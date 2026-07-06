@@ -547,6 +547,8 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
                         arguments["command"],
                         context.metadata["approval_id"],
                         context.metadata["task_id"],
+                        context.metadata["resume_mode"],
+                        context.metadata["resume_tool_name"],
                     )
                 )
                 return self.agent_tasks.ToolResult(
@@ -581,7 +583,18 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
 
         self.assertIsNotNone(approval)
         self.assertTrue(resumed)
-        self.assertEqual(calls, [("clear_image_cache", approval_id, task_id)])
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "clear_image_cache",
+                    approval_id,
+                    task_id,
+                    "approval_resume",
+                    "owner_write_command",
+                )
+            ],
+        )
         self.assertIn("Approval resume completed", resume_text)
         self.assertIn("已清空图片缓存：3 条。", resume_text)
         self.assertNotIn("Side effect: none", resume_text)
