@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import time
+from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+EMBEDDING_HEALTH_CHECK_TEXT = "AIchatbot embedding health check"
+EMBEDDING_HEALTH_CHECK_TIMEOUT_SECONDS = 20
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -26,6 +32,14 @@ class EmbeddingProviderConfig:
     base_url: str
     timeout_seconds: int = 60
     expected_dimension: int = 0
+
+
+@dataclass(frozen=True)
+class EmbeddingProviderCheck:
+    ok: bool
+    detail: str
+    dimension: int = 0
+    elapsed_seconds: float = 0.0
 
 
 def _as_float_vector(value: Any) -> list[float]:
@@ -126,3 +140,41 @@ def build_embedding_provider(config: Any) -> EmbeddingProvider:
             expected_dimension=int(config.memory_rag_embedding_dimension),
         )
     raise ValueError(f"Unsupported embedding provider: {provider}")
+
+
+def check_embedding_provider(
+    config: Any,
+    *,
+    enabled: bool = True,
+) -> EmbeddingProviderCheck:
+    if not enabled:
+        return EmbeddingProviderCheck(False, "RAG 未开启，未执行")
+
+    timeout_seconds = min(
+        max(int(getattr(config, "memory_rag_embedding_timeout_seconds", 1) or 1), 1),
+        EMBEDDING_HEALTH_CHECK_TIMEOUT_SECONDS,
+    )
+    check_config = SimpleNamespace(
+        memory_rag_embedding_provider=getattr(config, "memory_rag_embedding_provider", ""),
+        memory_rag_embedding_model=getattr(config, "memory_rag_embedding_model", ""),
+        memory_rag_embedding_base_url=getattr(config, "memory_rag_embedding_base_url", ""),
+        memory_rag_embedding_timeout_seconds=timeout_seconds,
+        memory_rag_embedding_dimension=getattr(config, "memory_rag_embedding_dimension", 0),
+    )
+
+    started = time.monotonic()
+    try:
+        embedder = build_embedding_provider(check_config)
+        vector = embedder.embed(EMBEDDING_HEALTH_CHECK_TEXT)
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        message = str(exc).strip() or type(exc).__name__
+        return EmbeddingProviderCheck(False, f"失败：{message}，用时 {elapsed:.1f} 秒", elapsed_seconds=elapsed)
+
+    elapsed = time.monotonic() - started
+    return EmbeddingProviderCheck(
+        True,
+        f"正常，用时 {elapsed:.1f} 秒，维度 {len(vector)}",
+        dimension=len(vector),
+        elapsed_seconds=elapsed,
+    )

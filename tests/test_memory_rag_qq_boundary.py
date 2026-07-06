@@ -61,6 +61,14 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("is_owner=is_owner(config, event)", source)
         self.assertNotIn("is_owner=is_owner(event)", source)
 
+    def test_memory_rag_status_includes_embedding_self_check(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn("check_embedding_provider", source)
+        self.assertIn("memory_rag_embedding_check_snapshot", source)
+        self.assertIn('"embedding_check": memory_rag_embedding_check_snapshot()', source)
+        self.assertIn("Embedding 自检", source)
+
     def test_root_graph_observation_includes_structured_error_artifact(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
 

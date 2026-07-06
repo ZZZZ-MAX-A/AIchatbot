@@ -178,7 +178,7 @@ from .owner_notify import (
 )
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
-from .rag.providers import build_embedding_provider
+from .rag.providers import build_embedding_provider, check_embedding_provider
 from .rag.schema import (
     NAMESPACE_SEMANTIC_MEMORY,
     SOURCE_MANUAL_FACT,
@@ -864,6 +864,7 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
     manual = manual_memory_stats()
     gap = gap_scene_summary_stats()
     trials = trial_stats()
+    embedding_check = memory_rag_embedding_check_snapshot()
     lines = [
         f"数据库：{DATABASE_PATH}",
         f"消息数量：{stats['message_count']}",
@@ -877,6 +878,8 @@ def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
         f"空窗摘要数量：{gap['summary_count']}",
         f"试用用户：{trials['trial_user_count']}",
         f"试用消息：{trials['trial_message_count']}",
+        f"MemoryRAG：{'开启' if config.enable_memory_rag else '关闭'}",
+        f"Embedding 自检：{embedding_check['detail']}",
     ]
     return lines
 
@@ -891,6 +894,19 @@ MEMORY_RAG_SOURCE_LABELS = {
     SOURCE_MANUAL_PREFERENCE: "长期偏好记忆",
     SOURCE_SESSION_SUMMARY: "会话摘要",
 }
+
+
+def memory_rag_embedding_check_snapshot() -> dict[str, object]:
+    check = check_embedding_provider(
+        config,
+        enabled=config.enable_memory_rag or config.enable_project_doc_rag,
+    )
+    return {
+        "ok": check.ok,
+        "detail": check.detail,
+        "dimension": check.dimension,
+        "elapsed_seconds": check.elapsed_seconds,
+    }
 
 
 def memory_rag_storage_stats() -> dict[str, object]:
@@ -976,6 +992,7 @@ def memory_rag_status_snapshot() -> dict[str, object]:
         "embedding_model": config.memory_rag_embedding_model,
         "embedding_base_url": config.memory_rag_embedding_base_url,
         "embedding_dimension": config.memory_rag_embedding_dimension,
+        "embedding_check": memory_rag_embedding_check_snapshot(),
         "top_k": config.memory_rag_top_k,
         "min_score": config.memory_rag_min_score,
         "max_context_chars": config.memory_rag_max_context_chars,
@@ -996,6 +1013,12 @@ def memory_rag_status_lines(snapshot: dict[str, object]) -> list[str]:
     storage = snapshot["storage"]
     source_counts = storage["source_counts"]
     pending_counts = storage["pending_counts"]
+    embedding_check = snapshot.get("embedding_check", {})
+    embedding_check_detail = (
+        embedding_check.get("detail", "未执行")
+        if isinstance(embedding_check, dict)
+        else "未执行"
+    )
     lines = [
         "MemoryRAG 状态：",
         f"RAG 开关：{'开启' if snapshot['enabled'] else '关闭'}",
@@ -1005,6 +1028,7 @@ def memory_rag_status_lines(snapshot: dict[str, object]) -> list[str]:
         f"向量模型：{snapshot['embedding_model']}",
         f"向量服务地址：{snapshot['embedding_base_url']}",
         f"向量维度：{snapshot['embedding_dimension']}",
+        f"Embedding 自检：{embedding_check_detail}",
         f"每次最多召回：{snapshot['top_k']} 条",
         f"最低相似度：{snapshot['min_score']}",
         f"召回上下文上限：{snapshot['max_context_chars']} 字",

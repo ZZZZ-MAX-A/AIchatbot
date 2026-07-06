@@ -579,6 +579,73 @@ class RagProviderUnitTests(unittest.TestCase):
         with self.assertRaises(self.providers.EmbeddingProviderError):
             self.providers.parse_ollama_embedding_response({"embeddings": []})
 
+    def test_check_embedding_provider_uses_capped_timeout_and_reports_dimension(self):
+        captured = {}
+
+        class ProbeEmbedder:
+            provider = "unit"
+            model = "toy"
+
+            def embed(self, text: str) -> list[float]:
+                captured["text"] = text
+                return [0.1, 0.2, 0.3]
+
+        def fake_builder(config):
+            captured["timeout"] = config.memory_rag_embedding_timeout_seconds
+            captured["dimension"] = config.memory_rag_embedding_dimension
+            return ProbeEmbedder()
+
+        config = SimpleNamespace(
+            memory_rag_embedding_provider="ollama",
+            memory_rag_embedding_model="bge-m3",
+            memory_rag_embedding_base_url="http://127.0.0.1:11434",
+            memory_rag_embedding_timeout_seconds=60,
+            memory_rag_embedding_dimension=1024,
+        )
+
+        with patch.object(self.providers, "build_embedding_provider", fake_builder):
+            result = self.providers.check_embedding_provider(config)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.dimension, 3)
+        self.assertEqual(captured["timeout"], self.providers.EMBEDDING_HEALTH_CHECK_TIMEOUT_SECONDS)
+        self.assertEqual(captured["dimension"], 1024)
+        self.assertEqual(captured["text"], self.providers.EMBEDDING_HEALTH_CHECK_TEXT)
+        self.assertIn("维度 3", result.detail)
+        self.assertNotIn(self.providers.EMBEDDING_HEALTH_CHECK_TEXT, result.detail)
+
+    def test_check_embedding_provider_reports_failure_without_vector_content(self):
+        error_cls = self.providers.EmbeddingProviderError
+
+        class FailingEmbedder:
+            provider = "unit"
+            model = "toy"
+
+            def embed(self, text: str) -> list[float]:
+                raise error_cls("Cannot connect to Ollama: refused")
+
+        config = SimpleNamespace(
+            memory_rag_embedding_provider="ollama",
+            memory_rag_embedding_model="bge-m3",
+            memory_rag_embedding_base_url="http://127.0.0.1:11434",
+            memory_rag_embedding_timeout_seconds=60,
+            memory_rag_embedding_dimension=1024,
+        )
+
+        with patch.object(self.providers, "build_embedding_provider", lambda _: FailingEmbedder()):
+            result = self.providers.check_embedding_provider(config)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.dimension, 0)
+        self.assertIn("Cannot connect to Ollama", result.detail)
+        self.assertNotIn(self.providers.EMBEDDING_HEALTH_CHECK_TEXT, result.detail)
+
+    def test_check_embedding_provider_skips_when_rag_is_disabled(self):
+        result = self.providers.check_embedding_provider(SimpleNamespace(), enabled=False)
+
+        self.assertFalse(result.ok)
+        self.assertIn("未执行", result.detail)
+
 
 class RagMemoryIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
     @classmethod
