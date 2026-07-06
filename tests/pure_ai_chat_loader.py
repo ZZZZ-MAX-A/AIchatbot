@@ -105,6 +105,12 @@ def install_nonebot_event_stubs():
     )
 
 
+def install_nonebot_driver_stub() -> None:
+    nonebot_module = sys.modules.setdefault("nonebot", types.ModuleType("nonebot"))
+    if not hasattr(nonebot_module, "get_driver"):
+        nonebot_module.get_driver = lambda: types.SimpleNamespace(env="test")
+
+
 def load_pure_graph_modules():
     ensure_ai_chat_packages()
     ensure_package("src.plugins.ai_chat.graph", AI_CHAT_ROOT / "graph")
@@ -299,6 +305,29 @@ def load_legacy_media_modules():
         ),
         "events": events,
     }
+    return modules
+
+
+def load_legacy_diagnostics_modules():
+    install_openai_stub()
+    install_nonebot_event_stubs()
+    install_nonebot_driver_stub()
+    ensure_ai_chat_packages()
+
+    modules = {
+        "config": load_module(
+            "src.plugins.ai_chat.config",
+            AI_CHAT_ROOT / "config.py",
+        ),
+        "vision": load_module(
+            "src.plugins.ai_chat.vision",
+            AI_CHAT_ROOT / "vision.py",
+        ),
+    }
+    modules["diagnostics"] = load_module(
+        "src.plugins.ai_chat.diagnostics",
+        AI_CHAT_ROOT / "diagnostics.py",
+    )
     return modules
 
 
