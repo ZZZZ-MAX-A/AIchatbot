@@ -1242,6 +1242,87 @@ def recent_errors_reply(errors: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
+def _select_prefixed_lines(text: str, prefixes: tuple[str, ...], *, limit: int = 12) -> list[str]:
+    selected: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(stripped.startswith(prefix) for prefix in prefixes):
+            selected.append(stripped)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _section_lines(title: str, lines: list[str]) -> list[str]:
+    if not lines:
+        return [f"{title}：", "暂无。"]
+    return [f"{title}：", *lines]
+
+
+async def agent_ops_health_reply(event: MessageEvent) -> str:
+    vision_execution = await run_diagnostics_graph(event, DiagnosticsView.VISION)
+    if vision_execution.result.error:
+        vision_lines = [vision_execution.result.reply_text or vision_execution.result.error]
+    else:
+        vision_lines = _select_prefixed_lines(
+            vision_execution.result.reply_text,
+            (
+                "视觉识图：",
+                "Ollama 地址：",
+                "Ollama 服务：",
+                "视觉模型：",
+                "模型存在：",
+                "视觉上下文：",
+                "推理自检：",
+            ),
+        )
+
+    rag_execution = await run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)
+    if rag_execution.result.error:
+        rag_lines = [rag_execution.result.reply_text or rag_execution.result.error]
+    else:
+        rag_lines = _select_prefixed_lines(
+            rag_execution.result.reply_text,
+            (
+                "RAG 开关：",
+                "聊天注入：",
+                "向量服务：",
+                "向量模型：",
+                "向量服务地址：",
+                "向量维度：",
+                "Embedding 自检：",
+                "索引文档数量：",
+                "向量记录数量：",
+                "待索引数量：",
+                "最近错误：",
+            ),
+        )
+
+    errors = recent_error_lines(5)
+    error_lines = ["暂无。"] if not errors else [
+        f"{index}. {line}" for index, line in enumerate(errors[:5], 1)
+    ]
+    root_lines = recent_root_graph_chat_observation_lines()[:12]
+    main_agent_lines = recent_main_agent_observation_lines(limit=5)
+
+    return "\n".join(
+        [
+            "Agent 聚合诊断：",
+            "范围：视觉/Ollama、MemoryRAG/Embedding、最近错误、RootGraph、MainAgent。",
+            "",
+            *_section_lines("视觉链路", vision_lines),
+            "",
+            *_section_lines("RAG/Embedding", rag_lines),
+            "",
+            *_section_lines("最近错误", error_lines),
+            "",
+            *_section_lines("RootGraph", root_lines),
+            "",
+            *_section_lines("MainAgent", main_agent_lines),
+        ]
+    )
+
+
 async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = DiagnosticsView.FULL):
     state = DiagnosticsState(
         view=view,
@@ -4069,6 +4150,7 @@ def main_agent_help_reply() -> str:
             "/agent 拒绝 <审批ID>",
             "/agent 下一步",
             "/agent 查 <问题>",
+            "/agent 诊断一下 Ollama / 看一下视觉和记忆状态",
             "/agent 帮我看一下最近错误",
             "/agent 记忆检索 <查询内容>",
             "/agent 看看诊断/配置/视觉/图片缓存/记忆/摘要/RAG/角色卡/白名单状态",
@@ -4101,6 +4183,8 @@ def main_agent_tool_status_reply() -> str:
             "可见性：LLM 可见 + 确定性语义优先",
             "审批：不需要",
             "用途：主人管理只读控制台，不改状态。",
+            "例子：/agent 诊断一下 Ollama",
+            "例子：/agent 看一下视觉和记忆状态",
             "例子：/agent 看看最近错误",
             "例子：/agent 记忆检索 版本计划",
             "例子：/agent 角色卡列表",
@@ -4583,6 +4667,8 @@ async def run_main_agent_qq_command(
         return execution.result.context_text
 
     async def execute_owner_read_command(command: str, _context) -> str:
+        if command == "ops_health":
+            return await agent_ops_health_reply(event)
         views = {
             "bot_status": "bot_status",
             "diagnostics": None,
