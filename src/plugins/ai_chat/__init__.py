@@ -202,6 +202,7 @@ from .vision import (
     format_image_descriptions,
     image_refs_from_event,
     is_direct_image_source,
+    is_low_quality_vision_description,
     sanitize_vision_description,
     vision_safety_context,
 )
@@ -2091,6 +2092,7 @@ async def run_voice_graph_intent(
             has_image_context=request.image_context.has_context,
         )
         image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        update_chat_image_description_commit(shadow_state, image_descriptions)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, shadow_state)
         user_content = build_chat_user_content(
@@ -2774,6 +2776,50 @@ def update_chat_commit(state: ChatState | None, **updates) -> None:
         update_runtime_chat_commit(state.runtime, **updates)
 
 
+def image_description_stats(descriptions: list[str]) -> dict[str, object]:
+    error_count = 0
+    low_quality_count = 0
+    for description in descriptions:
+        text = str(description)
+        is_error = text.startswith("无法读取或识别这张图片：") or text.startswith(
+            "图片识别失败："
+        )
+        is_low_quality = (
+            "Ollama 返回低质量重复内容" in text
+            or is_low_quality_vision_description(text)
+        )
+        if is_error:
+            error_count += 1
+        if is_low_quality:
+            low_quality_count += 1
+    return {
+        "vision_description_count": len(descriptions),
+        "vision_error_count": error_count,
+        "vision_low_quality_count": low_quality_count,
+        "vision_num_ctx": config.vision_num_ctx,
+    }
+
+
+def update_runtime_image_context_commit(
+    runtime: RuntimeState,
+    image_context: ChatImageContext,
+) -> None:
+    update_runtime_chat_commit(
+        runtime,
+        image_context_has_context=image_context.has_context,
+        image_context_url_count=len(image_context.urls),
+        image_context_should_continue=image_context.should_continue,
+        vision_num_ctx=config.vision_num_ctx,
+    )
+
+
+def update_chat_image_description_commit(
+    state: ChatState | None,
+    descriptions: list[str],
+) -> None:
+    update_chat_commit(state, **image_description_stats(descriptions))
+
+
 def build_shadow_chat_state(
     event: MessageEvent,
     request: ChatRequest,
@@ -2870,6 +2916,7 @@ def record_root_graph_chat_observation(
     chat_runtime = _artifact_dict(runtime, "chat_runtime")
     chat_access_policy = _artifact_dict(runtime, CHAT_ACCESS_POLICY_ARTIFACT)
     chat_commit = _artifact_dict(runtime, CHAT_COMMIT_ARTIFACT)
+    error_artifact = _artifact_dict(runtime, "error")
 
     snapshot_dict: dict[str, object] = {}
     validation_dict: dict[str, object] = {}
@@ -2901,6 +2948,7 @@ def record_root_graph_chat_observation(
         "chat_runtime": chat_runtime,
         "chat_access_policy": chat_access_policy,
         "chat_commit": chat_commit,
+        "error_artifact": error_artifact,
         "shadow_snapshot": snapshot_dict,
         "shadow_validation": validation_dict,
     }
@@ -2919,6 +2967,7 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
     chat_runtime = observation.get("chat_runtime", {})
     chat_access_policy = observation.get("chat_access_policy", {})
     chat_commit = observation.get("chat_commit", {})
+    error_artifact = observation.get("error_artifact", {})
     shadow = observation.get("shadow_snapshot", {})
     validation = observation.get("shadow_validation", {})
     if not isinstance(root_graph, dict):
@@ -2937,6 +2986,8 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
         chat_access_policy = {}
     if not isinstance(chat_commit, dict):
         chat_commit = {}
+    if not isinstance(error_artifact, dict):
+        error_artifact = {}
     if not isinstance(shadow, dict):
         shadow = {}
     if not isinstance(validation, dict):
@@ -3004,6 +3055,28 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
             f"stored_user_chars={chat_commit.get('stored_user_chars', 0)} "
             f"stored_assistant_chars={chat_commit.get('stored_assistant_chars', 0)}"
         )
+    should_show_vision_detail = any(
+        bool(value)
+        for value in (
+            observation.get("has_image"),
+            chat_commit.get("image_context_has_context"),
+            chat_commit.get("image_context_url_count"),
+            chat_commit.get("vision_description_count"),
+            chat_commit.get("vision_error_count"),
+            chat_commit.get("vision_low_quality_count"),
+        )
+    ) or chat_commit.get("image_context_should_continue") is not None
+    if should_show_vision_detail:
+        lines.append(
+            "Vision detail："
+            f"context={_bool_text(chat_commit.get('image_context_has_context'))} "
+            f"urls={chat_commit.get('image_context_url_count', 0)} "
+            f"continue={_bool_text(chat_commit.get('image_context_should_continue'))} "
+            f"descriptions={chat_commit.get('vision_description_count', 0)} "
+            f"errors={chat_commit.get('vision_error_count', 0)} "
+            f"low_quality={chat_commit.get('vision_low_quality_count', 0)} "
+            f"num_ctx={chat_commit.get('vision_num_ctx', config.vision_num_ctx)}"
+        )
     if shadow:
         lines.append(
             "Shadow："
@@ -3020,7 +3093,20 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
         lines.append("Shadow errors：" + "；".join(str(error) for error in errors))
     if warnings:
         lines.append("Shadow warnings：" + "；".join(str(warning) for warning in warnings))
-    if observation.get("error"):
+    if error_artifact:
+        lines.append(
+            "Error："
+            f"source={error_artifact.get('source', '') or '-'} "
+            f"route={error_artifact.get('route', '') or '-'} "
+            f"policy={error_artifact.get('policy_decision', '') or '-'} "
+            f"dispatched={_bool_text(error_artifact.get('dispatched'))} "
+            f"should_reply={_bool_text(error_artifact.get('should_reply'))} "
+            f"response_text={_bool_text(error_artifact.get('response_text_set'))}"
+        )
+        error_message = str(error_artifact.get("message") or observation.get("error") or "").strip()
+        if error_message:
+            lines.append(f"Error message：{error_message}")
+    elif observation.get("error"):
         lines.append(f"Error：{observation.get('error')}")
     return lines
 
@@ -3338,6 +3424,7 @@ async def run_chat_graph_session_runtime(
     async def resolve_image_context(chat_state: ChatState) -> ChatState:
         nonlocal image_descriptions
         image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        update_chat_image_description_commit(chat_state, image_descriptions)
         updated = safe_apply_shadow_vision_result(event, chat_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, updated)
         return updated or chat_state
@@ -3550,6 +3637,7 @@ async def run_legacy_chat_session(
             has_image_context=request.image_context.has_context,
         )
         image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        update_chat_image_description_commit(shadow_state, image_descriptions)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, shadow_state)
         user_content = build_chat_user_content(
@@ -3619,6 +3707,7 @@ async def run_chat_via_root_graph(
     async def chat_handler(current_runtime):
         nonlocal shadow_state
         image_context = await resolve_chat_image_context(bot, event, text, has_image)
+        update_runtime_image_context_commit(current_runtime, image_context)
         if not image_context.should_continue:
             current_runtime.artifacts["chat_runtime"] = {
                 "entry": "root_graph",

@@ -76,6 +76,8 @@ class VisionError(RuntimeError):
 
 DIRECT_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
 IMAGE_REF_FIELDS = ("file", "path", "file_id", "url")
+LOW_QUALITY_REPEAT_MIN_LENGTH = 12
+LOW_QUALITY_REPEAT_RATIO = 0.75
 
 
 def _segment_type(segment: Any) -> str:
@@ -153,6 +155,25 @@ def sanitize_vision_description(content: str) -> str:
     if len(text) > 180:
         text = text[:177].rstrip() + "..."
     return text
+
+
+def is_low_quality_vision_description(content: str) -> bool:
+    text = "".join(content.split())
+    if len(text) < LOW_QUALITY_REPEAT_MIN_LENGTH:
+        return False
+
+    unique_chars = set(text)
+    if len(unique_chars) <= 2:
+        return True
+
+    most_common = max(text.count(char) for char in unique_chars)
+    if most_common / len(text) >= LOW_QUALITY_REPEAT_RATIO:
+        return True
+
+    informative_chars = sum(
+        1 for char in text if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )
+    return informative_chars == 0 and len(unique_chars) <= 6
 
 
 async def describe_images(config: AiChatConfig, urls: list[str]) -> list[str]:
@@ -270,19 +291,21 @@ async def _describe_image_base64(config: AiChatConfig, image_base64: str) -> str
 
 def _ollama_chat_vision(config: AiChatConfig, image_base64: str) -> str:
     base_url = config.vision_ollama_base_url.rstrip("/")
-    body = json.dumps(
-        {
-            "model": config.vision_model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": VISION_PROMPT,
-                    "images": [image_base64],
-                }
-            ],
-            "stream": False,
-        }
-    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "model": config.vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": VISION_PROMPT,
+                "images": [image_base64],
+            }
+        ],
+        "stream": False,
+    }
+    vision_num_ctx = int(getattr(config, "vision_num_ctx", 0) or 0)
+    if vision_num_ctx > 0:
+        payload["options"] = {"num_ctx": vision_num_ctx}
+    body = json.dumps(payload).encode("utf-8")
     request = Request(
         f"{base_url}/api/chat",
         data=body,
@@ -307,4 +330,6 @@ def _ollama_chat_vision(config: AiChatConfig, image_base64: str) -> str:
     content = str(message.get("content") or "").strip()
     if not content:
         raise VisionError("Ollama 返回空描述")
+    if is_low_quality_vision_description(content):
+        raise VisionError("Ollama 返回低质量重复内容")
     return sanitize_vision_description(content)

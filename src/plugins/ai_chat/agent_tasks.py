@@ -906,7 +906,8 @@ def _execute_registered_resume_tool(
                 "task_id": approval.task_id,
                 "session_key": session_key,
                 "user_id": user_id,
-                "resume_mode": "dry_run",
+                "resume_mode": "approval_resume",
+                "resume_tool_name": approval.tool_name,
             },
         ),
     )

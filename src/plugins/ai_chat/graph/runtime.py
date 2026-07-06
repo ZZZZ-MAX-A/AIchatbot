@@ -55,6 +55,7 @@ class RootGraphRunner:
         response: RuntimeResponse | None = None
         dispatched = False
         dispatch_error = ""
+        error_source = ""
 
         for node in ROOT_NODE_SEQUENCE:
             node_trace.append(node)
@@ -81,6 +82,7 @@ class RootGraphRunner:
                         raise
                     except Exception as exc:
                         dispatch_error = f"{type(exc).__name__}: {exc}"
+                        error_source = "dispatch_exception"
                         state.error = dispatch_error
                         response = RuntimeResponse(
                             f"Agent Runtime error: {dispatch_error}",
@@ -89,6 +91,8 @@ class RootGraphRunner:
                         dispatched = False
                 else:
                     state.error = policy.error or state.error
+                    if state.error:
+                        error_source = "policy"
                     response = RuntimeResponse(
                         policy.response_text,
                         should_reply=policy.should_reply,
@@ -103,6 +107,16 @@ class RootGraphRunner:
         state.response = final_response.text
         if dispatch_error:
             state.error = dispatch_error
+        if state.error and not error_source:
+            error_source = "handler" if dispatched else "runtime"
+        self._record_error_artifact(
+            state,
+            route,
+            dispatched,
+            policy=policy,
+            response=final_response,
+            source=error_source,
+        )
         self._record_artifact(
             state,
             node_trace,
@@ -150,6 +164,28 @@ class RootGraphRunner:
             "context_level": context_level,
             "should_reply": response.should_reply,
             "error": state.error or "",
+        }
+
+    def _record_error_artifact(
+        self,
+        state: RuntimeState,
+        route: RouteDecision,
+        dispatched: bool,
+        *,
+        policy: RootPolicyDecision,
+        response: RuntimeResponse,
+        source: str,
+    ) -> None:
+        if not state.error:
+            return
+        state.artifacts["error"] = {
+            "source": source or "runtime",
+            "message": state.error,
+            "route": route.intent.value,
+            "policy_decision": policy.decision,
+            "dispatched": dispatched,
+            "should_reply": response.should_reply,
+            "response_text_set": bool(response.text),
         }
 
     def _record_normalized_artifact(self, state: RuntimeState) -> None:

@@ -159,6 +159,18 @@ class RootGraphRunnerTests(unittest.TestCase):
         self.assertEqual(state.artifacts["policy"]["decision"], "rate_limited")
         self.assertEqual(state.artifacts["root_graph"]["route"], "ignore")
         self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+        self.assertEqual(
+            state.artifacts["error"],
+            {
+                "source": "policy",
+                "message": "rate_limited",
+                "route": "ignore",
+                "policy_decision": "rate_limited",
+                "dispatched": False,
+                "should_reply": True,
+                "response_text_set": True,
+            },
+        )
 
     def test_root_graph_runner_silently_denies_chat_from_access_policy(self):
         state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
@@ -202,7 +214,33 @@ class RootGraphRunnerTests(unittest.TestCase):
         self.assertIn("RuntimeError: boom", response.text)
         self.assertEqual(state.error, "RuntimeError: boom")
         self.assertEqual(state.artifacts["root_graph"]["error"], "RuntimeError: boom")
+        self.assertEqual(state.artifacts["error"]["source"], "dispatch_exception")
+        self.assertEqual(state.artifacts["error"]["route"], "chat")
+        self.assertEqual(state.artifacts["error"]["policy_decision"], "allow")
+        self.assertFalse(state.artifacts["error"]["dispatched"])
         self.assertFalse(state.artifacts["root_graph"]["dispatched"])
+
+    def test_root_graph_runner_records_handler_error_artifact_without_exception(self):
+        state = self.make_runtime_state(intent=self.state.RuntimeIntent.CHAT)
+
+        async def chat_handler(runtime_state):
+            runtime_state.error = "chat_runtime_failed"
+            return self.runtime.RuntimeResponse("chat failed", should_reply=True)
+
+        runner = self.runtime.RootGraphRunner(
+            handlers={self.state.RuntimeIntent.CHAT: chat_handler}
+        )
+
+        response = asyncio.run(runner.run(state))
+
+        self.assertEqual(response.text, "chat failed")
+        self.assertTrue(response.should_reply)
+        self.assertEqual(state.error, "chat_runtime_failed")
+        self.assertEqual(state.artifacts["error"]["source"], "handler")
+        self.assertEqual(state.artifacts["error"]["message"], "chat_runtime_failed")
+        self.assertEqual(state.artifacts["error"]["route"], "chat")
+        self.assertTrue(state.artifacts["error"]["dispatched"])
+        self.assertEqual(state.artifacts["root_graph"]["error"], "chat_runtime_failed")
 
     def test_root_graph_runner_can_passthrough_control_exceptions(self):
         class ControlException(Exception):

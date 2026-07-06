@@ -70,6 +70,7 @@ class AiChatConfig:
     vision_ollama_base_url: str
     vision_model: str
     vision_timeout_seconds: int
+    vision_num_ctx: int
     vision_max_images: int
     vision_max_image_bytes: int
     vision_image_cache_ttl_seconds: int
@@ -175,6 +176,7 @@ def load_config() -> AiChatConfig:
         vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         vision_model=os.getenv("VISION_MODEL", "qwen2.5vl:3b"),
         vision_timeout_seconds=_int_env("VISION_TIMEOUT_SECONDS", 180),
+        vision_num_ctx=_int_env("VISION_NUM_CTX", 16384),
         vision_max_images=_int_env("VISION_MAX_IMAGES", 1),
         vision_max_image_bytes=_int_env("VISION_MAX_IMAGE_BYTES", 5242880),
         vision_image_cache_ttl_seconds=_int_env("VISION_IMAGE_CACHE_TTL_SECONDS", 120),
