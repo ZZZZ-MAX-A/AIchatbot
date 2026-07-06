@@ -18,6 +18,35 @@
   docs/project-rag-usage.md 保留为本地 RAG / DevContextGraph / Codex 恢复上下文手册。
 ```
 
+## v1.5 MemoryRAG embedding 自检
+
+状态：已落地。`/记忆状态` 和 `/RAG状态` 现在会显示当前 MemoryRAG embedding 链路的真实自检结果。
+
+本次完成：
+```text
+新增 check_embedding_provider，使用固定测试文本真实调用当前 embedding provider。
+默认配置下该自检会验证 Ollama bge-m3 是否能返回可用向量。
+自检请求沿用 MEMORY_RAG_EMBEDDING_DIMENSION 校验，并将诊断超时上限限制为 20 秒。
+/记忆状态 新增 MemoryRAG 开关和 Embedding 自检摘要。
+/RAG状态 新增 Embedding 自检详情。
+自检成功时展示耗时和向量维度；失败时展示 provider 错误摘要。
+```
+
+边界：
+```text
+不读取用户聊天内容，不读取记忆正文。
+不记录 embedding 向量，不写数据库，不重建索引。
+不改变普通聊天 MemoryRAG 注入逻辑。
+不改变 ProjectDocRAG 与 QQ 普通聊天的隔离边界。
+bge-m3 失效时，普通聊天继续兜底运行，但 MemoryRAG / ProjectDocRAG 语义搜索不可用。
+```
+
+测试：
+```text
+$env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary tests.test_rag_units -v
+Ran 24 tests OK
+```
+
 ## v1.5 /视觉状态 推理自检
 
 状态：已落地。`/视觉状态` 现在除了检查 Ollama `/api/tags` 和视觉模型是否存在，还会用一张内置的小型 PNG 测试图执行一次真实的 Ollama 视觉推理。

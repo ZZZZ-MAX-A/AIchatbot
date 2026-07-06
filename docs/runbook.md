@@ -332,6 +332,8 @@ RULE_REMINDER_INTERVAL_MESSAGES=40
 
 `/记忆状态` 只有主人可以使用。
 
+`/记忆状态` 会显示 MemoryRAG 开关和 Embedding 自检摘要。`/RAG状态` 会显示更完整的 MemoryRAG 索引状态，并用固定测试文本真实调用当前 embedding provider。默认配置下这条链路使用 Ollama `bge-m3`；如果 `bge-m3` 或 Ollama embedding 服务失败，普通聊天仍会继续，但 MemoryRAG / ProjectDocRAG 的语义搜索会不可用，最近错误中通常会出现 `EmbeddingProviderError`。
+
 清空全部会话上下文：
 
 ```text
