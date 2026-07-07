@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import types
 import unittest
 
 from pure_ai_chat_loader import load_pure_graph_modules
@@ -12,8 +13,135 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         cls.modules = load_pure_graph_modules()
         cls.main_agent = cls.modules["main_agent"]
         cls.main_agent_bridge = cls.modules["main_agent_bridge"]
+        cls.owner_read_runtime = cls.modules["owner_read_runtime"]
         cls.policy_risk = cls.modules["policy_risk"]
         cls.tool_registry = cls.modules["tool_registry"]
+
+    def test_owner_read_runtime_dispatches_without_qq_event(self):
+        calls = []
+
+        def execution(text, error=""):
+            return types.SimpleNamespace(
+                result=types.SimpleNamespace(reply_text=text, error=error)
+            )
+
+        async def run_diagnostics(view):
+            calls.append(("diagnostics", view))
+            return execution(f"diagnostics:{view}")
+
+        async def run_memory_retrieval(action, query=""):
+            calls.append(("retrieval", action, query))
+            return execution(f"retrieval:{action}:{query}")
+
+        async def run_memory_admin(action):
+            calls.append(("admin", action))
+            return execution(f"admin:{action}")
+
+        runtime = self.owner_read_runtime.OwnerReadRuntime(
+            bot_status_lines=lambda: ["Bot 状态", "OK"],
+            ops_health_reply=lambda: "聚合诊断",
+            vision_troubleshoot_reply=lambda: "图片识别排查",
+            memory_rag_troubleshoot_reply=lambda: "记忆检索排查",
+            run_diagnostics=run_diagnostics,
+            run_memory_retrieval=run_memory_retrieval,
+            run_memory_admin=run_memory_admin,
+            load_persona_prompt=lambda: "persona body",
+            persona_status_lines=lambda: ["角色卡状态"],
+            role_card_list_lines=lambda: ["角色卡列表"],
+            model_config_status_lines=lambda: ["模型配置"],
+            access_overview_lines=lambda: ["访问控制"],
+            rag_index_detail_lines=lambda: ["RAG 索引"],
+            main_agent_observation_lines=lambda: ["MainAgent 观测"],
+            root_graph_observation_lines=lambda: ["RootGraph 观测"],
+            group_whitelist_reply=lambda: "群白名单",
+            private_whitelist_reply=lambda: "私聊白名单",
+            blacklist_reply=lambda: "黑名单",
+        )
+        context = self.tool_registry.ToolContext(
+            metadata={"tool_arguments": {"query": "Route B 审批流"}}
+        )
+
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "bot_status",
+                    context,
+                )
+            ),
+            "Bot 状态\nOK",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "ops_health",
+                    context,
+                )
+            ),
+            "聚合诊断",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "config_status",
+                    context,
+                )
+            ),
+            f"diagnostics:{self.modules['diagnostics'].DiagnosticsView.CONFIG}",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "memory_retrieval",
+                    context,
+                )
+            ),
+            f"retrieval:{self.modules['retrieval'].MemoryRetrievalAction.QUERY}:Route B 审批流",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "summary_status",
+                    context,
+                )
+            ),
+            f"admin:{self.modules['memory'].MemoryAdminAction.SUMMARY_STATUS}",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "view_persona",
+                    context,
+                )
+            ),
+            "当前角色卡内容：\npersona body",
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("diagnostics", self.modules["diagnostics"].DiagnosticsView.CONFIG),
+                (
+                    "retrieval",
+                    self.modules["retrieval"].MemoryRetrievalAction.QUERY,
+                    "Route B 审批流",
+                ),
+                ("admin", self.modules["memory"].MemoryAdminAction.SUMMARY_STATUS),
+            ],
+        )
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "unsupported",
+                    context,
+                )
+            )
 
     def test_read_only_runner_executes_dev_context_for_owner_private_chat(self):
         calls = []

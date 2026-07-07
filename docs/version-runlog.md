@@ -518,6 +518,48 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 281 tests OK
 ```
 
+## v1.6 MainAgent owner_read runtime service 解耦第一步
+
+状态：已落地 P2.2 代码层 service 解耦。目标是继续把 `src/plugins/ai_chat/__init__.py` 从“承载业务 runtime”收窄为 QQ/NoneBot adapter，让主人只读管理命令分发可以被后续 Runtime service / Owner Console 后端复用。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_read_runtime.py。
+新增 OwnerReadRuntime 依赖注入对象，用于承载 DiagnosticsGraph、MemoryRAG、MemoryAdmin、角色卡、名单和观测等只读 provider。
+新增 run_owner_read_command(runtime, command, context)，集中分发 owner_read_command。
+src/plugins/ai_chat/__init__.py 新增 owner_read_runtime_from_event(event)，只负责把 QQ event 绑定到现有只读读取函数。
+run_main_agent_qq_command 内部的 execute_owner_read_command 现在只委托 owner_read_runtime service。
+owner_read_runtime 单测验证不依赖 QQ event，也能分发 bot_status、ops_health、config_status、memory_retrieval、summary_status 和 view_persona。
+QQ 边界测试改为检查 owner_read_runtime.py 承载只读命令分发，__init__.py 继续保留底层 QQ/event 绑定和诊断证据读取。
+```
+
+边界：
+
+```text
+这是代码层解耦，不是独立进程。
+不新增 HTTP API。
+不新增 Web Owner Console。
+不改数据库 schema。
+不改变现有 /agent owner_read_command 行为。
+不新增 shell、任意文件写入、未注册数据库写入或多步写执行能力。
+owner_read_runtime 只做只读命令路由，不直接写数据库、不发额外 QQ 消息。
+普通聊天仍不会触发 MainAgent owner_read runtime。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 48 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 282 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

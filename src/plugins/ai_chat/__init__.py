@@ -151,6 +151,7 @@ from .owner_agent_runtime import (
     format_owner_agent_task_read,
     run_owner_agent_task_command,
 )
+from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
 from .rag.providers import build_embedding_provider, check_embedding_provider
@@ -4593,6 +4594,45 @@ def owner_agent_context_from_event(event: MessageEvent) -> OwnerAgentContext:
     )
 
 
+def owner_read_runtime_from_event(event: MessageEvent) -> OwnerReadRuntime:
+    async def run_owner_read_diagnostics(view):
+        return (
+            await run_diagnostics_graph(event)
+            if view is None
+            else await run_diagnostics_graph(event, view)
+        )
+
+    async def run_owner_read_memory_retrieval(action, query: str = ""):
+        return await run_memory_retrieval_graph(event, action, query=query)
+
+    async def run_owner_read_memory_admin(action):
+        return await run_memory_admin_graph(event, action)
+
+    return OwnerReadRuntime(
+        bot_status_lines=status_lines,
+        ops_health_reply=lambda: agent_ops_health_reply(event),
+        vision_troubleshoot_reply=lambda: agent_vision_troubleshoot_reply(event),
+        memory_rag_troubleshoot_reply=lambda: agent_memory_rag_troubleshoot_reply(event),
+        run_diagnostics=run_owner_read_diagnostics,
+        run_memory_retrieval=run_owner_read_memory_retrieval,
+        run_memory_admin=run_owner_read_memory_admin,
+        load_persona_prompt=load_persona_prompt,
+        persona_status_lines=persona_status_lines,
+        role_card_list_lines=role_card_list_lines,
+        model_config_status_lines=model_config_status_lines,
+        access_overview_lines=access_overview_lines,
+        rag_index_detail_lines=rag_index_detail_lines,
+        main_agent_observation_lines=recent_main_agent_observation_lines,
+        root_graph_observation_lines=recent_root_graph_chat_observation_lines,
+        group_whitelist_reply=lambda: list_lines("群白名单", current_access().group_whitelist),
+        private_whitelist_reply=lambda: list_lines(
+            "私聊白名单",
+            current_access().private_whitelist,
+        ),
+        blacklist_reply=lambda: list_lines("黑名单", current_access().user_blacklist),
+    )
+
+
 async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
     return "dev_context is not available during approval resume."
 
@@ -4827,85 +4867,11 @@ async def run_main_agent_qq_command(
         return execution.result.context_text
 
     async def execute_owner_read_command(command: str, _context) -> str:
-        if command == "ops_health":
-            return await agent_ops_health_reply(event)
-        if command == "vision_troubleshoot":
-            return await agent_vision_troubleshoot_reply(event)
-        if command == "memory_rag_troubleshoot":
-            return await agent_memory_rag_troubleshoot_reply(event)
-        views = {
-            "bot_status": "bot_status",
-            "diagnostics": None,
-            "config_status": DiagnosticsView.CONFIG,
-            "vision_status": DiagnosticsView.VISION,
-            "recent_errors": DiagnosticsView.RECENT_ERRORS,
-            "image_cache_status": DiagnosticsView.IMAGE_CACHE,
-            "memory_status": DiagnosticsView.MEMORY,
-            "tts_status": DiagnosticsView.TTS,
-        }
-        if command in views:
-            view = views[command]
-            if view == "bot_status":
-                return "\n".join(status_lines())
-            execution = (
-                await run_diagnostics_graph(event)
-                if view is None
-                else await run_diagnostics_graph(event, view)
-            )
-            if execution.result.error:
-                raise RuntimeError(execution.result.reply_text or execution.result.error)
-            return execution.result.reply_text
-        if command == "rag_status":
-            execution = await run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)
-            if execution.result.error:
-                raise RuntimeError(execution.result.reply_text or execution.result.error)
-            return execution.result.reply_text
-        if command == "memory_retrieval":
-            arguments = _context.metadata.get("tool_arguments", {})
-            query = ""
-            if isinstance(arguments, dict):
-                query = str(arguments.get("query") or "").strip()
-            execution = await run_memory_retrieval_graph(
-                event,
-                MemoryRetrievalAction.QUERY,
-                query=query,
-            )
-            return execution.result.reply_text
-        memory_admin_actions = {
-            "summary_status": MemoryAdminAction.SUMMARY_STATUS,
-            "view_summaries": MemoryAdminAction.VIEW_SUMMARIES,
-            "view_gap_scene_summaries": MemoryAdminAction.VIEW_GAP_SCENE_SUMMARIES,
-            "view_long_term_memory": MemoryAdminAction.VIEW_LONG_TERM_MEMORY,
-        }
-        if command in memory_admin_actions:
-            execution = await run_memory_admin_graph(event, memory_admin_actions[command])
-            if execution.result.error:
-                raise RuntimeError(execution.result.reply_text or execution.result.error)
-            return execution.result.reply_text
-        if command == "view_persona":
-            prompt = load_persona_prompt()
-            if prompt:
-                return "当前角色卡内容：\n" + prompt
-            return "\n".join(persona_status_lines())
-        if command == "role_card_list":
-            return "\n".join(role_card_list_lines())
-        if command == "model_config_status":
-            return "\n".join(model_config_status_lines())
-        if command == "access_overview":
-            return "\n".join(access_overview_lines())
-        if command == "rag_index_detail":
-            return "\n".join(rag_index_detail_lines())
-        if command == "main_agent_observations":
-            return "\n".join(recent_main_agent_observation_lines())
-        if command == "root_graph_observations":
-            return "\n".join(recent_root_graph_chat_observation_lines())
-        if command == "group_whitelist":
-            return list_lines("群白名单", current_access().group_whitelist)
-        if command == "private_whitelist":
-            return list_lines("私聊白名单", current_access().private_whitelist)
-        if command == "blacklist":
-            return list_lines("黑名单", current_access().user_blacklist)
-        raise RuntimeError(f"unsupported owner read command: {command}")
+        return await run_owner_read_command(
+            owner_read_runtime_from_event(event),
+            command,
+            _context,
+        )
 
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
         return format_owner_agent_task_read(
