@@ -38,7 +38,9 @@ from .agent_tasks import (
     AGENT_TASK_COMMAND_CANCEL,
     AGENT_TASK_COMMAND_CREATE,
     AGENT_TASK_COMMAND_DETAIL,
+    AGENT_TASK_COMMAND_NEXT_STEP,
     AGENT_TASK_COMMAND_STATUS,
+    AGENT_APPROVAL_PENDING,
     AGENT_APPROVAL_APPROVED,
     cancel_agent_task,
     create_agent_approval_drill_reply,
@@ -50,10 +52,12 @@ from .agent_tasks import (
     format_agent_task_created,
     format_agent_task_detail,
     format_agent_task_list,
+    format_agent_task_next_step,
     format_agent_approval_detail,
     format_agent_approval_list,
     get_agent_approval,
     get_agent_task,
+    is_implicit_latest_agent_reference,
     is_latest_agent_reference,
     list_agent_task_events,
     list_agent_approvals,
@@ -88,7 +92,9 @@ from .diagnostics import (
     format_image_cache_status,
     format_recent_errors,
     format_vision_status,
+    memory_rag_troubleshoot_findings,
     recent_error_lines,
+    vision_troubleshoot_findings,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
 from .graph import (
@@ -729,6 +735,7 @@ async def run_memory_context_graph(
                 source_types=set(MEMORY_RAG_SOURCE_TYPES),
             )
             current.semantic_memory_result_count = len(results)
+            current.semantic_memory_hits = list(semantic_memory_hit_snapshots(results))
             current.semantic_memory_context = format_semantic_memory_context(results)
             if current.semantic_memory_context:
                 current.system_contexts.append(current.semantic_memory_context)
@@ -776,7 +783,16 @@ async def build_chat_prompt_context(
     history.append({"role": "system", "content": current_message_identity_context(event)})
     event_user_id = user_id(event)
     event_group_id = group_id(event) if isinstance(event, GroupMessageEvent) else None
-    return ChatPromptContext(history=history, user_id=event_user_id, group_id=event_group_id)
+    return ChatPromptContext(
+        history=history,
+        user_id=event_user_id,
+        group_id=event_group_id,
+        semantic_memory_query=query.strip(),
+        semantic_memory_result_count=memory_execution.result.semantic_memory_result_count,
+        semantic_memory_context_chars=len(memory_execution.result.semantic_memory_context),
+        semantic_memory_error=memory_execution.result.semantic_memory_error,
+        semantic_memory_hits=memory_execution.result.semantic_memory_hits,
+    )
 
 
 async def describe_chat_images(
@@ -1083,6 +1099,23 @@ def format_memory_retrieval_reply(query: str, results) -> str:
     return "\n".join(lines).rstrip()
 
 
+def semantic_memory_hit_snapshots(results) -> tuple[dict[str, object], ...]:
+    hits: list[dict[str, object]] = []
+    for result in results:
+        document = result.document
+        hits.append(
+            {
+                "document_id": document.id,
+                "source_type": document.source_type,
+                "source_id": document.source_id,
+                "score": float(result.score),
+                "session_key": document.session_key,
+                "title": document.title,
+            }
+        )
+    return tuple(hits)
+
+
 def format_semantic_memory_context(results) -> str:
     if not results:
         return ""
@@ -1319,6 +1352,192 @@ async def agent_ops_health_reply(event: MessageEvent) -> str:
             *_section_lines("RootGraph", root_lines),
             "",
             *_section_lines("MainAgent", main_agent_lines),
+        ]
+    )
+
+
+async def agent_vision_troubleshoot_reply(event: MessageEvent) -> str:
+    step_lines: list[str] = []
+
+    vision_execution = await run_diagnostics_graph(event, DiagnosticsView.VISION)
+    if vision_execution.result.error:
+        vision_lines = [vision_execution.result.reply_text or vision_execution.result.error]
+        step_lines.append("1. 视觉/Ollama 自检：失败")
+    else:
+        vision_lines = _select_prefixed_lines(
+            vision_execution.result.reply_text,
+            (
+                "视觉识图：",
+                "Ollama 地址：",
+                "Ollama 服务：",
+                "视觉模型：",
+                "模型存在：",
+                "视觉上下文：",
+                "推理自检：",
+            ),
+        )
+        step_lines.append("1. 视觉/Ollama 自检：完成")
+
+    cache_execution = await run_diagnostics_graph(event, DiagnosticsView.IMAGE_CACHE)
+    if cache_execution.result.error:
+        cache_lines = [cache_execution.result.reply_text or cache_execution.result.error]
+        step_lines.append("2. 图片缓存状态：失败")
+    else:
+        cache_lines = _select_prefixed_lines(
+            cache_execution.result.reply_text,
+            (
+                "缓存数量：",
+                "私聊缓存：",
+                "群聊缓存：",
+                "缓存 TTL：",
+                "私聊图片等待：",
+                "每轮最多图片：",
+            ),
+        )
+        step_lines.append("2. 图片缓存状态：完成")
+
+    recent_errors = recent_error_lines(8)
+    error_lines = ["暂无。"] if not recent_errors else [
+        f"{index}. {line}" for index, line in enumerate(recent_errors[:8], 1)
+    ]
+    step_lines.append("3. 最近错误日志：完成")
+
+    root_lines = recent_root_graph_chat_observation_lines()[:16]
+    main_agent_lines = recent_main_agent_observation_lines(limit=5)
+    step_lines.append("4. RootGraph 最近观测：完成")
+    step_lines.append("5. MainAgent 最近观测：完成")
+
+    findings = vision_troubleshoot_findings(
+        vision_lines=vision_lines,
+        recent_errors=recent_errors,
+        root_lines=root_lines,
+    )
+
+    return "\n".join(
+        [
+            "MainAgent 多步只读诊断：图片识别",
+            "范围：视觉/Ollama、图片缓存、最近错误、RootGraph、MainAgent。",
+            "只读保证：未清理缓存、未修改配置、未写入数据库、未发送额外 QQ 消息。",
+            "",
+            "步骤：",
+            *step_lines,
+            "",
+            *_section_lines("初步判断", [f"- {line}" for line in findings]),
+            "",
+            *_section_lines("视觉/Ollama 证据", vision_lines),
+            "",
+            *_section_lines("图片缓存证据", cache_lines),
+            "",
+            *_section_lines("最近错误证据", error_lines),
+            "",
+            *_section_lines("RootGraph 证据", root_lines),
+            "",
+            *_section_lines("MainAgent 证据", main_agent_lines),
+        ]
+    )
+
+
+def _memory_rag_root_evidence_lines(root_lines: list[str]) -> list[str]:
+    selected = _select_prefixed_lines(
+        "\n".join(root_lines),
+        (
+            "RootGraph/CHAT 最近观测：",
+            "时间：",
+            "会话：",
+            "Context：",
+            "MemoryRAG：",
+            "MemoryRAG hits：",
+            "MemoryRAG error：",
+            "Error：",
+            "Error message：",
+        ),
+        limit=16,
+    )
+    return selected or root_lines[:8]
+
+
+async def agent_memory_rag_troubleshoot_reply(event: MessageEvent) -> str:
+    step_lines: list[str] = []
+
+    rag_execution = await run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)
+    if rag_execution.result.error:
+        rag_lines = [rag_execution.result.reply_text or rag_execution.result.error]
+        step_lines.append("1. MemoryRAG/Embedding 状态：失败")
+    else:
+        rag_lines = _select_prefixed_lines(
+            rag_execution.result.reply_text,
+            (
+                "RAG 开关：",
+                "聊天注入：",
+                "调试命令权限：",
+                "向量服务：",
+                "向量模型：",
+                "向量服务地址：",
+                "向量维度：",
+                "Embedding 自检：",
+                "每次最多召回：",
+                "最低相似度：",
+                "召回上下文上限：",
+                "索引文档数量：",
+                "向量记录数量：",
+                "待索引数量：",
+                "- 长期事实记忆：",
+                "- 长期偏好记忆：",
+                "- 正式会话摘要：",
+                "- 短时原文：",
+                "- 空窗摘要：",
+                "最近错误：",
+            ),
+            limit=24,
+        )
+        step_lines.append("1. MemoryRAG/Embedding 状态：完成")
+
+    try:
+        index_lines = rag_index_detail_lines()
+        step_lines.append("2. RAG 索引详情：完成")
+    except Exception as exc:
+        index_lines = [f"{type(exc).__name__}: {exc}"]
+        step_lines.append("2. RAG 索引详情：失败")
+
+    recent_errors = recent_error_lines(8)
+    error_lines = ["暂无。"] if not recent_errors else [
+        f"{index}. {line}" for index, line in enumerate(recent_errors[:8], 1)
+    ]
+    step_lines.append("3. 最近错误日志：完成")
+
+    root_lines = recent_root_graph_chat_observation_lines()
+    root_evidence_lines = _memory_rag_root_evidence_lines(root_lines)
+    main_agent_lines = recent_main_agent_observation_lines(limit=5)
+    step_lines.append("4. RootGraph MemoryRAG 观测：完成")
+    step_lines.append("5. MainAgent 最近观测：完成")
+
+    findings = memory_rag_troubleshoot_findings(
+        status_lines=rag_lines,
+        index_lines=index_lines,
+        recent_errors=recent_errors,
+        root_lines=root_lines,
+    )
+
+    return "\n".join(
+        [
+            "MainAgent 多步只读诊断：记忆/RAG",
+            "范围：MemoryRAG/Embedding、RAG 索引、最近错误、RootGraph、MainAgent。",
+            "只读保证：未重建索引、未写入记忆、未删除文档、未修改配置、未写入数据库、未发送额外 QQ 消息。",
+            "",
+            "步骤：",
+            *step_lines,
+            "",
+            *_section_lines("初步判断", [f"- {line}" for line in findings]),
+            "",
+            *_section_lines("MemoryRAG/Embedding 证据", rag_lines),
+            "",
+            *_section_lines("RAG 索引证据", index_lines),
+            "",
+            *_section_lines("最近错误证据", error_lines),
+            "",
+            *_section_lines("RootGraph 证据", root_evidence_lines),
+            "",
+            *_section_lines("MainAgent 证据", main_agent_lines),
         ]
     )
 
@@ -2881,6 +3100,46 @@ def update_chat_commit(state: ChatState | None, **updates) -> None:
         update_runtime_chat_commit(state.runtime, **updates)
 
 
+def memory_rag_prompt_context_commit(prompt_context: ChatPromptContext) -> dict[str, object]:
+    hits: list[dict[str, object]] = []
+    for hit in prompt_context.semantic_memory_hits:
+        if not isinstance(hit, dict):
+            continue
+        score = hit.get("score", 0.0)
+        try:
+            score_value = float(score)
+        except (TypeError, ValueError):
+            score_value = 0.0
+        try:
+            document_id = int(hit.get("document_id") or 0)
+        except (TypeError, ValueError):
+            document_id = 0
+        hits.append(
+            {
+                "source_type": str(hit.get("source_type") or ""),
+                "source_id": str(hit.get("source_id") or ""),
+                "score": score_value,
+                "document_id": document_id,
+                "session_key": str(hit.get("session_key") or ""),
+            }
+        )
+    attempted = (
+        config.enable_memory_rag
+        and config.memory_rag_inject_in_chat
+        and bool(prompt_context.semantic_memory_query.strip())
+    )
+    return {
+        "memory_rag_enabled": config.enable_memory_rag,
+        "memory_rag_inject_in_chat": config.memory_rag_inject_in_chat,
+        "memory_rag_attempted": attempted,
+        "memory_rag_query_chars": len(prompt_context.semantic_memory_query.strip()),
+        "memory_rag_result_count": prompt_context.semantic_memory_result_count,
+        "memory_rag_context_chars": prompt_context.semantic_memory_context_chars,
+        "memory_rag_error": prompt_context.semantic_memory_error,
+        "memory_rag_hits": tuple(hits),
+    }
+
+
 def image_description_stats(descriptions: list[str]) -> dict[str, object]:
     error_count = 0
     low_quality_count = 0
@@ -3005,6 +3264,35 @@ def _artifact_dict(runtime: RuntimeState, name: str) -> dict[str, object]:
 
 def _bool_text(value: object) -> str:
     return "是" if bool(value) else "否"
+
+
+def _memory_rag_hit_summary(hits: object, max_items: int = 6) -> str:
+    if not isinstance(hits, (list, tuple)):
+        return "-"
+    labels = {
+        SOURCE_MANUAL_FACT: "事实",
+        SOURCE_MANUAL_PREFERENCE: "偏好",
+        SOURCE_SESSION_SUMMARY: "摘要",
+    }
+    parts: list[str] = []
+    for hit in hits[:max_items]:
+        if not isinstance(hit, dict):
+            continue
+        source_type = str(hit.get("source_type") or "")
+        source_id = str(hit.get("source_id") or "")
+        if not source_id:
+            continue
+        label = labels.get(source_type, source_type or "memory")
+        score = hit.get("score")
+        try:
+            score_text = f"{float(score):.3f}"
+        except (TypeError, ValueError):
+            score_text = "?"
+        parts.append(f"{label}:{source_id}@{score_text}")
+    remaining = len(hits) - len(parts)
+    if remaining > 0:
+        parts.append(f"+{remaining}")
+    return ", ".join(parts) if parts else "-"
 
 
 def record_root_graph_chat_observation(
@@ -3153,6 +3441,23 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
             f"image_deferred={_bool_text(commit.get('chat_image_context_deferred'))}"
         ),
     ]
+    if "memory_rag_enabled" in chat_commit:
+        memory_error = str(chat_commit.get("memory_rag_error") or "").strip()
+        lines.append(
+            "MemoryRAG："
+            f"enabled={_bool_text(chat_commit.get('memory_rag_enabled'))} "
+            f"inject={_bool_text(chat_commit.get('memory_rag_inject_in_chat'))} "
+            f"attempted={_bool_text(chat_commit.get('memory_rag_attempted'))} "
+            f"results={chat_commit.get('memory_rag_result_count', 0)} "
+            f"query_chars={chat_commit.get('memory_rag_query_chars', 0)} "
+            f"context_chars={chat_commit.get('memory_rag_context_chars', 0)} "
+            f"error={_bool_text(memory_error)}"
+        )
+        hits_summary = _memory_rag_hit_summary(chat_commit.get("memory_rag_hits"))
+        if hits_summary != "-":
+            lines.append(f"MemoryRAG hits：{hits_summary}")
+        if memory_error:
+            lines.append(f"MemoryRAG error：{memory_error[:180]}")
     if chat_commit:
         lines.append(
             "Commit detail："
@@ -3251,6 +3556,7 @@ def safe_apply_shadow_prompt_context(
             user_content,
             llm_user_content=llm_user_text(event, user_content.for_llm),
         )
+        update_chat_commit(updated, **memory_rag_prompt_context_commit(prompt_context))
         mark_shadow_chat_stage(updated, "prompt")
         return updated
     except Exception as exc:
@@ -4148,9 +4454,11 @@ def main_agent_help_reply() -> str:
             "/agent 审批详情 <审批ID>",
             "/agent 确认 <审批ID>",
             "/agent 拒绝 <审批ID>",
-            "/agent 下一步",
+            "/agent 下一步 / 现在卡在哪 / 有什么待我确认",
             "/agent 查 <问题>",
             "/agent 诊断一下 Ollama / 看一下视觉和记忆状态",
+            "/agent 完整排查图片识别问题",
+            "/agent 完整排查记忆检索问题",
             "/agent 帮我看一下最近错误",
             "/agent 记忆检索 <查询内容>",
             "/agent 看看诊断/配置/视觉/图片缓存/记忆/摘要/RAG/角色卡/白名单状态",
@@ -4185,6 +4493,8 @@ def main_agent_tool_status_reply() -> str:
             "用途：主人管理只读控制台，不改状态。",
             "例子：/agent 诊断一下 Ollama",
             "例子：/agent 看一下视觉和记忆状态",
+            "例子：/agent 完整排查图片识别问题",
+            "例子：/agent 完整排查记忆检索问题",
             "例子：/agent 看看最近错误",
             "例子：/agent 记忆检索 版本计划",
             "例子：/agent 角色卡列表",
@@ -4200,6 +4510,8 @@ def main_agent_tool_status_reply() -> str:
             "审批：不需要",
             "用途：只读查看任务和审批记录。",
             "例子：/agent 看看任务表",
+            "例子：/agent 下一步",
+            "例子：/agent 现在卡在哪",
             "例子：/agent 最新任务详情",
             "例子：/agent 有没有待审批",
             "例子：/agent 最新审批详情",
@@ -4238,7 +4550,7 @@ def main_agent_tool_status_reply() -> str:
             "可见性：LLM 不可见",
             "审批：必须审批；仅用于 /agent 审批演练，不写文件。",
             "",
-            "当前不开放：shell、任意文件写入、任意数据库写入、删除长期记忆、清空全部摘要、清空全部上下文。",
+            "当前不开放：shell、任意文件写入、未注册数据库写入、删除长期记忆、清空全部摘要、清空全部上下文。",
             "边界：普通聊天不触发这些工具；固定 QQ 命令继续保留作为 fallback。",
         ]
     )
@@ -4273,13 +4585,13 @@ def main_agent_boundary_reply() -> str:
         [
             "MainAgent 当前边界：",
             "允许：主人私聊调用 dev_context 只读工具。",
-            "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
+            "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、多步只读图片/记忆排查、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
             "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
             "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
-            "禁止：MainAgent/LLM 执行 shell、任意文件写入、任意数据库写入、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
+            "禁止：MainAgent/LLM 执行 shell、任意文件写入、未注册数据库写入、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
             "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
             "真实 LLM：只负责生成 ActionRequest 和总结只读工具结果。",
         ]
@@ -4308,6 +4620,43 @@ def latest_agent_approval_id(event: MessageEvent) -> int | None:
         limit=1,
     )
     return approvals[0].id if approvals else None
+
+
+def resolve_agent_approval_id_for_decision(
+    event: MessageEvent,
+    reference: str,
+    *,
+    verb: str,
+) -> tuple[int | None, str | None]:
+    stripped_reference = reference.strip()
+    if is_implicit_latest_agent_reference(stripped_reference):
+        approvals = list_agent_approvals(
+            session_key=session_key(event),
+            user_id=user_id(event),
+            status=AGENT_APPROVAL_PENDING,
+            limit=2,
+        )
+        if not approvals:
+            return None, (
+                "当前会话没有待审批项。\n"
+                f"如果要操作历史审批，请使用：/agent {verb} <审批ID>"
+            )
+        if len(approvals) > 1:
+            ids = "、".join(f"#{approval.id}" for approval in approvals)
+            return None, (
+                f"当前会话有多个待审批项：{ids}。\n"
+                f"请明确指定审批 ID：/agent {verb} <审批ID>"
+            )
+        return approvals[0].id, None
+
+    approval_id = parse_agent_task_id(stripped_reference)
+    if approval_id is None and (
+        not stripped_reference or is_latest_agent_reference(stripped_reference)
+    ):
+        approval_id = latest_agent_approval_id(event)
+    if approval_id is None:
+        return None, f"请提供审批 ID，或使用：/agent {verb} 最新"
+    return approval_id, None
 
 
 def latest_agent_task_id(event: MessageEvent) -> int | None:
@@ -4464,6 +4813,12 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         )
         return format_agent_approval_list(approvals)
 
+    if action == AGENT_TASK_COMMAND_NEXT_STEP:
+        return format_agent_task_next_step(
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+
     if action == AGENT_TASK_COMMAND_APPROVAL_DRILL:
         if not goal:
             return (
@@ -4495,12 +4850,14 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         AGENT_TASK_COMMAND_APPROVAL_APPROVE,
         AGENT_TASK_COMMAND_APPROVAL_REJECT,
     }:
-        approval_id = parse_agent_task_id(goal)
         verb = "确认" if action == AGENT_TASK_COMMAND_APPROVAL_APPROVE else "拒绝"
-        if approval_id is None and is_latest_agent_reference(goal):
-            approval_id = latest_agent_approval_id(event)
-        if approval_id is None:
-            return f"请提供审批 ID：/agent {verb} <审批ID>\n也可以用：/agent {verb} 最新"
+        approval_id, resolve_error = resolve_agent_approval_id_for_decision(
+            event,
+            goal,
+            verb=verb,
+        )
+        if resolve_error:
+            return resolve_error
         approval, changed = decide_agent_approval(
             approval_id=approval_id,
             session_key=session_key(event),
@@ -4559,7 +4916,7 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
 
     if action == AGENT_TASK_COMMAND_CREATE:
         if not goal:
-            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、文件写入或数据库写入。"
+            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、任意真实写文件或未注册数据库写入。"
         task_id = create_agent_task(
             session_key=session_key(event),
             user_id=user_id(event),
@@ -4669,6 +5026,10 @@ async def run_main_agent_qq_command(
     async def execute_owner_read_command(command: str, _context) -> str:
         if command == "ops_health":
             return await agent_ops_health_reply(event)
+        if command == "vision_troubleshoot":
+            return await agent_vision_troubleshoot_reply(event)
+        if command == "memory_rag_troubleshoot":
+            return await agent_memory_rag_troubleshoot_reply(event)
         views = {
             "bot_status": "bot_status",
             "diagnostics": None,
@@ -4744,6 +5105,11 @@ async def run_main_agent_qq_command(
         raise RuntimeError(f"unsupported owner read command: {command}")
 
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
+        if command == "next_step":
+            return format_agent_task_next_step(
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
         if command == "list_tasks":
             tasks = list_agent_tasks(
                 session_key=session_key(event),
@@ -4831,12 +5197,14 @@ async def run_main_agent_qq_command(
             return format_agent_task_cancelled(task, changed=changed)
 
         if command in {"approve_approval", "reject_approval"}:
-            approval_id = parse_agent_task_id(reference)
-            if approval_id is None and (not reference or is_latest_agent_reference(reference)):
-                approval_id = latest_agent_approval_id(event)
             verb = "确认" if command == "approve_approval" else "拒绝"
-            if approval_id is None:
-                return f"请提供审批 ID，或使用：/agent {verb}最新审批"
+            approval_id, resolve_error = resolve_agent_approval_id_for_decision(
+                event,
+                reference,
+                verb=verb,
+            )
+            if resolve_error:
+                return resolve_error
             approval, changed = decide_agent_approval(
                 approval_id=approval_id,
                 session_key=session_key(event),

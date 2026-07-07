@@ -343,6 +343,149 @@ def format_image_cache_status(config: AiChatConfig, image_cache_stats: dict[str,
     )
 
 
+def _first_line_with_prefix(lines: list[str], prefix: str) -> str:
+    for line in lines:
+        if line.startswith(prefix):
+            return line
+    return ""
+
+
+def _vision_detail_metric_positive(root_lines: list[str], metric: str) -> bool:
+    pattern = re.compile(rf"\b{re.escape(metric)}=(\d+)\b")
+    for line in root_lines:
+        if not line.startswith("Vision detail："):
+            continue
+        match = pattern.search(line)
+        if match and int(match.group(1)) > 0:
+            return True
+    return False
+
+
+def vision_troubleshoot_findings(
+    *,
+    vision_lines: list[str],
+    recent_errors: list[str],
+    root_lines: list[str],
+) -> list[str]:
+    joined_vision = "\n".join(vision_lines)
+    findings: list[str] = []
+    vision_disabled = "视觉识图：关闭" in joined_vision
+    if vision_disabled:
+        findings.append("视觉功能当前关闭，图片不会进入识图推理。")
+
+    if not vision_disabled:
+        service_line = _first_line_with_prefix(vision_lines, "Ollama 服务：")
+        if service_line and not any(
+            marker in service_line.lower() for marker in ("ok", "正常")
+        ):
+            findings.append(f"Ollama 服务需要关注：{service_line}")
+        if "模型存在：否" in joined_vision:
+            model_line = _first_line_with_prefix(vision_lines, "视觉模型：")
+            findings.append(f"视觉模型不存在或未拉取：{model_line or '请检查视觉模型配置'}")
+        inference_line = _first_line_with_prefix(vision_lines, "推理自检：")
+        if inference_line and not any(
+            marker in inference_line.lower() for marker in ("ok", "成功", "跳过")
+        ):
+            findings.append(f"视觉推理自检需要关注：{inference_line}")
+
+    if _vision_detail_metric_positive(root_lines, "errors"):
+        findings.append("最近 RootGraph 视觉观测里出现过识图错误计数，请查看 RootGraph 证据。")
+    if _vision_detail_metric_positive(root_lines, "low_quality"):
+        findings.append("最近 RootGraph 视觉观测里出现过低质量识图输出，请查看 RootGraph 证据。")
+    if recent_errors:
+        findings.append("最近错误日志非空，优先核对其中的 Ollama/vision/image 相关错误。")
+    if not findings:
+        findings.append("未发现明确的视觉链路硬错误；如果 QQ 侧仍异常，下一步优先看最近一条 RootGraph Vision detail 是否有图片 URL、缓存和低质量输出计数。")
+    return findings
+
+
+def _line_int_after_prefix(lines: list[str], prefix: str) -> int | None:
+    line = _first_line_with_prefix(lines, prefix)
+    if not line:
+        return None
+    match = re.search(r"-?\d+", line)
+    return int(match.group(0)) if match else None
+
+
+def _root_memory_rag_values(root_lines: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in root_lines:
+        if not line.startswith("MemoryRAG："):
+            continue
+        for key, value in re.findall(r"\b([a-z_]+)=([^\s]+)", line):
+            values[key] = value
+    return values
+
+
+def _truthy_runtime_value(value: str) -> bool:
+    return value.strip().lower() in {"是", "true", "1", "yes", "y"}
+
+
+def _runtime_int_value(values: dict[str, str], key: str) -> int:
+    try:
+        return int(values.get(key, "0") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def memory_rag_troubleshoot_findings(
+    *,
+    status_lines: list[str],
+    index_lines: list[str],
+    recent_errors: list[str],
+    root_lines: list[str],
+) -> list[str]:
+    joined_status = "\n".join(status_lines)
+    joined_index = "\n".join(index_lines)
+    findings: list[str] = []
+    rag_disabled = "RAG 开关：关闭" in joined_status
+    inject_disabled = "聊天注入：关闭" in joined_status
+
+    if rag_disabled:
+        findings.append("MemoryRAG 当前关闭，普通聊天不会进行语义记忆召回。")
+    if inject_disabled:
+        findings.append("MemoryRAG 聊天注入当前关闭，即使索引正常也不会注入普通聊天上下文。")
+
+    embedding_line = _first_line_with_prefix(status_lines, "Embedding 自检：")
+    if embedding_line and not rag_disabled and not any(
+        marker in embedding_line.lower() for marker in ("ok", "正常", "成功")
+    ):
+        findings.append(f"Embedding 自检需要关注：{embedding_line}")
+
+    document_count = _line_int_after_prefix(status_lines, "索引文档数量：")
+    embedding_count = _line_int_after_prefix(status_lines, "向量记录数量：")
+    pending_count = _line_int_after_prefix(status_lines, "待索引数量：")
+    if not rag_disabled and document_count == 0:
+        findings.append("MemoryRAG 索引文档数量为 0，检索不到长期记忆或摘要是预期结果。")
+    if not rag_disabled and embedding_count == 0:
+        findings.append("MemoryRAG 向量记录数量为 0，语义检索没有可搜索向量。")
+    if pending_count is not None and pending_count > 0:
+        findings.append(f"MemoryRAG 还有 {pending_count} 条待索引内容，可能需要重建记忆索引后才能被召回。")
+
+    if "暂无 RAG 索引记录" in joined_index:
+        findings.append("RAG 索引详情为空，当前没有任何 RAG 文档记录。")
+
+    runtime_values = _root_memory_rag_values(root_lines)
+    if runtime_values:
+        if _truthy_runtime_value(runtime_values.get("error", "")):
+            findings.append("最近普通聊天 MemoryRAG 观测记录了错误，请查看 RootGraph 证据里的 MemoryRAG error。")
+        attempted = _truthy_runtime_value(runtime_values.get("attempted", ""))
+        results = _runtime_int_value(runtime_values, "results")
+        context_chars = _runtime_int_value(runtime_values, "context_chars")
+        if attempted and results == 0:
+            findings.append("最近普通聊天尝试过 MemoryRAG 召回，但结果数为 0；可换更具体查询或检查索引覆盖范围。")
+        if attempted and results > 0 and context_chars == 0:
+            findings.append("最近普通聊天有 MemoryRAG 命中，但注入上下文字数为 0，请检查上下文上限或召回格式。")
+    elif not rag_disabled:
+        findings.append("RootGraph 最近观测中没有 MemoryRAG commit 细节，可能最近一轮普通聊天未进入记忆召回阶段。")
+
+    if recent_errors:
+        findings.append("最近错误日志非空，优先核对其中的 embedding、MemoryRAG、rag_documents 或 Ollama 相关错误。")
+    if not findings:
+        findings.append("未发现明确的 MemoryRAG 硬错误；如果仍检索不到，下一步优先检查查询词是否过宽、相似度阈值和索引覆盖范围。")
+    return findings
+
+
 def recent_error_lines(limit: int = 5) -> list[str]:
     if not ERROR_LOG_PATH.exists():
         return []

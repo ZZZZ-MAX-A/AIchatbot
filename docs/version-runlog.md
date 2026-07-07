@@ -89,7 +89,7 @@ Ran 24 tests OK
   隐藏的确定性控制面工具包括 agent_task_command，用于语义创建/取消任务、确认/拒绝审批、创建审批演练。
   ActionRequest tool_request 已改为 ToolRegistry-backed 校验。
   dev_context 返回后可进行 tool_result 二次总结；本地管理工具结果直接返回，避免角色卡语气污染。
-  owner_read_command 可语义触发诊断、最近错误、角色卡、角色卡列表、模型配置、访问控制、摘要、RAG、记忆检索、RAG索引详情、MainAgent观测、白名单等只读主人管理查询。
+  owner_read_command 可语义触发诊断、最近错误、多步只读图片识别/记忆检索排查、角色卡、角色卡列表、模型配置、访问控制、摘要、RAG、记忆检索、RAG索引详情、MainAgent观测、白名单等只读主人管理查询。
   agent_task_read 可语义触发任务列表、任务详情、审批列表、审批详情。
   agent_task_command 可语义触发任务/审批控制面操作，但不暴露给 LLM 工具契约。
   owner_write_command 已开放清空图片缓存、清空错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前会话摘要、删除当前会话指定摘要、动态黑白名单修改；必须先生成审批，确认后才恢复执行。
@@ -129,7 +129,7 @@ RootGraph：
 shell 工具
 写文件工具
 真实写文件工具（dry_run_write_file 只用于内部 dry-run 审批测试，不写文件，且不对 LLM 可见）
-数据库写工具（除 /agent 任务固定命令、agent_task_command 控制面语义命令和内部审批记录链路写 agent_tasks / agent_task_events / agent_approvals）
+数据库写工具（除 /agent 任务固定命令、agent_task_command 控制面语义命令、内部审批记录链路，以及已审批的注册 owner_write_command 主人管理写命令）
 额外 QQ 发送
 Agent API
 多步 agent loop
@@ -138,6 +138,237 @@ Agent API
 长期记忆自动写入
 角色卡自动修改
 清空全部上下文或删除记忆
+```
+
+## v1.6 MainAgent 单步审批闭环第一步
+
+状态：已落地第一步。目标是先修正 MainAgent “语义上答应了，但控制层没有真实执行或没有明确阻止”的体验问题。当前先以“删除当前会话指定摘要”为黄金路径收紧参数、审批和恢复执行边界。
+
+本次完成：
+
+```text
+删除当前会话摘要必须携带数字 summary_id。
+/agent 删除摘要 123 仍会进入 owner_write_command，并创建审批，不会立即执行。
+/agent 删除摘要、/agent 删除摘要 最新、/agent 删除当前摘要 会进入 ask_owner，提示先查看摘要 ID；不会创建审批，也不会删除任何摘要。
+真实 MainAgent LLM 如果生成缺少 summary_id 的 owner_write_command/delete_session_summary，也会在 ActionRequest 校验后以 need_argument 中断，不会进入审批。
+owner_write_command executor 统一复用命令参数校验，缺 target/content/summary_id 的写命令不会被执行。
+审批请求回复新增“尚未执行，等待主人确认”提示，避免把 approval_requested 误读为已执行。
+非 dry-run 审批恢复回复新增“执行状态/执行结果”，让确认审批和真实工具结果分开可见。
+/agent 同意、/agent 通过、/agent 执行吧、/agent 不同意 等裸确认/拒绝语义现在被解析为“隐式最新审批”引用；只有 QQ 入口解析到唯一 pending 审批时才会实际确认/拒绝，多个 pending 时要求指定审批 ID。
+修复审批恢复执行中的 SQLite 锁问题：resume_agent_approval 现在先记录 tool_resume_started 并提交，再关闭 agent_tasks 写事务后执行真实工具，最后重新打开连接记录 tool_resume_finished 或 tool_resume_failed。
+新增真实 session_summaries 删除恢复测试，覆盖 owner_write_command/delete_session_summary 在审批恢复阶段再次写数据库的场景，避免外层任务事务锁住摘要删除。
+新增真实 long_term_memories 写入恢复测试，覆盖 owner_write_command/add_fact_memory 在审批恢复阶段再次写数据库的场景。
+补齐 owner_write_command 语义预检：选择角色卡缺 target、添加事实/偏好记忆缺 content、动态名单修改缺数字 target 时直接 ask_owner，不进入 dev_context、LLM 猜测或审批创建。
+已知禁止批量写意图会直接停止：清空全部摘要、清空全部上下文、删除长期记忆；不会创建审批，也不会执行清理或删除。
+owner_read_command 在只读路由前先识别写意图，避免“使用角色卡”等写请求被误判成查看角色卡。
+任务/审批边界文案更新为“不执行任意 shell、任意真实写文件或未注册数据库写入”，和已审批注册写工具的真实执行能力保持一致。
+修复角色卡列表枚举：`README.md` 和 `*.example.md` 这类说明/模板文件不再作为可选角色卡展示，也不能被 `/选择角色卡` 选中。
+本地验证当前 `prompts/persona-cards/` 只展示 `aike`、`moyan` 两张真实角色卡。
+QQ live 已验证：/agent 删除摘要 <ID> -> /agent 确认 最新 -> 当前会话摘要实际删除成功。
+```
+
+边界：
+
+```text
+普通聊天里的“同意”不触发 MainAgent；仍必须走 /agent 入口。
+缺少摘要 ID 时不猜“最新摘要”或“第二条摘要”。
+delete_session_summary 仍只作用于当前会话，不跨会话删除。
+owner_write_command 仍必须先审批，确认后才恢复执行。
+不开放 shell、任意文件写入、未注册数据库写入、多步写操作自动执行、删除长期记忆、清空全部上下文或清空全部摘要。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge tests.test_persistence_units -v
+Ran 64 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary tests.test_graph_runners -v
+Ran 53 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 268 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 46 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 18 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 8 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_operation_units tests.test_memory_rag_qq_boundary -v
+Ran 22 tests OK
+```
+
+## v1.6 MainAgent 多步只读诊断第一步
+
+状态：已落地第一条 P1 多步只读诊断命令。目标是让 MainAgent 不只是调用单个状态页，而是能为常见故障读取多个只读证据源并给出可验证的判断。
+
+本次完成：
+
+```text
+新增 owner_read_command/vision_troubleshoot。
+/agent 完整排查图片识别问题 和 /agent 排查识图为什么失败 会语义路由到 vision_troubleshoot。
+广义 “诊断一下 Ollama / 看一下视觉和记忆状态” 仍保持 ops_health 聚合诊断；单独看视觉状态仍可走 vision_status。
+QQ 执行 vision_troubleshoot 时会依次读取：
+  1. DiagnosticsGraph 视觉/Ollama 状态
+  2. DiagnosticsGraph 图片缓存状态
+  3. 最近错误日志
+  4. RootGraph 最近聊天观测
+  5. MainAgent 最近观测
+返回内容包含步骤、初步判断、视觉/Ollama 证据、图片缓存证据、最近错误证据、RootGraph 证据和 MainAgent 证据。
+回复中明确只读保证：未清理缓存、未修改配置、未写入数据库、未发送额外 QQ 消息。
+视觉排查判断逻辑移入 diagnostics 纯函数，避免 “Ollama 服务：正常” 被误判为异常。
+RootGraph Vision detail 会按 errors / low_quality 的正数计数判断，不会因为同一批观测里同时存在 0 和非 0 而漏报。
+```
+
+边界：
+
+```text
+只读多步诊断不等于多步任务执行。
+不开放清空图片缓存、修改视觉配置、拉取模型、重启 Ollama 或发送额外 QQ 消息。
+不读取新的用户图片，不下载外部网络资源；视觉自检只复用 DiagnosticsGraph 的 Ollama 状态和内置测试图。
+普通聊天仍不会触发 MainAgent 诊断，必须走 /agent 主人私聊入口。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_diagnostics_units -v
+Ran 5 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 46 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 9 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 272 tests OK
+```
+
+## v1.6 MainAgent 多步只读诊断第二步
+
+状态：已落地第二条 P1 多步只读诊断命令，复用图片识别排查的报告形态，补上 MemoryRAG/Embedding/索引链路的主人侧可观测性。
+
+本次完成：
+
+```text
+新增 owner_read_command/memory_rag_troubleshoot。
+/agent 完整排查记忆检索问题 和 /agent 排查 MemoryRAG 为什么没有召回 会语义路由到 memory_rag_troubleshoot。
+显式 /agent 记忆检索 <查询内容> 仍保持 memory_retrieval，不会被排查命令抢走。
+同时包含图片和 RAG 的广义问题，例如“最近图片和 RAG 有没有问题”，仍保持 ops_health 聚合诊断。
+QQ 执行 memory_rag_troubleshoot 时会依次读取：
+  1. MemoryRAG/Embedding 状态和 embedding 自检
+  2. RAG 索引详情
+  3. 最近错误日志
+  4. RootGraph MemoryRAG 最近观测
+  5. MainAgent 最近观测
+返回内容包含步骤、初步判断、MemoryRAG/Embedding 证据、RAG 索引证据、最近错误证据、RootGraph 证据和 MainAgent 证据。
+回复中明确只读保证：未重建索引、未写入记忆、未删除文档、未修改配置、未写入数据库、未发送额外 QQ 消息。
+MemoryRAG 排查判断逻辑移入 diagnostics 纯函数，覆盖 RAG 关闭、聊天注入关闭、embedding 自检失败、索引为空、向量为空、待索引、RootGraph commit 错误、最近召回 0 命中和最近错误日志非空。
+```
+
+边界：
+
+```text
+只读多步诊断不等于自动修复。
+不开放重建索引、写入长期记忆、删除 RAG 文档、修改 embedding 配置、重启 Ollama 或发送额外 QQ 消息。
+该命令会执行现有 MemoryRAG 状态自检；embedding 自检只使用固定测试文本，不读取用户记忆正文。
+普通聊天仍不会触发 MainAgent 诊断，必须走 /agent 主人私聊入口。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_diagnostics_units -v
+Ran 8 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 46 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 276 tests OK
+```
+
+## v1.6 Ollama 启动前自愈
+
+状态：已落地本地启动脚本层面的 Ollama ensure，解决频繁出现的 `WinError 10061` / 11434 未监听问题。
+
+本次完成：
+
+```text
+新增 scripts/ensure-ollama.ps1。
+scripts/start.ps1 默认先调用 ensure-ollama，再启动 bot.py。
+ensure-ollama 会读取当前进程环境变量和 .env，判断是否需要本地 Ollama：
+  ENABLE_VISION=true
+  或 ENABLE_MEMORY_RAG / ENABLE_PROJECT_DOC_RAG=true 且 MEMORY_RAG_EMBEDDING_PROVIDER=ollama
+如果不需要 Ollama，则直接跳过。
+如果需要 Ollama，则检查 http://127.0.0.1:11434/api/tags。
+检查必需模型：
+  视觉：VISION_MODEL，默认 qwen2.5vl:3b
+  MemoryRAG/ProjectDocRAG：MEMORY_RAG_EMBEDDING_MODEL，默认 bge-m3
+如果 11434 未监听、/api/tags 不可用或必需模型不可见，且目标是本地 11434，则调用 scripts/start-ollama-vision.ps1。
+start-ollama-vision 会用 OLLAMA_MODELS=D:\OllamaModels 重新拉起 ollama serve。
+支持临时跳过：.\scripts\start.ps1 -SkipOllamaEnsure 或设置 SKIP_OLLAMA_ENSURE=1。
+支持只检查不启动：.\scripts\ensure-ollama.ps1 -NoStart。
+```
+
+边界：
+
+```text
+不在 MainAgent/ChatAgent 运行时中自动启动外部进程。
+不在 QQ 消息处理过程中拉起 Ollama。
+只改本地启动脚本，保持运行时边界清晰。
+如果配置为远程或非 11434 Ollama 地址，ensure 只检查，不尝试启动本地服务。
+```
+
+## v1.6 MainAgent 任务协作第一步
+
+状态：已落地 P1.3 小范围任务协作增强。目标是让 `/agent 下一步` 从“查开发上下文”转为“只读任务协作台”，优先告诉主人当前卡点和最该处理的一步。
+
+本次完成：
+
+```text
+新增 agent_task_read/next_step 只读命令。
+/agent 下一步、/agent 现在卡在哪、/agent 接下来该做什么、/agent 有什么待我确认 会走任务协作摘要，不再默认进入 dev_context。
+协作摘要读取当前会话 agent_tasks / agent_task_events / agent_approvals。
+建议优先级：
+  1. 有待审批：提示查看审批详情，并确认或拒绝具体审批。
+  2. 有失败任务：提示查看失败任务详情。
+  3. 有待处理任务但无审批：提示查看任务详情，并说明当前版本不会自动多步执行普通任务。
+  4. 无待处理事项：提示可创建任务或显式 /agent 查 <问题>。
+协作摘要会列出待主人确认项和近期任务，并显示最近事件摘要。
+```
+
+边界：
+
+```text
+这是只读协作查询，不创建任务、不取消任务、不确认/拒绝审批、不恢复工具。
+普通聊天仍不会触发 MainAgent 任务协作。
+/agent-debug 下一步 仍可走原始 dev_context 调试路径；普通 /agent 下一步 走任务协作摘要。
+不开放多步自动执行任务、自动修复失败任务、shell、任意文件写入或未注册数据库写入。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 47 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 278 tests OK
 ```
 
 ## v0.1 基础聊天
@@ -859,7 +1090,7 @@ owner_write_command 仍只允许主人私聊走 /agent 入口。
 动态黑白名单修改必须带数字 target；/agent 私聊语义工具确认后只修改 data/access.json 动态访问控制，不修改 .env 静态配置。
 旧 /加入群白名单、/移出群白名单、/加入私聊白名单、/移出私聊白名单、/加入黑名单、/移出黑名单 固定命令继续保留。
 旧 /启用本群、/禁用本群 仍由群聊固定命令兜底；/agent 当前仍是主人私聊入口，不支持无数字群号的“本群”语义写入。
-不开放清空全部上下文、清空全部摘要、删除记忆、shell、任意文件写入或数据库写入。
+不开放清空全部上下文、清空全部摘要、删除记忆、shell、任意文件写入或未注册数据库写入。
 LLM 即使生成 tool_request，也必须通过 ToolRegistry 参数校验和 ToolPolicyCheck 审批中断。
 只有注册且 approval_resume_enabled=true 的工具可以在审批确认后恢复。
 ```
@@ -947,7 +1178,7 @@ $env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_main_
 同时明确当前不开放：
   shell
   任意文件写入
-  任意数据库写入
+  未注册数据库写入
   删除长期记忆
   清空全部摘要
   清空全部上下文

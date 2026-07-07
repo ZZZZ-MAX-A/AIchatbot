@@ -55,6 +55,8 @@ AGENT_TASK_COMMAND_TOOL_NAME = "agent_task_command"
 OWNER_READ_COMMANDS: tuple[str, ...] = (
     "bot_status",
     "ops_health",
+    "vision_troubleshoot",
+    "memory_rag_troubleshoot",
     "diagnostics",
     "config_status",
     "vision_status",
@@ -80,6 +82,7 @@ OWNER_READ_COMMANDS: tuple[str, ...] = (
     "root_graph_observations",
 )
 AGENT_TASK_READ_COMMANDS: tuple[str, ...] = (
+    "next_step",
     "list_tasks",
     "task_detail",
     "list_approvals",
@@ -461,22 +464,9 @@ def create_owner_write_command_executor(
             raise ToolExecutionError(
                 f"unsupported owner write command: {command}; allowed: {allowed}"
             )
-        if command == "select_persona" and not str(arguments.get("target") or "").strip():
-            raise ToolExecutionError("select_persona requires arguments.target")
-        if command in {"add_fact_memory", "add_preference_memory"} and not str(
-            arguments.get("content") or ""
-        ).strip():
-            raise ToolExecutionError(f"{command} requires arguments.content")
-        if command == "delete_session_summary":
-            summary_id = str(arguments.get("summary_id") or "").strip()
-            if not summary_id.isdigit():
-                raise ToolExecutionError(
-                    "delete_session_summary requires numeric arguments.summary_id"
-                )
-        if command in ACCESS_WRITE_COMMANDS:
-            target = str(arguments.get("target") or "").strip()
-            if not target.isdigit():
-                raise ToolExecutionError(f"{command} requires numeric arguments.target")
+        argument_error = owner_write_argument_error(dict(arguments))
+        if argument_error:
+            raise ToolExecutionError(argument_error)
         metadata = dict(context.metadata)
         metadata["tool_arguments"] = dict(arguments)
         next_context = ToolContext(
@@ -548,6 +538,13 @@ def plan_semantic_read_tool_request(
             )
             return True
     if tool_registry.get(OWNER_WRITE_COMMAND_TOOL_NAME) is not None:
+        need_argument_message = owner_write_need_argument_message(state.query)
+        if need_argument_message:
+            state.raw_action_request = ask_owner_action_json(
+                need_argument_message,
+                reason="semantic owner write command needs an explicit argument",
+            )
+            return True
         command = classify_owner_write_command(state.query)
         if command:
             target = extract_owner_write_command_target(command, state.query)
@@ -660,6 +657,17 @@ def owner_write_command_action_json(
     )
 
 
+def ask_owner_action_json(content: str, *, reason: str = "") -> str:
+    return json.dumps(
+        {
+            "action": MainAgentAction.ASK_OWNER.value,
+            "content": content.strip(),
+            "reason": reason,
+        },
+        ensure_ascii=False,
+    )
+
+
 def call_dev_context_stub_agent(state: MainAgentState) -> MainAgentState:
     state.raw_action_request = dev_context_tool_action_json(
         state.query,
@@ -673,6 +681,10 @@ def classify_owner_read_command(query: str) -> str:
     compact = re.sub(r"\s+", "", normalized)
     if not compact:
         return ""
+    if is_owner_write_intent_query(query):
+        return ""
+    if is_owner_memory_rag_troubleshoot_query(compact):
+        return "memory_rag_troubleshoot"
     if is_owner_memory_retrieval_query(query, compact):
         return "memory_retrieval"
     if any(
@@ -709,6 +721,8 @@ def classify_owner_read_command(query: str) -> str:
 
     if any(marker in compact for marker in ("整体状态", "机器人状态", "botstatus", "状态总览")):
         return "bot_status"
+    if is_owner_vision_troubleshoot_query(compact):
+        return "vision_troubleshoot"
     if is_owner_ops_health_query(compact):
         return "ops_health"
     if any(marker in compact for marker in ("最近错误", "报错", "错误日志", "recenterror", "recenterrors")):
@@ -858,6 +872,77 @@ def is_owner_ops_health_query(compact: str) -> bool:
     return (has_vision or has_rag) and has_error and has_check
 
 
+def is_owner_vision_troubleshoot_query(compact: str) -> bool:
+    vision_markers = ("视觉", "识图", "图片识别", "图片看", "看图", "vision", "image")
+    rag_markers = ("rag", "记忆", "embedding", "bge", "memory")
+    troubleshoot_markers = (
+        "完整排查",
+        "排查",
+        "排障",
+        "诊断",
+        "为什么",
+        "失败",
+        "异常",
+        "问题",
+        "不能识别",
+        "识别不了",
+        "看不懂",
+        "troubleshoot",
+        "diagnose",
+        "failed",
+        "error",
+    )
+    return (
+        any(marker in compact for marker in vision_markers)
+        and any(marker in compact for marker in troubleshoot_markers)
+        and not any(marker in compact for marker in rag_markers)
+    )
+
+
+def is_owner_memory_rag_troubleshoot_query(compact: str) -> bool:
+    memory_markers = (
+        "memoryrag",
+        "rag",
+        "记忆检索",
+        "检索记忆",
+        "记忆召回",
+        "召回记忆",
+        "语义记忆",
+        "长期记忆",
+        "记忆索引",
+        "embedding",
+        "向量",
+        "索引",
+        "memory",
+    )
+    vision_markers = ("视觉", "识图", "图片", "看图", "vision", "image")
+    troubleshoot_markers = (
+        "完整排查",
+        "排查",
+        "排障",
+        "诊断",
+        "为什么",
+        "失败",
+        "异常",
+        "问题",
+        "不能检索",
+        "检索不到",
+        "没有召回",
+        "召回不到",
+        "搜不到",
+        "查不到",
+        "troubleshoot",
+        "diagnose",
+        "failed",
+        "error",
+    )
+    return (
+        any(marker in compact for marker in memory_markers)
+        and any(marker in compact for marker in troubleshoot_markers)
+        and not any(marker in compact for marker in vision_markers)
+    )
+
+
 def is_owner_memory_retrieval_query(query: str, compact: str) -> bool:
     if any(
         marker in compact
@@ -952,6 +1037,134 @@ def classify_owner_write_command(query: str) -> str:
     return ""
 
 
+def owner_write_need_argument_message(query: str) -> str:
+    if is_disallowed_owner_write_intent(query):
+        return (
+            "这个 /agent 写操作当前不开放。\n"
+            "当前只支持审批门控的单步主人管理写命令；不支持清空全部上下文、清空全部摘要或删除长期记忆。\n"
+            "当前尚未创建审批，也没有执行任何清理、删除或修改。"
+        )
+    if is_owner_delete_summary_intent(query) and not extract_owner_delete_summary_id(query):
+        return (
+            "删除当前会话摘要需要明确的数字摘要 ID。\n"
+            "请先用 /agent 查看摘要 找到要删除的 ID，然后发送：/agent 删除摘要 <摘要ID>。\n"
+            "当前尚未创建审批，也没有删除任何摘要。"
+        )
+    if is_owner_select_persona_intent(query) and not extract_owner_persona_target(query):
+        return (
+            "选择角色卡需要明确的角色卡 key。\n"
+            "请先用 /agent 角色卡列表 查看可选项，然后发送：/agent 选择角色卡 <key>。\n"
+            "当前尚未创建审批，也没有切换角色卡。"
+        )
+    if is_owner_fact_memory_write_intent(query) and not extract_owner_fact_memory_content(query):
+        return (
+            "添加事实记忆需要明确的记忆内容。\n"
+            "请发送：/agent 添加事实记忆 <内容>。\n"
+            "当前尚未创建审批，也没有写入长期记忆。"
+        )
+    if (
+        is_owner_preference_memory_write_intent(query)
+        and not extract_owner_preference_memory_content(query)
+    ):
+        return (
+            "添加偏好记忆需要明确的记忆内容。\n"
+            "请发送：/agent 添加偏好记忆 <内容>。\n"
+            "当前尚未创建审批，也没有写入长期记忆。"
+        )
+    access_command = classify_owner_access_write_intent(query)
+    if access_command and not extract_owner_access_target(access_command, query):
+        return (
+            f"{access_command} 需要明确的数字 target。\n"
+            "请用数字 QQ 号或群号重新发送，例如：/agent 把群 <群号> 加入群白名单。\n"
+            "当前尚未创建审批，也没有修改动态名单。"
+        )
+    return ""
+
+
+def is_owner_write_intent_query(query: str) -> bool:
+    return bool(
+        classify_owner_write_command(query)
+        or is_owner_delete_summary_intent(query)
+        or is_owner_select_persona_intent(query)
+        or is_owner_fact_memory_write_intent(query)
+        or is_owner_preference_memory_write_intent(query)
+        or classify_owner_access_write_intent(query)
+        or is_disallowed_owner_write_intent(query)
+    )
+
+
+def is_disallowed_owner_write_intent(query: str) -> bool:
+    compact = re.sub(r"\s+", "", query.strip().lower())
+    if not compact:
+        return False
+    return any(
+        marker in compact
+        for marker in (
+            "清空全部上下文",
+            "清空所有上下文",
+            "清除全部上下文",
+            "清除所有上下文",
+            "删除全部上下文",
+            "删除所有上下文",
+            "清空全部摘要",
+            "清空所有摘要",
+            "清除全部摘要",
+            "清除所有摘要",
+            "删除全部摘要",
+            "删除所有摘要",
+            "清空长期记忆",
+            "删除长期记忆",
+            "删除事实记忆",
+            "删除偏好记忆",
+            "clearallcontext",
+            "clearallcontexts",
+            "deleteallcontext",
+            "deleteallcontexts",
+            "clearallsummaries",
+            "deleteallsummaries",
+            "deletememory",
+            "deletelongtermmemory",
+        )
+    )
+
+
+def is_owner_delete_summary_intent(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped:
+        return False
+    compact = re.sub(r"\s+", "", stripped.lower())
+    if any(marker in compact for marker in ("全部摘要", "所有摘要", "allsummaries")):
+        return False
+    if "摘要" in compact and any(marker in compact for marker in ("删除", "删掉")):
+        return True
+    if "summary" in compact and any(marker in compact for marker in ("delete", "remove")):
+        return True
+    return False
+
+
+def owner_write_argument_error(arguments: dict[str, object]) -> str:
+    command = str(arguments.get("command") or "").strip()
+    if command == "select_persona" and not str(arguments.get("target") or "").strip():
+        return "select_persona 需要明确的角色卡 key：/agent 选择角色卡 <key>。"
+    if command in {"add_fact_memory", "add_preference_memory"} and not str(
+        arguments.get("content") or ""
+    ).strip():
+        return f"{command} 需要明确的记忆内容。"
+    if command == "delete_session_summary":
+        summary_id = str(arguments.get("summary_id") or "").strip()
+        if not summary_id.isdigit():
+            return (
+                "delete_session_summary 需要明确的数字 summary_id。\n"
+                "请先用 /agent 查看摘要 找到要删除的 ID，然后发送：/agent 删除摘要 <摘要ID>。\n"
+                "当前尚未创建审批，也没有删除任何摘要。"
+            )
+    if command in ACCESS_WRITE_COMMANDS:
+        target = str(arguments.get("target") or "").strip()
+        if not target.isdigit():
+            return f"{command} 需要明确的数字 target。"
+    return ""
+
+
 def extract_owner_write_command_target(command: str, query: str) -> str:
     if command == "select_persona":
         return extract_owner_persona_target(query) or ""
@@ -1010,6 +1223,77 @@ def extract_owner_delete_summary_id(query: str) -> str:
     return ""
 
 
+ACCESS_WRITE_MARKERS_BY_COMMAND = {
+    "allow_group": (
+        "帮我加入群白名单",
+        "帮我添加群白名单",
+        "帮我允许群",
+        "帮我启用群",
+        "加入群白名单",
+        "添加群白名单",
+        "允许群",
+        "启用群",
+        "allow group",
+        "enable group",
+    ),
+    "deny_group": (
+        "帮我移出群白名单",
+        "帮我删除群白名单",
+        "帮我禁用群",
+        "移出群白名单",
+        "删除群白名单",
+        "禁用群",
+        "deny group",
+        "disable group",
+        "remove group whitelist",
+    ),
+    "allow_private": (
+        "帮我加入私聊白名单",
+        "帮我添加私聊白名单",
+        "帮我允许私聊",
+        "加入私聊白名单",
+        "添加私聊白名单",
+        "允许私聊",
+        "allow private",
+        "allow user",
+    ),
+    "deny_private": (
+        "帮我移出私聊白名单",
+        "帮我删除私聊白名单",
+        "帮我禁用私聊",
+        "移出私聊白名单",
+        "删除私聊白名单",
+        "禁用私聊",
+        "deny private",
+        "remove private whitelist",
+    ),
+    "block_user": (
+        "帮我加入黑名单",
+        "帮我添加黑名单",
+        "帮我拉黑用户",
+        "帮我拉黑",
+        "加入黑名单",
+        "添加黑名单",
+        "拉黑用户",
+        "拉黑",
+        "block user",
+        "block",
+    ),
+    "unblock_user": (
+        "帮我移出黑名单",
+        "帮我删除黑名单",
+        "帮我解除拉黑",
+        "帮我取消拉黑",
+        "移出黑名单",
+        "删除黑名单",
+        "解除拉黑",
+        "取消拉黑",
+        "unblock user",
+        "unblock",
+    ),
+}
+
+
 def classify_owner_access_write_command(query: str) -> str:
     for command in ACCESS_WRITE_COMMANDS:
         if extract_owner_access_target(command, query):
@@ -1017,77 +1301,29 @@ def classify_owner_access_write_command(query: str) -> str:
     return ""
 
 
-def extract_owner_access_target(command: str, query: str) -> str:
-    markers_by_command = {
-        "allow_group": (
-            "帮我加入群白名单",
-            "帮我添加群白名单",
-            "帮我允许群",
-            "帮我启用群",
-            "加入群白名单",
-            "添加群白名单",
-            "允许群",
-            "启用群",
-            "allow group",
-            "enable group",
-        ),
-        "deny_group": (
-            "帮我移出群白名单",
-            "帮我删除群白名单",
-            "帮我禁用群",
-            "移出群白名单",
-            "删除群白名单",
-            "禁用群",
-            "deny group",
-            "disable group",
-            "remove group whitelist",
-        ),
-        "allow_private": (
-            "帮我加入私聊白名单",
-            "帮我添加私聊白名单",
-            "帮我允许私聊",
-            "加入私聊白名单",
-            "添加私聊白名单",
-            "允许私聊",
-            "allow private",
-            "allow user",
-        ),
-        "deny_private": (
-            "帮我移出私聊白名单",
-            "帮我删除私聊白名单",
-            "帮我禁用私聊",
-            "移出私聊白名单",
-            "删除私聊白名单",
-            "禁用私聊",
-            "deny private",
-            "remove private whitelist",
-        ),
-        "block_user": (
-            "帮我加入黑名单",
-            "帮我添加黑名单",
-            "帮我拉黑用户",
-            "帮我拉黑",
-            "加入黑名单",
-            "添加黑名单",
-            "拉黑用户",
-            "拉黑",
-            "block user",
-            "block",
-        ),
-        "unblock_user": (
-            "帮我移出黑名单",
-            "帮我删除黑名单",
-            "帮我解除拉黑",
-            "帮我取消拉黑",
-            "移出黑名单",
-            "删除黑名单",
-            "解除拉黑",
-            "取消拉黑",
-            "unblock user",
-            "unblock",
-        ),
+def classify_owner_access_write_intent(query: str) -> str:
+    compact = re.sub(r"\s+", "", query.strip().lower())
+    if not compact:
+        return ""
+    compact_markers_by_command = {
+        "allow_group": ("加入群白名单", "添加群白名单", "允许群", "启用群", "允许本群", "启用本群"),
+        "deny_group": ("移出群白名单", "删除群白名单", "禁用群", "停用群", "禁用本群", "停用本群"),
+        "allow_private": ("加入私聊白名单", "添加私聊白名单", "允许私聊", "启用私聊"),
+        "deny_private": ("移出私聊白名单", "删除私聊白名单", "禁用私聊", "停用私聊"),
+        "block_user": ("加入黑名单", "添加黑名单", "拉黑用户", "拉黑"),
+        "unblock_user": ("移出黑名单", "删除黑名单", "解除拉黑", "取消拉黑"),
     }
-    markers = markers_by_command.get(command, ())
+    for command, markers in compact_markers_by_command.items():
+        if any(marker in compact for marker in markers):
+            return command
+    for command, markers in ACCESS_WRITE_MARKERS_BY_COMMAND.items():
+        if extract_semantic_goal_after_markers(query, markers) is not None:
+            return command
+    return ""
+
+
+def extract_owner_access_target(command: str, query: str) -> str:
+    markers = ACCESS_WRITE_MARKERS_BY_COMMAND.get(command, ())
     goal = extract_semantic_goal_after_markers(query, markers)
     if goal is not None:
         return extract_numeric_target(goal)
@@ -1131,28 +1367,75 @@ def extract_numeric_target(value: str) -> str:
     return match.group(1) if match else ""
 
 
-def extract_owner_persona_target(query: str) -> str:
-    markers = (
-        "帮我选择角色卡",
-        "帮我切换角色卡",
-        "帮我切到角色卡",
-        "帮我换成角色卡",
-        "帮我使用角色卡",
-        "帮我启用角色卡",
-        "选择角色卡",
-        "切换角色卡",
-        "切到角色卡",
-        "换成角色卡",
-        "使用角色卡",
-        "启用角色卡",
-        "select persona",
-        "select role card",
-        "switch persona",
-        "switch role card",
-        "use persona",
-        "use role card",
+OWNER_PERSONA_TARGET_MARKERS = (
+    "帮我选择角色卡",
+    "帮我切换角色卡",
+    "帮我切到角色卡",
+    "帮我换成角色卡",
+    "帮我使用角色卡",
+    "帮我启用角色卡",
+    "选择角色卡",
+    "切换角色卡",
+    "切到角色卡",
+    "换成角色卡",
+    "使用角色卡",
+    "启用角色卡",
+    "select persona",
+    "select role card",
+    "switch persona",
+    "switch role card",
+    "use persona",
+    "use role card",
+)
+
+OWNER_FACT_MEMORY_CONTENT_MARKERS = (
+    "帮我添加事实记忆",
+    "帮我新增事实记忆",
+    "帮我记录事实记忆",
+    "帮我记一条事实记忆",
+    "帮我记一个事实记忆",
+    "添加事实记忆",
+    "新增事实记忆",
+    "记录事实记忆",
+    "记一条事实记忆",
+    "记一个事实记忆",
+    "添加事实摘要",
+    "add fact memory",
+    "add fact",
+)
+
+OWNER_PREFERENCE_MEMORY_CONTENT_MARKERS = (
+    "帮我添加偏好记忆",
+    "帮我新增偏好记忆",
+    "帮我记录偏好记忆",
+    "帮我记一条偏好记忆",
+    "帮我记一个偏好记忆",
+    "添加偏好记忆",
+    "新增偏好记忆",
+    "记录偏好记忆",
+    "记一条偏好记忆",
+    "记一个偏好记忆",
+    "添加偏好摘要",
+    "add preference memory",
+    "add preference",
+)
+
+
+def is_owner_select_persona_intent(query: str) -> bool:
+    return extract_semantic_goal_after_markers(
+        query,
+        OWNER_PERSONA_TARGET_MARKERS,
+    ) is not None or bool(
+        re.search(
+            r"^(?:帮我)?(?:把)?角色卡(?:切换|切|换|选择|设置)(?:成|为|到)?.*$",
+            query.strip(),
+            re.IGNORECASE,
+        )
     )
-    goal = extract_semantic_goal_after_markers(query, markers)
+
+
+def extract_owner_persona_target(query: str) -> str:
+    goal = extract_semantic_goal_after_markers(query, OWNER_PERSONA_TARGET_MARKERS)
     if goal is not None:
         return goal
     match = re.search(
@@ -1165,23 +1448,21 @@ def extract_owner_persona_target(query: str) -> str:
     return ""
 
 
-def extract_owner_fact_memory_content(query: str) -> str:
-    markers = (
-        "帮我添加事实记忆",
-        "帮我新增事实记忆",
-        "帮我记录事实记忆",
-        "帮我记一条事实记忆",
-        "帮我记一个事实记忆",
-        "添加事实记忆",
-        "新增事实记忆",
-        "记录事实记忆",
-        "记一条事实记忆",
-        "记一个事实记忆",
-        "添加事实摘要",
-        "add fact memory",
-        "add fact",
+def is_owner_fact_memory_write_intent(query: str) -> bool:
+    return extract_semantic_goal_after_markers(
+        query,
+        OWNER_FACT_MEMORY_CONTENT_MARKERS,
+    ) is not None or bool(
+        re.search(
+            r"^(?:帮我)?把.+?(?:添加到|加入|记到|写入)(?:事实记忆|长期事实记忆)$",
+            query.strip(),
+            re.IGNORECASE,
+        )
     )
-    goal = extract_semantic_goal_after_markers(query, markers)
+
+
+def extract_owner_fact_memory_content(query: str) -> str:
+    goal = extract_semantic_goal_after_markers(query, OWNER_FACT_MEMORY_CONTENT_MARKERS)
     if goal is not None:
         return goal
     match = re.search(
@@ -1194,23 +1475,21 @@ def extract_owner_fact_memory_content(query: str) -> str:
     return ""
 
 
-def extract_owner_preference_memory_content(query: str) -> str:
-    markers = (
-        "帮我添加偏好记忆",
-        "帮我新增偏好记忆",
-        "帮我记录偏好记忆",
-        "帮我记一条偏好记忆",
-        "帮我记一个偏好记忆",
-        "添加偏好记忆",
-        "新增偏好记忆",
-        "记录偏好记忆",
-        "记一条偏好记忆",
-        "记一个偏好记忆",
-        "添加偏好摘要",
-        "add preference memory",
-        "add preference",
+def is_owner_preference_memory_write_intent(query: str) -> bool:
+    return extract_semantic_goal_after_markers(
+        query,
+        OWNER_PREFERENCE_MEMORY_CONTENT_MARKERS,
+    ) is not None or bool(
+        re.search(
+            r"^(?:帮我)?把.+?(?:添加到|加入|记到|写入)(?:偏好记忆|长期偏好记忆)$",
+            query.strip(),
+            re.IGNORECASE,
+        )
     )
-    goal = extract_semantic_goal_after_markers(query, markers)
+
+
+def extract_owner_preference_memory_content(query: str) -> str:
+    goal = extract_semantic_goal_after_markers(query, OWNER_PREFERENCE_MEMORY_CONTENT_MARKERS)
     if goal is not None:
         return goal
     match = re.search(
@@ -1358,6 +1637,22 @@ def classify_agent_task_read_command(query: str) -> tuple[str, str] | None:
     mentions_approval = any(marker in compact for marker in ("审批", "审核", "approval", "approvals"))
     mentions_task = any(marker in compact for marker in ("任务", "待办", "task", "todo"))
 
+    if any(
+        marker in compact
+        for marker in (
+            "下一步",
+            "接下来",
+            "接下来该做什么",
+            "现在卡在哪",
+            "卡在哪",
+            "待我确认",
+            "待确认",
+            "whatnext",
+            "nextstep",
+            "blocked",
+        )
+    ):
+        return ("next_step", "")
     if mentions_approval:
         if asks_detail:
             return ("approval_detail", reference or "latest")
@@ -1399,6 +1694,15 @@ def create_main_agent_action_validator(tool_registry: ToolRegistry) -> MainAgent
             state.response_text = f"MainAgentGraph rejected: {exc}"
             state.error = "invalid_action_request"
             return state
+        if (
+            action_request.action == MainAgentAction.TOOL_REQUEST
+            and action_request.tool_name == OWNER_WRITE_COMMAND_TOOL_NAME
+        ):
+            argument_error = owner_write_argument_error(action_request.arguments)
+            if argument_error:
+                state.response_text = argument_error
+                state.error = "need_argument"
+                return state
         return apply_action_request_to_state(state, action_request)
 
     return validate_action_request

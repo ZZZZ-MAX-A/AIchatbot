@@ -8,6 +8,8 @@ ROLE_CARD_DIR = PROJECT_ROOT / "prompts" / "persona-cards"
 PRIVATE_ROLE_CARD_DIR = ROLE_CARD_DIR / "private"
 PUBLIC_ROLE_CARD_DIR = ROLE_CARD_DIR / "public"
 ACTIVE_ROLE_CARD_PATH = PROJECT_ROOT / "data" / "active-role-card.json"
+ROLE_CARD_EXCLUDED_FILENAMES = frozenset({"readme.md"})
+ROLE_CARD_EXCLUDED_STEM_SUFFIXES = (".example",)
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,16 @@ def _title_from_content(content: str, fallback: str) -> str:
     return fallback
 
 
+def _is_selectable_role_card_file(path: Path) -> bool:
+    name = path.name.lower()
+    stem = path.stem.lower()
+    if name in ROLE_CARD_EXCLUDED_FILENAMES:
+        return False
+    if any(stem.endswith(suffix) for suffix in ROLE_CARD_EXCLUDED_STEM_SUFFIXES):
+        return False
+    return True
+
+
 def list_role_cards() -> list[RoleCard]:
     cards: list[RoleCard] = []
     seen: set[str] = set()
@@ -38,6 +50,8 @@ def list_role_cards() -> list[RoleCard]:
         if not directory.exists():
             continue
         for path in sorted(directory.glob("*.md")):
+            if not _is_selectable_role_card_file(path):
+                continue
             content = _read_text(path)
             if not content or path.stem in seen:
                 continue

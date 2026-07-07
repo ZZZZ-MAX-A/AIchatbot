@@ -73,6 +73,7 @@ class MemoryContext:
     semantic_memory_context: str = ""
     semantic_memory_error: str = ""
     semantic_memory_result_count: int = 0
+    semantic_memory_hits: list[dict[str, object]] = field(default_factory=list)
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
@@ -86,6 +87,7 @@ class MemoryContextGraphResult:
     semantic_memory_context: str = ""
     semantic_memory_error: str = ""
     semantic_memory_result_count: int = 0
+    semantic_memory_hits: tuple[dict[str, object], ...] = ()
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
@@ -229,6 +231,7 @@ class MemoryContextGraphRunner:
             semantic_memory_context=current.semantic_memory_context,
             semantic_memory_error=current.semantic_memory_error,
             semantic_memory_result_count=current.semantic_memory_result_count,
+            semantic_memory_hits=tuple(current.semantic_memory_hits),
             rule_reminder_context=current.rule_reminder_context,
             gap_scene_error=current.gap_scene_error,
             error=current.error,

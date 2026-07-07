@@ -42,6 +42,11 @@ class GraphAdapterTests(unittest.TestCase):
             ],
             user_id="10001",
             group_id="42",
+            semantic_memory_result_count=1,
+            semantic_memory_error="",
+            semantic_memory_hits=(
+                {"source_type": "session_summary", "source_id": "19", "score": 0.62},
+            ),
         )
 
     def test_runtime_state_from_chat_request_preserves_event_actor_and_session(self):
@@ -183,6 +188,11 @@ class GraphAdapterTests(unittest.TestCase):
         self.assertEqual(prompted.history, prompt_context.history)
         self.assertIsNot(prompted.history, prompt_context.history)
         self.assertEqual(prompted.memory.history, prompt_context.history)
+        self.assertEqual(prompted.memory.semantic_memory_result_count, 1)
+        self.assertEqual(
+            prompted.memory.semantic_memory_hits,
+            [{"source_type": "session_summary", "source_id": "19", "score": 0.62}],
+        )
         self.assertEqual(prompted.original_user_content, "hello\n\n[image]")
         self.assertEqual(prompted.user_content, "hello with image context")
         self.assertEqual(prompted.llm_user_content, "wrapped llm user text")

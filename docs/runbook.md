@@ -464,6 +464,8 @@ prompts/persona-cards/private/     真实角色卡，不提交到 Git
 
 兼容旧路径：如果本地已经有 `prompts/persona-cards/*.md`，仍会被加载，但不会被 Git 跟踪。
 
+角色卡枚举会跳过说明和模板文件，例如 `README.md`、`*.example.md`。公开目录里的 `default.example.md` 只作为脱敏模板，不会出现在 `/选择角色卡` 或 `/agent 角色卡列表` 的可选项里。
+
 当前用途：
 
 ```text
@@ -673,25 +675,38 @@ logs/ai_chat_error.log
 
 ## MainAgent /agent 只读主 Agent 运行
 
-`/agent` 是主人私聊显式触发的只读主 Agent 入口。当前 live 验证版本只允许调用 `dev_context`，用于查询项目文档和开发上下文；它不是普通聊天上下文的一部分。
+`/agent` 是主人私聊显式触发的主 Agent 管理入口。它不是普通聊天上下文的一部分；ProjectDocRAG 只通过 `dev_context` 进入 `/agent` 显式开发侧查询，不进入普通聊天。
 
-当前 MainAgentGraph 已接入 ToolRegistry v0。真实 `/agent` runner 只把 `dev_context` 注册为 LLM 可见工具；`ActionRequest` 的 `tool_request` 会先经过 registry 校验工具名、参数和工具风险等级，再进入 `ToolPolicyCheck`。`dry_run_write_file` 只在显式 dry-run/test registry 中存在，`llm_visible=false`，用于审批链路测试，不写文件。
+当前 MainAgentGraph 已接入 ToolRegistry。真实 `/agent` runner 的 LLM 可见工具包括 `dev_context`、`owner_read_command`、`agent_task_read` 和 `owner_write_command`；隐藏的确定性控制面工具 `agent_task_command` 用于创建/取消任务、确认/拒绝审批和审批演练，不交给 LLM 自由调用。`ActionRequest` 的 `tool_request` 会先经过 registry 校验工具名、参数和工具风险等级，再进入 `ToolPolicyCheck`。`owner_write_command` 必须审批，确认后仅已注册且 `approval_resume_enabled=true` 的工具会受控恢复执行；`dry_run_write_file` 只在显式 dry-run/test registry 中存在，`llm_visible=false`，用于审批链路测试，不写文件。
 
 当前边界：
 
 ```text
 只允许主人私聊。
-只允许 dev_context 只读工具。
-ToolRegistry 真实可见工具只有 dev_context。
-允许 /agent 任务固定命令写入 agent_tasks / agent_task_events。
+允许 dev_context、owner_read_command、agent_task_read 等只读工具。
+允许 owner_write_command 创建审批；确认后可恢复已注册的主人管理写工具。
+owner_write_command 缺少必要参数时不会创建审批：选择角色卡必须带 key，添加事实/偏好记忆必须带内容，删除摘要必须带数字 summary_id，动态名单修改必须带数字 QQ 号或群号。
+清空全部上下文、清空全部摘要、删除长期记忆等批量/高风险写意图会在 /agent 内直接停止，不进入 dev_context、LLM 猜测或审批恢复。
+允许 /agent 任务和审批固定/语义控制命令写入 agent_tasks / agent_task_events / agent_approvals。
 ProjectDocRAG 只在 /agent 显式命令中使用，不进入普通聊天。
 不执行 shell。
-不写文件。
-MainAgent/LLM 不写数据库。
+不执行任意文件写入。
+MainAgent/LLM 不直接写数据库；任务、审批和已审批主人管理工具由受控代码写入。
 不发送额外 QQ 消息。
 不接 Agent API。
 不跑多步 agent loop。
 ```
+
+P1 起，MainAgent 允许“多步只读诊断”，但仍不是多步写执行。当前第一条聚合诊断命令是：
+
+```text
+/agent 完整排查图片识别问题
+/agent 完整排查记忆检索问题
+```
+
+图片识别排查只读取视觉/Ollama 状态、图片缓存状态、最近错误、RootGraph 最近观测和 MainAgent 最近观测，然后返回步骤、初步判断和证据区。它不会清理缓存、修改配置、写数据库或发送额外 QQ 消息。
+
+记忆检索排查只读取 MemoryRAG/Embedding 状态、RAG 索引统计、最近错误、RootGraph MemoryRAG 观测和 MainAgent 最近观测。它不会重建索引、写入记忆、删除文档、修改配置、写数据库或发送额外 QQ 消息。
 
 ### 启动只读 stub 模式
 
@@ -722,7 +737,11 @@ QQ 测试：
 /agent 审批详情 最新
 /agent 确认 最新
 /agent 任务详情 最新
+/agent 完整排查图片识别问题
+/agent 完整排查记忆检索问题
 /agent 下一步
+/agent 现在卡在哪
+/agent 有什么待我确认
 /agent-debug 下一步
 ```
 
@@ -759,10 +778,23 @@ QQ 测试顺序：
 /agent 审批详情 最新
 /agent 确认 最新
 /agent 任务详情 最新
+/agent 完整排查图片识别问题
+/agent 完整排查记忆检索问题
 /agent-debug MainAgentGraph 当前状态
 /agent 查 MainAgentGraph 当前状态
 /agent 帮我执行 dir
 ```
+
+任务协作查询：
+
+```text
+/agent 下一步
+/agent 现在卡在哪
+/agent 接下来该做什么
+/agent 有什么待我确认
+```
+
+这些命令只读当前会话的 agent_tasks / agent_approvals，优先级是：待审批 > 失败任务 > 待处理任务 > 无事项。它们不会创建任务、确认审批、恢复工具或执行任何写操作。
 
 预期结果：
 
@@ -924,6 +956,14 @@ cd D:\AIchatbot
 .\scripts\start.ps1
 ```
 
+`scripts/start.ps1` 会先调用 `scripts/ensure-ollama.ps1`：如果视觉或 Ollama-backed RAG 需要本地 Ollama，它会检查 `http://127.0.0.1:11434/api/tags`，确认 `qwen2.5vl:3b` / `bge-m3` 等必需模型是否可见；如果 11434 未监听或模型目录被托盘版 Ollama 接管，会调用 `scripts/start-ollama-vision.ps1` 用 `OLLAMA_MODELS=D:\OllamaModels` 重新拉起本地 `ollama serve`。
+
+临时跳过启动前 Ollama 自检：
+
+```powershell
+.\scripts\start.ps1 -SkipOllamaEnsure
+```
+
 ### 动态白名单不生效
 
 确认命令是否由主人发送。
@@ -972,6 +1012,18 @@ D:\OllamaModels
 
 ```powershell
 .\scripts\start-ollama-vision.ps1
+```
+
+日常启动机器人时更推荐直接使用：
+
+```powershell
+.\scripts\start.ps1
+```
+
+它会先执行 `scripts/ensure-ollama.ps1`，只有在 11434 不可用或必需模型不可见时才重启 Ollama。单独检查 Ollama 而不启动：
+
+```powershell
+.\scripts\ensure-ollama.ps1 -NoStart
 ```
 
 如果要把模型目录写入当前 Windows 用户环境变量：
