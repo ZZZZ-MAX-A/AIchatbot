@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ENTRY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "__init__.py"
 OWNER_READ_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_read_runtime.py"
+OWNER_WRITE_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_write_runtime.py"
 
 
 class MemoryRagQqBoundaryTests(unittest.TestCase):
@@ -52,11 +53,20 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("OwnerReadRuntime", source)
         self.assertIn("run_owner_read_command", source)
         self.assertIn("owner_read_runtime_from_event", source)
+        self.assertIn("OwnerWriteRuntime", source)
+        self.assertIn("run_owner_write_command", source)
+        self.assertIn("owner_write_runtime", source)
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)
         self.assertIn("RuntimeIntent.MAIN_AGENT", source)
         self.assertNotIn("enable_agent_shell", source)
         self.assertNotIn("enable_agent_local_write", source)
+        self.assertNotIn("access_operations = {", source)
+        write_runtime_source = OWNER_WRITE_RUNTIME.read_text(encoding="utf-8")
+        self.assertIn('if command == "clear_image_cache":', write_runtime_source)
+        self.assertIn('if command == "select_persona":', write_runtime_source)
+        self.assertIn('if command in {"add_fact_memory", "add_preference_memory"}:', write_runtime_source)
+        self.assertIn("delete_session_summary requires numeric summary_id", write_runtime_source)
 
     def test_memory_rag_runner_uses_configured_owner_check(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

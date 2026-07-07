@@ -560,6 +560,52 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 282 tests OK
 ```
 
+## v1.6 MainAgent owner_write runtime service 解耦第一步
+
+状态：已落地 P2.3 代码层 service 解耦。目标是把已审批恢复会调用的主人管理写执行器也从 QQ adapter 中抽出，让 task/read/write 三块 MainAgent owner runtime 都具备 service 边界。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_write_runtime.py。
+新增 OwnerWriteRuntime 依赖注入对象，用于绑定现有受控写函数。
+新增 run_owner_write_command(runtime, command, context)，集中执行已审批 owner_write_command。
+src/plugins/ai_chat/__init__.py 新增 owner_write_runtime()，只负责把现有 clear_image_cache、clear_error_log、select_role_card、add_manual_memory、clear_session_summaries、delete_session_summary、动态名单 add/remove 等函数绑定给 service。
+execute_owner_write_command 现在只委托 owner_write_runtime service。
+owner_write_runtime 单测验证不依赖 QQ event，也能执行 clear_image_cache、allow_group、select_persona、add_fact_memory、clear_session_summaries 和 delete_session_summary。
+QQ 边界测试改为检查 owner_write_runtime.py 承载写命令分发，__init__.py 不再承载 access_operations 分发表。
+```
+
+边界：
+
+```text
+这是代码层解耦，不是独立进程。
+不新增 HTTP API。
+不新增 Web Owner Console。
+不改数据库 schema。
+不改变现有 /agent owner_write_command 行为。
+不新增写工具。
+不绕过审批；owner_write_command 仍必须先生成审批，确认后仅通过已注册且 approval_resume_enabled=true 的工具恢复。
+不开放 shell、任意文件写入、未注册数据库写入、删除长期记忆、清空全部摘要或清空全部上下文。
+普通聊天仍不会触发 MainAgent owner_write runtime。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 49 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 22 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 283 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

@@ -683,6 +683,8 @@ P2.1 起，主人侧任务/审批 runtime 已从 QQ adapter 中抽到 `owner_age
 
 P2.2 起，`owner_read_command` 的主人只读管理命令分发已从 QQ adapter 中抽到 `owner_read_runtime.py`。QQ adapter 仍负责把当前 QQ event 绑定到 DiagnosticsGraph、MemoryRAG、MemoryAdmin、角色卡、名单和观测读取函数；service 只做只读命令路由和结果/错误归一。这同样是代码层解耦，不新增 HTTP API、Web Console、数据库写入或任何新执行能力。
 
+P2.3 起，`owner_write_command` 的已审批主人管理写执行器已从 QQ adapter 中抽到 `owner_write_runtime.py`。QQ adapter 只绑定现有受控写依赖：清图片缓存、清错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前会话摘要、删除当前会话指定摘要、动态黑白名单修改。审批策略、参数校验和恢复边界不变；service 不开放任意 shell、任意文件写入或未注册数据库写入。
+
 当前边界：
 
 ```text
