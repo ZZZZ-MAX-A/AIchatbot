@@ -93,7 +93,9 @@ class RoleCardPureUnitTests(unittest.TestCase):
             (private_dir / "same.md").write_text("# Private Same\nprivate", encoding="utf-8")
             (role_dir / "same.md").write_text("# Root Same\nroot", encoding="utf-8")
             (role_dir / "root-only.md").write_text("body without title", encoding="utf-8")
+            (role_dir / "README.md").write_text("# Role Card Directory\nnotes", encoding="utf-8")
             (public_dir / "public-only.md").write_text("# Public Only\npublic", encoding="utf-8")
+            (public_dir / "default.example.md").write_text("# Default Example\ntemplate", encoding="utf-8")
             (public_dir / "empty.md").write_text("  ", encoding="utf-8")
 
             patches = self.patch_paths(root)
@@ -103,6 +105,29 @@ class RoleCardPureUnitTests(unittest.TestCase):
         self.assertEqual([card.key for card in cards], ["same", "root-only", "public-only"])
         self.assertEqual(cards[0].title, "Private Same")
         self.assertEqual(cards[1].title, "root-only")
+
+    def test_list_role_cards_excludes_docs_and_public_templates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            role_dir, private_dir, public_dir, _ = self.role_card_paths(root)
+            private_dir.mkdir(parents=True)
+            public_dir.mkdir(parents=True)
+            role_dir.mkdir(parents=True, exist_ok=True)
+
+            (role_dir / "aike.md").write_text("# 角色卡：爱可\ncontent", encoding="utf-8")
+            (role_dir / "moyan.md").write_text("# 角色卡：莫言\ncontent", encoding="utf-8")
+            (role_dir / "README.md").write_text("# 角色卡目录\nnotes", encoding="utf-8")
+            (public_dir / "default.example.md").write_text("# default.example\ntemplate", encoding="utf-8")
+
+            patches = self.patch_paths(root)
+            with patches[0], patches[1], patches[2], patches[3]:
+                cards = self.role_cards.list_role_cards()
+                selected_readme = self.role_cards.select_role_card("README")
+                selected_example = self.role_cards.select_role_card("default.example")
+
+        self.assertEqual([card.key for card in cards], ["aike", "moyan"])
+        self.assertIsNone(selected_readme)
+        self.assertIsNone(selected_example)
 
     def test_active_role_card_uses_saved_key_and_falls_back_to_first_card(self):
         with tempfile.TemporaryDirectory() as temp_dir:

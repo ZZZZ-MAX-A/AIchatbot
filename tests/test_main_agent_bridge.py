@@ -225,6 +225,34 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(result.text, "read:root_graph_observations")
         self.assertEqual(calls, ["ops_health", "root_graph_observations"])
 
+        result = asyncio.run(
+            registry.execute(
+                "owner_read_command",
+                {"command": "vision_troubleshoot"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "read:vision_troubleshoot")
+        self.assertEqual(calls, ["ops_health", "root_graph_observations", "vision_troubleshoot"])
+
+        result = asyncio.run(
+            registry.execute(
+                "owner_read_command",
+                {"command": "memory_rag_troubleshoot"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "read:memory_rag_troubleshoot")
+        self.assertEqual(
+            calls,
+            [
+                "ops_health",
+                "root_graph_observations",
+                "vision_troubleshoot",
+                "memory_rag_troubleshoot",
+            ],
+        )
+
         with self.assertRaises(self.tool_registry.ToolExecutionError):
             asyncio.run(
                 registry.execute(
@@ -295,6 +323,47 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(execution.result.requested_tool, "agent_task_read")
         self.assertEqual(calls, [("list_tasks", "")])
 
+    def test_semantic_next_step_runs_agent_task_read_before_dev_context(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for task collaboration next step")
+
+        async def execute_agent_task_read(command, reference, _context):
+            calls.append((command, reference))
+            return "Agent 任务协作：下一步\n当前没有任务或审批记录。"
+
+        async def configured_llm_handler(_state):
+            raise AssertionError("configured llm handler should not run for semantic next step")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_agent_task_read=execute_agent_task_read,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+
+        for query in ("下一步", "现在卡在哪", "有什么待我确认"):
+            with self.subTest(query=query):
+                execution = asyncio.run(
+                    runner.run(
+                        self.main_agent.MainAgentState(
+                            query=query,
+                            is_owner=True,
+                        )
+                    )
+                )
+
+                self.assertEqual(execution.result.error, "")
+                self.assertEqual(execution.result.requested_tool, "agent_task_read")
+                self.assertEqual(
+                    execution.result.metadata["tool_arguments"]["command"],
+                    "next_step",
+                )
+                self.assertIn("Agent 任务协作", execution.result.response_text)
+
+        self.assertEqual(calls, [("next_step", ""), ("next_step", ""), ("next_step", "")])
+
     def test_local_management_tool_result_bypasses_llm_summary(self):
         async def retrieve_dev_context(_query, _is_owner):
             raise AssertionError("dev_context should not run")
@@ -354,6 +423,15 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertEqual(result.text, "task_detail:latest")
 
+        result = asyncio.run(
+            registry.execute(
+                "agent_task_read",
+                {"command": "next_step"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "next_step:")
+
         with self.assertRaises(self.tool_registry.ToolExecutionError):
             asyncio.run(
                 registry.execute(
@@ -376,6 +454,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "看一下视觉和记忆状态": "ops_health",
             "最近图片和 RAG 有没有问题": "ops_health",
             "做一次系统健康检查": "ops_health",
+            "完整排查图片识别问题": "vision_troubleshoot",
+            "排查识图为什么失败": "vision_troubleshoot",
+            "完整排查记忆检索问题": "memory_rag_troubleshoot",
+            "排查 MemoryRAG 为什么没有召回": "memory_rag_troubleshoot",
             "看看访问控制": "access_overview",
             "当前主模型是什么": "model_config_status",
             "看看项目文档索引": "rag_index_detail",
@@ -411,6 +493,14 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
 
     def test_agent_task_read_classifier_accepts_task_card_wording(self):
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("下一步"),
+            ("next_step", ""),
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("现在卡在哪"),
+            ("next_step", ""),
+        )
         self.assertEqual(
             self.main_agent_bridge.classify_agent_task_read_command("看看任务卡"),
             ("list_tasks", ""),
@@ -827,6 +917,181 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertIn("Agent 请求审批 #46", execution.result.response_text)
 
+    def test_semantic_delete_session_summary_without_numeric_id_asks_owner(self):
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for incomplete summary delete")
+
+        def execute_owner_write_command(_command, _context):
+            raise AssertionError("incomplete summary delete must not execute")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append((state, risk_level, policy_reason))
+            raise AssertionError("incomplete summary delete must not create approval")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        for query in ("帮我删除摘要", "帮我删除摘要 最新", "删除当前摘要"):
+            with self.subTest(query=query):
+                execution = asyncio.run(
+                    runner.run(
+                        self.main_agent.MainAgentState(
+                            query=query,
+                            is_owner=True,
+                        )
+                    )
+                )
+
+                self.assertEqual(execution.result.error, "")
+                self.assertEqual(
+                    execution.result.action,
+                    self.main_agent.MainAgentAction.ASK_OWNER.value,
+                )
+                self.assertEqual(execution.result.requested_tool, "")
+                self.assertIn("需要明确的数字摘要 ID", execution.result.response_text)
+                self.assertIn("尚未创建审批", execution.result.response_text)
+                self.assertEqual(approvals, [])
+
+    def test_semantic_owner_write_missing_arguments_asks_owner_before_approval(self):
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for incomplete owner write")
+
+        def execute_owner_write_command(_command, _context):
+            raise AssertionError("incomplete owner write must not execute")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append((state, risk_level, policy_reason))
+            raise AssertionError("incomplete owner write must not create approval")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+        cases = {
+            "帮我选择角色卡": "角色卡 key",
+            "帮我使用角色卡": "角色卡 key",
+            "帮我添加事实记忆": "事实记忆需要明确的记忆内容",
+            "帮我添加偏好记忆": "偏好记忆需要明确的记忆内容",
+            "帮我加入群白名单": "需要明确的数字 target",
+            "帮我启用本群": "需要明确的数字 target",
+            "帮我把张三加入黑名单": "需要明确的数字 target",
+        }
+
+        for query, expected_text in cases.items():
+            with self.subTest(query=query):
+                execution = asyncio.run(
+                    runner.run(
+                        self.main_agent.MainAgentState(
+                            query=query,
+                            is_owner=True,
+                        )
+                    )
+                )
+
+                self.assertEqual(execution.result.error, "")
+                self.assertEqual(
+                    execution.result.action,
+                    self.main_agent.MainAgentAction.ASK_OWNER.value,
+                )
+                self.assertEqual(execution.result.requested_tool, "")
+                self.assertIn(expected_text, execution.result.response_text)
+                self.assertIn("尚未创建审批", execution.result.response_text)
+                self.assertEqual(approvals, [])
+
+    def test_semantic_owner_write_disallowed_batch_stops_before_approval(self):
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for disallowed owner write")
+
+        def execute_owner_write_command(_command, _context):
+            raise AssertionError("disallowed owner write must not execute")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append((state, risk_level, policy_reason))
+            raise AssertionError("disallowed owner write must not create approval")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            render_mode="concise",
+        )
+
+        for query in ("帮我清空全部摘要", "帮我清空全部上下文", "帮我删除长期记忆 12"):
+            with self.subTest(query=query):
+                execution = asyncio.run(
+                    runner.run(
+                        self.main_agent.MainAgentState(
+                            query=query,
+                            is_owner=True,
+                        )
+                    )
+                )
+
+                self.assertEqual(execution.result.error, "")
+                self.assertEqual(
+                    execution.result.action,
+                    self.main_agent.MainAgentAction.ASK_OWNER.value,
+                )
+                self.assertEqual(execution.result.requested_tool, "")
+                self.assertIn("当前不开放", execution.result.response_text)
+                self.assertIn("尚未创建审批", execution.result.response_text)
+                self.assertEqual(approvals, [])
+
+    def test_llm_owner_write_delete_summary_without_id_is_rejected_before_approval(self):
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for owner write request")
+
+        def execute_owner_write_command(_command, _context):
+            raise AssertionError("missing summary_id must not execute")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append((state, risk_level, policy_reason))
+            raise AssertionError("missing summary_id must not create approval")
+
+        def call_main_agent(state):
+            state.raw_action_request = self.main_agent_bridge.owner_write_command_action_json(
+                "delete_session_summary",
+                query=state.query,
+                reason="llm planned delete summary without id",
+            )
+            return state
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            call_main_agent=call_main_agent,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="planned owner write",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "need_argument")
+        self.assertEqual(execution.result.requested_tool, "")
+        self.assertIn("需要明确的数字 summary_id", execution.result.response_text)
+        self.assertEqual(approvals, [])
+
     def test_semantic_access_list_write_requires_approval_and_keeps_target(self):
         calls = []
         approvals = []
@@ -949,6 +1214,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "select_persona",
         )
         self.assertEqual(
+            self.main_agent_bridge.classify_owner_write_command("帮我使用角色卡 moyan"),
+            "select_persona",
+        )
+        self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我添加事实记忆 主人喜欢先看结论"),
             "add_fact_memory",
         )
@@ -990,6 +1259,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertEqual(
             self.main_agent_bridge.extract_owner_persona_target("帮我选择角色卡 moyan"),
+            "moyan",
+        )
+        self.assertEqual(
+            self.main_agent_bridge.extract_owner_persona_target("帮我使用角色卡 moyan"),
             "moyan",
         )
         self.assertEqual(

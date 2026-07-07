@@ -608,6 +608,9 @@ class MemoryGraphRunnerTests(unittest.TestCase):
             calls.append(("semantic", tuple(memory_state.system_contexts), memory_state.query))
             memory_state.semantic_memory_context = "semantic memory"
             memory_state.semantic_memory_result_count = 1
+            memory_state.semantic_memory_hits = [
+                {"source_type": "session_summary", "source_id": "19", "score": 0.62}
+            ]
             memory_state.system_contexts.append(memory_state.semantic_memory_context)
             return memory_state
 
@@ -636,6 +639,10 @@ class MemoryGraphRunnerTests(unittest.TestCase):
         self.assertEqual(execution.result.manual_long_term_context, "manual memory")
         self.assertEqual(execution.result.semantic_memory_context, "semantic memory")
         self.assertEqual(execution.result.semantic_memory_result_count, 1)
+        self.assertEqual(
+            execution.result.semantic_memory_hits,
+            ({"source_type": "session_summary", "source_id": "19", "score": 0.62},),
+        )
         self.assertEqual(execution.result.rule_reminder_context, "rule reminder")
         self.assertEqual(
             [item["content"] for item in execution.result.history],

@@ -78,6 +78,8 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         cls.memory_modules = load_legacy_memory_modules()
         cls.database = cls.memory_modules["database"]
         cls.agent_tasks = cls.memory_modules["agent_tasks"]
+        cls.summaries = cls.memory_modules["summaries"]
+        cls.manual_memory = cls.memory_modules["manual_memory"]
 
     def test_agent_tasks_round_trip_and_format_without_execution(self):
         temp_dir, patcher = self.temp_database()
@@ -115,6 +117,42 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("启用审批恢复", formatted_created)
         self.assertIn("不执行任意 shell", formatted_list)
         self.assertIn("事件：", formatted_detail)
+
+    def test_agent_task_next_step_prioritizes_pending_approvals(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            empty_reply = self.agent_tasks.format_agent_task_next_step(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="整理协作台下一步",
+            )
+            pending_reply = self.agent_tasks.format_agent_task_next_step(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="测试待审批优先级",
+            )
+            approval_reply = self.agent_tasks.format_agent_task_next_step(
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+        self.assertIn("当前没有任务或审批记录", empty_reply)
+        self.assertIn("有待处理任务，但没有待审批项", pending_reply)
+        self.assertIn(f"/agent 任务详情 {task_id}", pending_reply)
+        self.assertIn("有待审批项需要主人确认或拒绝", approval_reply)
+        self.assertIn(f"/agent 审批详情 {approval_id}", approval_reply)
+        self.assertIn(f"审批 #{approval_id}", approval_reply)
+        self.assertIn(f"任务 #{task_id}", approval_reply)
 
     def test_agent_task_cancel_is_scoped_and_records_event(self):
         temp_dir, patcher = self.temp_database()
@@ -611,6 +649,271 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
             ],
         )
 
+    def test_agent_approval_resume_owner_write_delete_summary_keeps_summary_id(self):
+        temp_dir, patcher = self.temp_database()
+        calls = []
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="delete one summary after approval",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"delete_session_summary","summary_id":"123"}',
+                risk_level="write_local",
+                reason="local writes require approval",
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            base_spec = self.agent_tasks.create_default_main_agent_tool_registry(
+                include_dry_run_tools=True
+            ).require("dry_run_write_file")
+
+            def execute_owner_write(arguments, context):
+                calls.append(
+                    (
+                        arguments["command"],
+                        arguments["summary_id"],
+                        context.metadata["session_key"],
+                        context.metadata["user_id"],
+                    )
+                )
+                return self.agent_tasks.ToolResult(
+                    text="已删除当前会话摘要：ID 123。",
+                    metadata={"command": arguments["command"], "summary_id": arguments["summary_id"]},
+                )
+
+            registry = self.agent_tasks.ToolRegistry(
+                [
+                    type(base_spec)(
+                        name="owner_write_command",
+                        description="Run approved owner write command.",
+                        risk_level=base_spec.risk_level,
+                        required_arguments=("command",),
+                        optional_arguments=("summary_id",),
+                        executor=execute_owner_write,
+                        enabled=True,
+                        llm_visible=True,
+                        requires_approval=True,
+                        approval_resume_enabled=True,
+                    )
+                ]
+            )
+
+            approval, resumed, resume_text = self.agent_tasks.resume_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_registry=registry,
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIsNotNone(approval)
+        self.assertTrue(resumed)
+        self.assertEqual(
+            calls,
+            [("delete_session_summary", "123", "private:10001", "10001")],
+        )
+        self.assertIn("执行结果", resume_text)
+        self.assertIn("已删除当前会话摘要：ID 123。", resume_text)
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "created",
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            ],
+        )
+
+    def test_agent_approval_resume_executes_summary_delete_without_database_lock(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            summary_id = self.summaries.add_summary(
+                session_key="private:10001",
+                message_type="private",
+                user_id="10001",
+                group_id=None,
+                summary="summary to delete",
+                message_start_id=1,
+                message_end_id=2,
+                source_message_count=2,
+            )
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="delete summary after approval",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="owner_write_command",
+                tool_input_json=f'{{"command":"delete_session_summary","summary_id":"{summary_id}"}}',
+                risk_level="write_local",
+                reason="local writes require approval",
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            base_spec = self.agent_tasks.create_default_main_agent_tool_registry(
+                include_dry_run_tools=True
+            ).require("dry_run_write_file")
+
+            def execute_owner_write(arguments, context):
+                deleted = self.summaries.delete_session_summary(
+                    str(context.metadata["session_key"]),
+                    int(arguments["summary_id"]),
+                )
+                text = (
+                    f"已删除当前会话摘要：ID {arguments['summary_id']}。"
+                    if deleted
+                    else f"没有找到当前会话摘要：{arguments['summary_id']}"
+                )
+                return self.agent_tasks.ToolResult(
+                    text=text,
+                    metadata={
+                        "command": arguments["command"],
+                        "summary_id": arguments["summary_id"],
+                        "deleted": deleted,
+                    },
+                )
+
+            registry = self.agent_tasks.ToolRegistry(
+                [
+                    type(base_spec)(
+                        name="owner_write_command",
+                        description="Run approved owner write command.",
+                        risk_level=base_spec.risk_level,
+                        required_arguments=("command",),
+                        optional_arguments=("summary_id",),
+                        executor=execute_owner_write,
+                        enabled=True,
+                        llm_visible=True,
+                        requires_approval=True,
+                        approval_resume_enabled=True,
+                    )
+                ]
+            )
+
+            approval, resumed, resume_text = self.agent_tasks.resume_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_registry=registry,
+            )
+            remaining = self.summaries.recent_summaries("private:10001", 5)
+            task = self.agent_tasks.get_agent_task(task_id)
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIsNotNone(approval)
+        self.assertTrue(resumed)
+        self.assertIn(f"已删除当前会话摘要：ID {summary_id}。", resume_text)
+        self.assertEqual(remaining, [])
+        self.assertIsNotNone(task)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "created",
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            ],
+        )
+
+    def test_agent_approval_resume_executes_manual_memory_write_without_database_lock(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="add fact memory after approval",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"add_fact_memory","content":"主人喜欢先看结论"}',
+                risk_level="write_local",
+                reason="local writes require approval",
+            )
+            self.agent_tasks.decide_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                approved=True,
+            )
+            base_spec = self.agent_tasks.create_default_main_agent_tool_registry(
+                include_dry_run_tools=True
+            ).require("dry_run_write_file")
+
+            def execute_owner_write(arguments, context):
+                memory_id = self.manual_memory.add_manual_memory(
+                    subject_type="user",
+                    subject_id=str(context.metadata["user_id"]),
+                    content=str(arguments["content"]),
+                    memory_type=self.manual_memory.MANUAL_FACT_TYPE,
+                    source_session_key=str(context.metadata["session_key"]),
+                )
+                return self.agent_tasks.ToolResult(
+                    text=f"已添加事实摘要记忆：ID {memory_id}。",
+                    metadata={"command": arguments["command"], "memory_id": memory_id},
+                )
+
+            registry = self.agent_tasks.ToolRegistry(
+                [
+                    type(base_spec)(
+                        name="owner_write_command",
+                        description="Run approved owner write command.",
+                        risk_level=base_spec.risk_level,
+                        required_arguments=("command",),
+                        optional_arguments=("content",),
+                        executor=execute_owner_write,
+                        enabled=True,
+                        llm_visible=True,
+                        requires_approval=True,
+                        approval_resume_enabled=True,
+                    )
+                ]
+            )
+
+            approval, resumed, resume_text = self.agent_tasks.resume_agent_approval(
+                approval_id=approval_id,
+                session_key="private:10001",
+                user_id="10001",
+                tool_registry=registry,
+            )
+            memories = self.manual_memory.list_manual_memories("user", "10001", limit=5)
+            task = self.agent_tasks.get_agent_task(task_id)
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIsNotNone(approval)
+        self.assertTrue(resumed)
+        self.assertIn("已添加事实摘要记忆：ID", resume_text)
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(memories[0].content, "主人喜欢先看结论")
+        self.assertIsNotNone(task)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "created",
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            ],
+        )
+
     def test_agent_task_command_parser(self):
         parse = self.agent_tasks.parse_agent_task_command
 
@@ -620,6 +923,8 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertEqual(parse("任务状态"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
         self.assertEqual(parse("task status"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
+        self.assertEqual(parse("下一步"), (self.agent_tasks.AGENT_TASK_COMMAND_NEXT_STEP, ""))
+        self.assertEqual(parse("现在卡在哪"), (self.agent_tasks.AGENT_TASK_COMMAND_NEXT_STEP, ""))
         self.assertEqual(parse("审批状态"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_STATUS, ""))
         self.assertEqual(parse("审批演练"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DRILL, ""))
         self.assertEqual(
@@ -634,8 +939,22 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(parse("审批详情"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DETAIL, ""))
         self.assertEqual(parse("确认 7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_APPROVE, "7"))
         self.assertEqual(parse("确认审批 #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_APPROVE, "#7"))
+        self.assertEqual(
+            parse("同意"),
+            (
+                self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_APPROVE,
+                self.agent_tasks.AGENT_APPROVAL_IMPLICIT_LATEST,
+            ),
+        )
         self.assertEqual(parse("拒绝 7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_REJECT, "7"))
         self.assertEqual(parse("reject approval #7"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_REJECT, "#7"))
+        self.assertEqual(
+            parse("不同意"),
+            (
+                self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_REJECT,
+                self.agent_tasks.AGENT_APPROVAL_IMPLICIT_LATEST,
+            ),
+        )
         self.assertEqual(parse("任务详情 #12"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, "#12"))
         self.assertEqual(parse("任务详情"), (self.agent_tasks.AGENT_TASK_COMMAND_DETAIL, ""))
         self.assertEqual(parse("取消任务 12"), (self.agent_tasks.AGENT_TASK_COMMAND_CANCEL, "12"))
@@ -660,6 +979,11 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIsNone(self.agent_tasks.parse_agent_task_id("abc"))
         self.assertTrue(self.agent_tasks.is_latest_agent_reference("最新"))
         self.assertTrue(self.agent_tasks.is_latest_agent_reference("latest"))
+        self.assertTrue(
+            self.agent_tasks.is_implicit_latest_agent_reference(
+                self.agent_tasks.AGENT_APPROVAL_IMPLICIT_LATEST
+            )
+        )
         self.assertFalse(self.agent_tasks.is_latest_agent_reference("审批最新"))
         self.assertEqual(parse("任务"), (self.agent_tasks.AGENT_TASK_COMMAND_CREATE, ""))
         self.assertIsNone(parse("后面是不是该整理任务系统？"))

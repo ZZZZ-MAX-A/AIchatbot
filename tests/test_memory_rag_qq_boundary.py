@@ -48,6 +48,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("create_agent_approval_drill_reply", source)
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("format_agent_task_detail", source)
+        self.assertIn("format_agent_task_next_step", source)
         self.assertIn("list_agent_approvals", source)
         self.assertIn("format_agent_approval_detail", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)
@@ -76,6 +77,30 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn('if command == "ops_health":', source)
         self.assertIn("Agent 聚合诊断", source)
         self.assertIn("视觉/Ollama、MemoryRAG/Embedding", source)
+
+    def test_agent_owner_read_includes_read_only_vision_troubleshoot(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn("agent_vision_troubleshoot_reply", source)
+        self.assertIn('if command == "vision_troubleshoot":', source)
+        self.assertIn("run_diagnostics_graph(event, DiagnosticsView.VISION)", source)
+        self.assertIn("run_diagnostics_graph(event, DiagnosticsView.IMAGE_CACHE)", source)
+        self.assertIn("recent_root_graph_chat_observation_lines()[:16]", source)
+        self.assertIn("recent_main_agent_observation_lines(limit=5)", source)
+        self.assertIn("只读保证：未清理缓存、未修改配置、未写入数据库、未发送额外 QQ 消息。", source)
+        self.assertIn("/agent 完整排查图片识别问题", source)
+
+    def test_agent_owner_read_includes_read_only_memory_rag_troubleshoot(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+
+        self.assertIn("agent_memory_rag_troubleshoot_reply", source)
+        self.assertIn('if command == "memory_rag_troubleshoot":', source)
+        self.assertIn("run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)", source)
+        self.assertIn("rag_index_detail_lines()", source)
+        self.assertIn("memory_rag_troubleshoot_findings", source)
+        self.assertIn("RootGraph MemoryRAG 观测", source)
+        self.assertIn("只读保证：未重建索引、未写入记忆、未删除文档、未修改配置、未写入数据库、未发送额外 QQ 消息。", source)
+        self.assertIn("/agent 完整排查记忆检索问题", source)
 
     def test_root_graph_observation_includes_structured_error_artifact(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

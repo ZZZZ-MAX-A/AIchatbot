@@ -15,6 +15,11 @@ class ChatPromptContext:
     history: list[dict[str, str]]
     user_id: str
     group_id: str | None
+    semantic_memory_query: str = ""
+    semantic_memory_result_count: int = 0
+    semantic_memory_context_chars: int = 0
+    semantic_memory_error: str = ""
+    semantic_memory_hits: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)

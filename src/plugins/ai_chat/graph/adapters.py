@@ -159,7 +159,13 @@ def chat_state_with_prompt_context(
     llm_user_content: str = "",
 ) -> ChatState:
     history = list(prompt_context.history)
-    memory = replace(state.memory, history=history)
+    memory = replace(
+        state.memory,
+        history=history,
+        semantic_memory_error=prompt_context.semantic_memory_error,
+        semantic_memory_result_count=prompt_context.semantic_memory_result_count,
+        semantic_memory_hits=list(prompt_context.semantic_memory_hits),
+    )
     return replace(
         state,
         memory=memory,
