@@ -651,6 +651,56 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 284 tests OK
 ```
 
+## v1.6 Runtime service 解耦审计
+
+状态：已落地 P2.5 文档审计。目标是在 P2.1-P2.4 把 MainAgent owner task/read/write runtime 抽离并总装后，先暂停继续大拆，明确当前边界、QQ live 回归点和 `src/plugins/ai_chat/__init__.py` 剩余职责。
+
+本次完成：
+
+```text
+新增 docs/v1.6-runtime-service-audit.md。
+记录当前 owner runtime 分层：
+  __init__.py
+  owner_runtime_factory.py
+  owner_agent_runtime.py
+  owner_read_runtime.py
+  owner_write_runtime.py
+
+记录本轮仍保持的行为边界：
+  不拆独立进程
+  不新增 HTTP API
+  不新增 Web Owner Console
+  不改 DB schema
+  不新增工具
+  不扩大审批恢复范围
+  普通聊天仍不会触发 MainAgent owner runtime
+
+记录已观察到的 QQ live 路径：
+  /agent 访问控制
+  /agent 删除摘要 41
+  /agent 确认 19
+  /agent 确认 最新
+
+审计 __init__.py 剩余职责：
+  QQ adapter 必须保留
+  Chat runtime 仍然很重
+  Diagnostics / MemoryRAG / MemoryAdmin 可继续 service 化
+  Voice / Notification 可独立拆但不是当前瓶颈
+
+给出下一步建议：
+  优先 P2.6 Web Owner Console read-model 设计，不写前端、不接 HTTP
+  备选 P2.6-alt Diagnostics runtime service 解耦
+  暂不建议立刻拆 Chat runtime
+```
+
+边界：
+
+```text
+本步只做审计和文档，不改变运行时代码。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+不新增测试依赖。
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
