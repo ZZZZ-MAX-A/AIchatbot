@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ENTRY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "__init__.py"
+OWNER_RUNTIME_FACTORY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_runtime_factory.py"
 OWNER_READ_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_read_runtime.py"
 OWNER_WRITE_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_write_runtime.py"
 
@@ -33,6 +34,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
 
     def test_main_agent_qq_entry_is_feature_gated_and_read_only(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        factory_source = OWNER_RUNTIME_FACTORY.read_text(encoding="utf-8")
 
         self.assertIn("if not config.enable_main_agent:", source)
         self.assertIn("if config.main_agent_use_llm:", source)
@@ -45,17 +47,20 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("owner_write_command", source)
         self.assertIn("approval_resume_enabled=true", source)
         self.assertIn("run_main_agent_task_command", source)
-        self.assertIn("OwnerAgentContext", source)
-        self.assertIn("run_owner_agent_task_command", source)
-        self.assertIn("format_owner_agent_task_read", source)
-        self.assertIn("execute_owner_agent_task_command", source)
-        self.assertIn("create_owner_agent_approval_request", source)
-        self.assertIn("OwnerReadRuntime", source)
-        self.assertIn("run_owner_read_command", source)
-        self.assertIn("owner_read_runtime_from_event", source)
-        self.assertIn("OwnerWriteRuntime", source)
-        self.assertIn("run_owner_write_command", source)
-        self.assertIn("owner_write_runtime", source)
+        self.assertIn("OwnerRuntimeFactory", source)
+        self.assertIn("owner_runtime_factory", source)
+        self.assertIn("run_read_command", source)
+        self.assertIn("run_write_command", source)
+        self.assertIn("OwnerAgentContext", factory_source)
+        self.assertIn("run_owner_agent_task_command", factory_source)
+        self.assertIn("format_owner_agent_task_read", factory_source)
+        self.assertIn("execute_owner_agent_task_command", factory_source)
+        self.assertIn("create_owner_agent_approval_request", factory_source)
+        self.assertIn("OwnerReadRuntime", factory_source)
+        self.assertIn("run_owner_read_command", factory_source)
+        self.assertIn("OwnerWriteRuntime", factory_source)
+        self.assertIn("run_owner_write_command", factory_source)
+        self.assertNotIn("owner_read_runtime_from_event", source)
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)
         self.assertIn("RuntimeIntent.MAIN_AGENT", source)

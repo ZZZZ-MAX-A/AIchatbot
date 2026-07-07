@@ -606,6 +606,51 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 283 tests OK
 ```
 
+## v1.6 MainAgent owner runtime factory 总装层
+
+状态：已落地 P2.4 代码层 service 总装。目标是在 task/read/write 三块 runtime 都抽离后，再把 QQ adapter 中散落的 runtime 绑定点收敛为一个 factory，为后续 Runtime service / Web Owner Console 复用同一套 owner runtime 装配铺路。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_runtime_factory.py。
+新增 OwnerRuntimeFactory，集中组装 OwnerAgentContext、OwnerReadRuntime 和 OwnerWriteRuntime。
+OwnerRuntimeFactory 提供 run_task_command、format_task_read、execute_task_command、create_approval_request、run_read_command 和 run_write_command。
+src/plugins/ai_chat/__init__.py 移除 owner_agent_context_from_event、owner_read_runtime_from_event 和 owner_write_runtime 三个分散 helper。
+QQ adapter 现在只保留 owner_runtime_factory() 依赖绑定点，/agent 入口通过 factory 委托 task/read/write runtime。
+新增 factory 单测，验证不依赖 QQ event 也能组装 owner context、owner_read 和 owner_write。
+QQ 边界测试改为约束 __init__.py 只挂 OwnerRuntimeFactory，三块 runtime 细节由 owner_runtime_factory.py 引用。
+```
+
+边界：
+
+```text
+这是代码层总装整理，不是独立进程。
+不新增 HTTP API。
+不新增 Web Owner Console。
+不改数据库 schema。
+不改变现有 /agent task/read/write 行为。
+不新增工具，不扩大审批恢复范围。
+不开放 shell、任意文件写入、未注册数据库写入或多步写执行能力。
+普通聊天仍不会触发 MainAgent owner runtime。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 22 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 284 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
