@@ -152,6 +152,7 @@ from .owner_agent_runtime import (
     run_owner_agent_task_command,
 )
 from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
+from .owner_write_runtime import OwnerWriteRuntime, run_owner_write_command
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
 from .rag.providers import build_embedding_provider, check_embedding_provider
@@ -4633,129 +4634,29 @@ def owner_read_runtime_from_event(event: MessageEvent) -> OwnerReadRuntime:
     )
 
 
+def owner_write_runtime() -> OwnerWriteRuntime:
+    return OwnerWriteRuntime(
+        clear_image_cache=clear_image_cache,
+        clear_error_log=clear_error_log,
+        add_access_item=add_item,
+        remove_access_item=remove_item,
+        select_role_card=select_role_card,
+        add_manual_memory=add_manual_memory,
+        subject_label=subject_label,
+        clear_session_summaries=clear_session_summaries,
+        delete_session_summary=delete_session_summary,
+        owner_user_id_default=str(config.bot_owner_qq).strip(),
+        fact_memory_type=MANUAL_FACT_TYPE,
+        preference_memory_type=MANUAL_PREFERENCE_TYPE,
+    )
+
+
 async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
     return "dev_context is not available during approval resume."
 
 
 def execute_owner_write_command(command: str, _context) -> str:
-    if command == "clear_image_cache":
-        count = clear_image_cache()
-        return f"已清空图片缓存：{count} 条。"
-    if command == "clear_error_log":
-        return clear_error_log()
-    access_operations = {
-        "allow_group": (
-            add_item,
-            "group_whitelist",
-            "群白名单",
-            "已加入群白名单",
-            "群已在白名单中",
-        ),
-        "deny_group": (
-            remove_item,
-            "group_whitelist",
-            "群白名单",
-            "已移出群白名单",
-            "动态群白名单中没有",
-        ),
-        "allow_private": (
-            add_item,
-            "private_whitelist",
-            "私聊白名单",
-            "已加入私聊白名单",
-            "用户已在私聊白名单中",
-        ),
-        "deny_private": (
-            remove_item,
-            "private_whitelist",
-            "私聊白名单",
-            "已移出私聊白名单",
-            "动态私聊白名单中没有",
-        ),
-        "block_user": (
-            add_item,
-            "user_blacklist",
-            "黑名单",
-            "已加入黑名单",
-            "用户已在黑名单中",
-        ),
-        "unblock_user": (
-            remove_item,
-            "user_blacklist",
-            "黑名单",
-            "已移出黑名单",
-            "动态黑名单中没有",
-        ),
-    }
-    if command in access_operations:
-        arguments = _context.metadata.get("tool_arguments", {})
-        target = ""
-        if isinstance(arguments, dict):
-            target = str(arguments.get("target") or "").strip()
-        if not target.isdigit():
-            raise RuntimeError(f"{command} requires numeric target")
-        operation, list_name, _label, changed_text, unchanged_text = access_operations[command]
-        changed = operation(list_name, target)
-        return f"{changed_text}：{target}" if changed else f"{unchanged_text}：{target}"
-    if command == "select_persona":
-        arguments = _context.metadata.get("tool_arguments", {})
-        target = ""
-        if isinstance(arguments, dict):
-            target = str(arguments.get("target") or "").strip()
-        if not target:
-            raise RuntimeError("select_persona requires target")
-        card = select_role_card(target)
-        if card is None:
-            return f"没有找到角色卡：{target}"
-        return f"已选择角色卡：{card.key}，{card.title}"
-    if command in {"add_fact_memory", "add_preference_memory"}:
-        arguments = _context.metadata.get("tool_arguments", {})
-        content = ""
-        if isinstance(arguments, dict):
-            content = str(arguments.get("content") or "").strip()
-        if not content:
-            raise RuntimeError(f"{command} requires content")
-        owner_user_id = str(_context.metadata.get("user_id") or config.bot_owner_qq).strip()
-        if not owner_user_id:
-            raise RuntimeError(f"{command} requires owner user_id")
-        memory_type = (
-            MANUAL_FACT_TYPE
-            if command == "add_fact_memory"
-            else MANUAL_PREFERENCE_TYPE
-        )
-        memory_id = add_manual_memory(
-            subject_type="user",
-            subject_id=owner_user_id,
-            content=content,
-            memory_type=memory_type,
-            source_session_key=str(_context.metadata.get("session_key") or "").strip() or None,
-        )
-        label = "事实摘要记忆" if command == "add_fact_memory" else "偏好摘要记忆"
-        return (
-            f"已添加{label}：ID {memory_id}，对象："
-            f"{subject_label('user', owner_user_id)}。"
-        )
-    if command == "clear_session_summaries":
-        key = str(_context.metadata.get("session_key") or "").strip()
-        if not key:
-            raise RuntimeError("clear_session_summaries requires session_key")
-        count = clear_session_summaries(key)
-        return f"已清空当前会话摘要：{count} 条。"
-    if command == "delete_session_summary":
-        key = str(_context.metadata.get("session_key") or "").strip()
-        if not key:
-            raise RuntimeError("delete_session_summary requires session_key")
-        arguments = _context.metadata.get("tool_arguments", {})
-        summary_id = ""
-        if isinstance(arguments, dict):
-            summary_id = str(arguments.get("summary_id") or "").strip()
-        if not summary_id.isdigit():
-            raise RuntimeError("delete_session_summary requires numeric summary_id")
-        deleted = delete_session_summary(key, int(summary_id))
-        if deleted:
-            return f"已删除当前会话摘要：ID {summary_id}。"
-        return f"没有找到当前会话摘要：{summary_id}"
-    raise RuntimeError(f"unsupported owner write command: {command}")
+    return run_owner_write_command(owner_write_runtime(), command, _context)
 
 
 def create_main_agent_approval_resume_tool_registry():

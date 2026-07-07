@@ -14,6 +14,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         cls.main_agent = cls.modules["main_agent"]
         cls.main_agent_bridge = cls.modules["main_agent_bridge"]
         cls.owner_read_runtime = cls.modules["owner_read_runtime"]
+        cls.owner_write_runtime = cls.modules["owner_write_runtime"]
         cls.policy_risk = cls.modules["policy_risk"]
         cls.tool_registry = cls.modules["tool_registry"]
 
@@ -141,6 +142,148 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                     "unsupported",
                     context,
                 )
+            )
+
+    def test_owner_write_runtime_dispatches_without_qq_event(self):
+        calls = []
+        access_values = set()
+        summaries = {("private:10001", 41)}
+        card = types.SimpleNamespace(key="moyan", title="角色卡：莫言")
+
+        def add_access_item(list_name, target):
+            calls.append(("add_access", list_name, target))
+            key = (list_name, target)
+            changed = key not in access_values
+            access_values.add(key)
+            return changed
+
+        def remove_access_item(list_name, target):
+            calls.append(("remove_access", list_name, target))
+            key = (list_name, target)
+            changed = key in access_values
+            access_values.discard(key)
+            return changed
+
+        def add_manual_memory(**kwargs):
+            calls.append(("add_memory", kwargs))
+            return 47
+
+        def clear_session_summaries(session_key):
+            calls.append(("clear_summaries", session_key))
+            return 3
+
+        def delete_session_summary(session_key, summary_id):
+            calls.append(("delete_summary", session_key, summary_id))
+            key = (session_key, summary_id)
+            deleted = key in summaries
+            summaries.discard(key)
+            return deleted
+
+        runtime = self.owner_write_runtime.OwnerWriteRuntime(
+            clear_image_cache=lambda: 2,
+            clear_error_log=lambda: "已清空错误日志。",
+            add_access_item=add_access_item,
+            remove_access_item=remove_access_item,
+            select_role_card=lambda target: card if target == "moyan" else None,
+            add_manual_memory=add_manual_memory,
+            subject_label=lambda subject_type, subject_id: f"{subject_type}:{subject_id}",
+            clear_session_summaries=clear_session_summaries,
+            delete_session_summary=delete_session_summary,
+            owner_user_id_default="owner-default",
+            fact_memory_type="fact_summary",
+            preference_memory_type="preference_summary",
+        )
+
+        def context(arguments, **metadata):
+            data = {
+                "tool_arguments": arguments,
+                "session_key": "private:10001",
+                "user_id": "10001",
+            }
+            data.update(metadata)
+            return self.tool_registry.ToolContext(metadata=data)
+
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "clear_image_cache",
+                context({"command": "clear_image_cache"}),
+            ),
+            "已清空图片缓存：2 条。",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "allow_group",
+                context({"command": "allow_group", "target": "123456"}),
+            ),
+            "已加入群白名单：123456",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "select_persona",
+                context({"command": "select_persona", "target": "moyan"}),
+            ),
+            "已选择角色卡：moyan，角色卡：莫言",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "add_fact_memory",
+                context({"command": "add_fact_memory", "content": "主人喜欢先看结论"}),
+            ),
+            "已添加事实摘要记忆：ID 47，对象：user:10001。",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "clear_session_summaries",
+                context({"command": "clear_session_summaries"}),
+            ),
+            "已清空当前会话摘要：3 条。",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "delete_session_summary",
+                context({"command": "delete_session_summary", "summary_id": "41"}),
+            ),
+            "已删除当前会话摘要：ID 41。",
+        )
+        self.assertEqual(
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "delete_session_summary",
+                context({"command": "delete_session_summary", "summary_id": "41"}),
+            ),
+            "没有找到当前会话摘要：41",
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("add_access", "group_whitelist", "123456"),
+                (
+                    "add_memory",
+                    {
+                        "subject_type": "user",
+                        "subject_id": "10001",
+                        "content": "主人喜欢先看结论",
+                        "memory_type": "fact_summary",
+                        "source_session_key": "private:10001",
+                    },
+                ),
+                ("clear_summaries", "private:10001"),
+                ("delete_summary", "private:10001", 41),
+                ("delete_summary", "private:10001", 41),
+            ],
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.owner_write_runtime.run_owner_write_command(
+                runtime,
+                "allow_group",
+                context({"command": "allow_group", "target": "not-a-number"}),
             )
 
     def test_read_only_runner_executes_dev_context_for_owner_private_chat(self):
