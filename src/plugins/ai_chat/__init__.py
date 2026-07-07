@@ -144,15 +144,7 @@ from .owner_notify import (
     format_owner_notification,
     validate_owner_notification_content,
 )
-from .owner_agent_runtime import (
-    OwnerAgentContext,
-    create_owner_agent_approval_request,
-    execute_owner_agent_task_command,
-    format_owner_agent_task_read,
-    run_owner_agent_task_command,
-)
-from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
-from .owner_write_runtime import OwnerWriteRuntime, run_owner_write_command
+from .owner_runtime_factory import OwnerRuntimeFactory
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
 from .rag.providers import build_embedding_provider, check_embedding_provider
@@ -4588,35 +4580,17 @@ def main_agent_static_reply(query: str) -> str | None:
     return None
 
 
-def owner_agent_context_from_event(event: MessageEvent) -> OwnerAgentContext:
-    return OwnerAgentContext(
-        session_key=session_key(event),
-        user_id=user_id(event),
-    )
-
-
-def owner_read_runtime_from_event(event: MessageEvent) -> OwnerReadRuntime:
-    async def run_owner_read_diagnostics(view):
-        return (
-            await run_diagnostics_graph(event)
-            if view is None
-            else await run_diagnostics_graph(event, view)
-        )
-
-    async def run_owner_read_memory_retrieval(action, query: str = ""):
-        return await run_memory_retrieval_graph(event, action, query=query)
-
-    async def run_owner_read_memory_admin(action):
-        return await run_memory_admin_graph(event, action)
-
-    return OwnerReadRuntime(
+def owner_runtime_factory() -> OwnerRuntimeFactory:
+    return OwnerRuntimeFactory(
+        session_key_from_event=session_key,
+        user_id_from_event=user_id,
         bot_status_lines=status_lines,
-        ops_health_reply=lambda: agent_ops_health_reply(event),
-        vision_troubleshoot_reply=lambda: agent_vision_troubleshoot_reply(event),
-        memory_rag_troubleshoot_reply=lambda: agent_memory_rag_troubleshoot_reply(event),
-        run_diagnostics=run_owner_read_diagnostics,
-        run_memory_retrieval=run_owner_read_memory_retrieval,
-        run_memory_admin=run_owner_read_memory_admin,
+        ops_health_reply_for_event=agent_ops_health_reply,
+        vision_troubleshoot_reply_for_event=agent_vision_troubleshoot_reply,
+        memory_rag_troubleshoot_reply_for_event=agent_memory_rag_troubleshoot_reply,
+        run_diagnostics_graph=run_diagnostics_graph,
+        run_memory_retrieval_graph=run_memory_retrieval_graph,
+        run_memory_admin_graph=run_memory_admin_graph,
         load_persona_prompt=load_persona_prompt,
         persona_status_lines=persona_status_lines,
         role_card_list_lines=role_card_list_lines,
@@ -4625,17 +4599,8 @@ def owner_read_runtime_from_event(event: MessageEvent) -> OwnerReadRuntime:
         rag_index_detail_lines=rag_index_detail_lines,
         main_agent_observation_lines=recent_main_agent_observation_lines,
         root_graph_observation_lines=recent_root_graph_chat_observation_lines,
-        group_whitelist_reply=lambda: list_lines("群白名单", current_access().group_whitelist),
-        private_whitelist_reply=lambda: list_lines(
-            "私聊白名单",
-            current_access().private_whitelist,
-        ),
-        blacklist_reply=lambda: list_lines("黑名单", current_access().user_blacklist),
-    )
-
-
-def owner_write_runtime() -> OwnerWriteRuntime:
-    return OwnerWriteRuntime(
+        current_access=current_access,
+        list_lines=list_lines,
         clear_image_cache=clear_image_cache,
         clear_error_log=clear_error_log,
         add_access_item=add_item,
@@ -4656,7 +4621,7 @@ async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
 
 
 def execute_owner_write_command(command: str, _context) -> str:
-    return run_owner_write_command(owner_write_runtime(), command, _context)
+    return owner_runtime_factory().run_write_command(command, _context)
 
 
 def create_main_agent_approval_resume_tool_registry():
@@ -4667,8 +4632,8 @@ def create_main_agent_approval_resume_tool_registry():
 
 
 def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
-    return run_owner_agent_task_command(
-        owner_agent_context_from_event(event),
+    return owner_runtime_factory().run_task_command(
+        event,
         query,
         approval_resume_tool_registry_factory=create_main_agent_approval_resume_tool_registry,
     )
@@ -4768,15 +4733,15 @@ async def run_main_agent_qq_command(
         return execution.result.context_text
 
     async def execute_owner_read_command(command: str, _context) -> str:
-        return await run_owner_read_command(
-            owner_read_runtime_from_event(event),
+        return await owner_runtime_factory().run_read_command(
+            event,
             command,
             _context,
         )
 
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
-        return format_owner_agent_task_read(
-            owner_agent_context_from_event(event),
+        return owner_runtime_factory().format_task_read(
+            event,
             command,
             reference,
         )
@@ -4787,8 +4752,8 @@ async def run_main_agent_qq_command(
         goal: str,
         _context,
     ) -> str:
-        return execute_owner_agent_task_command(
-            owner_agent_context_from_event(event),
+        return owner_runtime_factory().execute_task_command(
+            event,
             command,
             reference,
             goal,
@@ -4799,8 +4764,8 @@ async def run_main_agent_qq_command(
         arguments = agent_state.metadata.get("tool_arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
-        return create_owner_agent_approval_request(
-            owner_agent_context_from_event(event),
+        return owner_runtime_factory().create_approval_request(
+            event,
             query=agent_state.query,
             requested_tool=agent_state.requested_tool,
             arguments=dict(arguments),

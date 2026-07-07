@@ -178,6 +178,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.owner_write_runtime",
         AI_CHAT_ROOT / "owner_write_runtime.py",
     )
+    modules["owner_runtime_factory"] = load_module(
+        "src.plugins.ai_chat.owner_runtime_factory",
+        AI_CHAT_ROOT / "owner_runtime_factory.py",
+    )
     modules["retrieval"] = load_module(
         "src.plugins.ai_chat.graph.retrieval",
         AI_CHAT_ROOT / "graph" / "retrieval.py",

@@ -685,6 +685,8 @@ P2.2 起，`owner_read_command` 的主人只读管理命令分发已从 QQ adapt
 
 P2.3 起，`owner_write_command` 的已审批主人管理写执行器已从 QQ adapter 中抽到 `owner_write_runtime.py`。QQ adapter 只绑定现有受控写依赖：清图片缓存、清错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前会话摘要、删除当前会话指定摘要、动态黑白名单修改。审批策略、参数校验和恢复边界不变；service 不开放任意 shell、任意文件写入或未注册数据库写入。
 
+P2.4 起，`owner_runtime_factory.py` 作为 MainAgent owner runtime 总装层，集中组装 task/read/write 三块 runtime。QQ adapter 只保留 `owner_runtime_factory()` 依赖绑定点，并在 `/agent` 入口委托 factory 的 `run_task_command`、`run_read_command`、`format_task_read`、`execute_task_command`、`create_approval_request` 和 `run_write_command`。这是为后续 Runtime service / Web Owner Console 铺路的代码层整理，不改变任何主人命令行为。
+
 当前边界：
 
 ```text

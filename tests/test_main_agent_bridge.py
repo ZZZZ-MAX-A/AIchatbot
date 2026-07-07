@@ -15,8 +15,101 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         cls.main_agent_bridge = cls.modules["main_agent_bridge"]
         cls.owner_read_runtime = cls.modules["owner_read_runtime"]
         cls.owner_write_runtime = cls.modules["owner_write_runtime"]
+        cls.owner_runtime_factory = cls.modules["owner_runtime_factory"]
         cls.policy_risk = cls.modules["policy_risk"]
         cls.tool_registry = cls.modules["tool_registry"]
+
+    def test_owner_runtime_factory_assembles_services_without_qq_event(self):
+        event = {"session_key": "private:10001", "user_id": "10001"}
+        access = types.SimpleNamespace(
+            group_whitelist=["123456"],
+            private_whitelist=["10001"],
+            user_blacklist=[],
+        )
+
+        async def run_diagnostics_graph(_event, view=None):
+            return types.SimpleNamespace(
+                result=types.SimpleNamespace(
+                    reply_text=f"diagnostics:{view}",
+                    error="",
+                )
+            )
+
+        async def run_memory_retrieval_graph(_event, action, query=""):
+            return types.SimpleNamespace(
+                result=types.SimpleNamespace(
+                    reply_text=f"retrieval:{action}:{query}",
+                    error="",
+                )
+            )
+
+        async def run_memory_admin_graph(_event, action):
+            return types.SimpleNamespace(
+                result=types.SimpleNamespace(
+                    reply_text=f"admin:{action}",
+                    error="",
+                )
+            )
+
+        factory = self.owner_runtime_factory.OwnerRuntimeFactory(
+            session_key_from_event=lambda item: item["session_key"],
+            user_id_from_event=lambda item: item["user_id"],
+            bot_status_lines=lambda: ["Bot 状态", "OK"],
+            ops_health_reply_for_event=lambda _event: "聚合诊断",
+            vision_troubleshoot_reply_for_event=lambda _event: "图片识别排查",
+            memory_rag_troubleshoot_reply_for_event=lambda _event: "记忆检索排查",
+            run_diagnostics_graph=run_diagnostics_graph,
+            run_memory_retrieval_graph=run_memory_retrieval_graph,
+            run_memory_admin_graph=run_memory_admin_graph,
+            load_persona_prompt=lambda: "persona body",
+            persona_status_lines=lambda: ["角色卡状态"],
+            role_card_list_lines=lambda: ["角色卡列表"],
+            model_config_status_lines=lambda: ["模型配置"],
+            access_overview_lines=lambda: ["访问控制"],
+            rag_index_detail_lines=lambda: ["RAG 索引"],
+            main_agent_observation_lines=lambda: ["MainAgent 观测"],
+            root_graph_observation_lines=lambda: ["RootGraph 观测"],
+            current_access=lambda: access,
+            list_lines=lambda label, values: f"{label}:{','.join(values)}",
+            clear_image_cache=lambda: 1,
+            clear_error_log=lambda: "已清空错误日志。",
+            add_access_item=lambda _list_name, _target: True,
+            remove_access_item=lambda _list_name, _target: True,
+            select_role_card=lambda _target: types.SimpleNamespace(
+                key="moyan",
+                title="角色卡：莫言",
+            ),
+            add_manual_memory=lambda **_kwargs: 47,
+            subject_label=lambda subject_type, subject_id: f"{subject_type}:{subject_id}",
+            clear_session_summaries=lambda _session_key: 3,
+            delete_session_summary=lambda _session_key, _summary_id: True,
+            owner_user_id_default="10001",
+            fact_memory_type="fact_summary",
+            preference_memory_type="preference_summary",
+        )
+        context = self.tool_registry.ToolContext(
+            metadata={
+                "session_key": "private:10001",
+                "user_id": "10001",
+                "tool_arguments": {"command": "clear_image_cache"},
+            }
+        )
+
+        owner_context = factory.agent_context(event)
+        self.assertEqual(owner_context.session_key, "private:10001")
+        self.assertEqual(owner_context.user_id, "10001")
+        self.assertEqual(
+            asyncio.run(factory.run_read_command(event, "bot_status", context)),
+            "Bot 状态\nOK",
+        )
+        self.assertEqual(
+            asyncio.run(factory.run_read_command(event, "group_whitelist", context)),
+            "群白名单:123456",
+        )
+        self.assertEqual(
+            factory.run_write_command("clear_image_cache", context),
+            "已清空图片缓存：1 条。",
+        )
 
     def test_owner_read_runtime_dispatches_without_qq_event(self):
         calls = []
