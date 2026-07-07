@@ -4844,7 +4844,13 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         )
         if approval is None:
             return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-        return format_agent_approval_detail(approval)
+        task = get_agent_task(
+            approval.task_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+        events = list_agent_task_events(approval.task_id, limit=5)
+        return format_agent_approval_detail(approval, task=task, events=events)
 
     if action in {
         AGENT_TASK_COMMAND_APPROVAL_APPROVE,
@@ -4899,7 +4905,12 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
         if task is None:
             return f"未找到当前会话中的 Agent 任务 #{task_id}。"
         events = list_agent_task_events(task.id)
-        return format_agent_task_detail(task, events)
+        approvals = list_agent_approvals(
+            session_key=session_key(event),
+            user_id=user_id(event),
+            task_id=task.id,
+        )
+        return format_agent_task_detail(task, events, approvals)
 
     if action == AGENT_TASK_COMMAND_CANCEL:
         task_id = parse_agent_task_id(goal)
@@ -5136,7 +5147,12 @@ async def run_main_agent_qq_command(
             if task is None:
                 return f"未找到当前会话中的 Agent 任务 #{task_id}。"
             events = list_agent_task_events(task.id)
-            return format_agent_task_detail(task, events)
+            approvals = list_agent_approvals(
+                session_key=session_key(event),
+                user_id=user_id(event),
+                task_id=task.id,
+            )
+            return format_agent_task_detail(task, events, approvals)
         if command == "approval_detail":
             approval_id = parse_agent_task_id(reference)
             if approval_id is None and (not reference or is_latest_agent_reference(reference)):
@@ -5150,7 +5166,13 @@ async def run_main_agent_qq_command(
             )
             if approval is None:
                 return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-            return format_agent_approval_detail(approval)
+            task = get_agent_task(
+                approval.task_id,
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+            events = list_agent_task_events(approval.task_id, limit=5)
+            return format_agent_approval_detail(approval, task=task, events=events)
         raise RuntimeError(f"unsupported agent task read command: {command}")
 
     async def execute_agent_task_command(

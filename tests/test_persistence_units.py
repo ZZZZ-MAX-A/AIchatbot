@@ -117,6 +117,68 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("启用审批恢复", formatted_created)
         self.assertIn("不执行任意 shell", formatted_list)
         self.assertIn("事件：", formatted_detail)
+        self.assertIn("关联审批：", formatted_detail)
+        self.assertIn("暂无关联审批", formatted_detail)
+
+    def test_agent_task_detail_card_links_related_approval(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="删除摘要 41",
+            )
+            other_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="other task",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"delete_session_summary","summary_id":41}',
+                risk_level="write_local",
+                reason="主人要求删除当前会话摘要 41",
+            )
+            other_approval_id = self.agent_tasks.create_agent_approval(
+                task_id=other_task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="other approval",
+            )
+            task = self.agent_tasks.get_agent_task(
+                task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+            approvals = self.agent_tasks.list_agent_approvals(
+                session_key="private:10001",
+                user_id="10001",
+                task_id=task_id,
+            )
+            assert task is not None
+            task_detail = self.agent_tasks.format_agent_task_detail(task, events, approvals)
+            approval_detail = self.agent_tasks.format_agent_approval_detail(
+                approvals[0],
+                task=task,
+                events=events,
+            )
+
+        self.assertEqual([approval.id for approval in approvals], [approval_id])
+        self.assertNotIn(f"审批 #{other_approval_id}", task_detail)
+        self.assertIn(f"Agent 任务详情卡 #{task_id}", task_detail)
+        self.assertIn("关联审批：", task_detail)
+        self.assertIn(f"审批 #{approval_id} [待审批]", task_detail)
+        self.assertIn(f"/agent 审批详情 {approval_id}", task_detail)
+        self.assertIn(f"/agent 确认 {approval_id}", task_detail)
+        self.assertIn("approval_requested", task_detail)
+        self.assertIn(f"Agent 审批详情卡 #{approval_id}", approval_detail)
+        self.assertIn("关联任务：", approval_detail)
+        self.assertIn(f"/agent 任务详情 {task_id}", approval_detail)
+        self.assertIn("最近事件：approval_requested", approval_detail)
+        self.assertIn(f"/agent 拒绝 {approval_id}", approval_detail)
 
     def test_agent_task_next_step_prioritizes_pending_approvals(self):
         temp_dir, patcher = self.temp_database()
