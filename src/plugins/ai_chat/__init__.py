@@ -40,6 +40,7 @@ from .agent_tasks import (
     AGENT_TASK_COMMAND_DETAIL,
     AGENT_TASK_COMMAND_NEXT_STEP,
     AGENT_TASK_COMMAND_STATUS,
+    AGENT_TASK_COMMAND_WORKBENCH,
     AGENT_APPROVAL_PENDING,
     AGENT_APPROVAL_APPROVED,
     cancel_agent_task,
@@ -53,6 +54,7 @@ from .agent_tasks import (
     format_agent_task_detail,
     format_agent_task_list,
     format_agent_task_next_step,
+    format_agent_task_workbench,
     format_agent_approval_detail,
     format_agent_approval_list,
     get_agent_approval,
@@ -4449,12 +4451,14 @@ def main_agent_help_reply() -> str:
             "/agent 任务状态",
             "/agent 任务详情 <任务ID>",
             "/agent 取消任务 <任务ID>",
+            "/agent 任务工作台",
             "/agent 审批状态",
             "/agent 审批演练 <目标>",
             "/agent 审批详情 <审批ID>",
             "/agent 确认 <审批ID>",
             "/agent 拒绝 <审批ID>",
             "/agent 下一步 / 现在卡在哪 / 有什么待我确认",
+            "/agent 任务工作台 / 任务看板 / 协作台",
             "/agent 查 <问题>",
             "/agent 诊断一下 Ollama / 看一下视觉和记忆状态",
             "/agent 完整排查图片识别问题",
@@ -4485,6 +4489,7 @@ def main_agent_tool_status_reply() -> str:
             "用途：只读查询项目开发上下文和 RAG 召回。",
             "例子：/agent 查 MainAgent 当前状态",
             "例子：/agent 下一步",
+            "例子：/agent 任务工作台",
             "",
             "2. owner_read_command",
             "风险：read_local",
@@ -4512,6 +4517,7 @@ def main_agent_tool_status_reply() -> str:
             "例子：/agent 看看任务表",
             "例子：/agent 下一步",
             "例子：/agent 现在卡在哪",
+            "例子：/agent 任务工作台",
             "例子：/agent 最新任务详情",
             "例子：/agent 有没有待审批",
             "例子：/agent 最新审批详情",
@@ -4819,6 +4825,12 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
             user_id=user_id(event),
         )
 
+    if action == AGENT_TASK_COMMAND_WORKBENCH:
+        return format_agent_task_workbench(
+            session_key=session_key(event),
+            user_id=user_id(event),
+        )
+
     if action == AGENT_TASK_COMMAND_APPROVAL_DRILL:
         if not goal:
             return (
@@ -5118,6 +5130,11 @@ async def run_main_agent_qq_command(
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
         if command == "next_step":
             return format_agent_task_next_step(
+                session_key=session_key(event),
+                user_id=user_id(event),
+            )
+        if command == "workbench":
+            return format_agent_task_workbench(
                 session_key=session_key(event),
                 user_id=user_id(event),
             )

@@ -215,6 +215,92 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn(f"/agent 审批详情 {approval_id}", approval_reply)
         self.assertIn(f"审批 #{approval_id}", approval_reply)
         self.assertIn(f"任务 #{task_id}", approval_reply)
+        self.assertIn("失败任务：", approval_reply)
+        self.assertIn("可复盘/已完成：", approval_reply)
+        self.assertIn("完整工作台：/agent 任务工作台", approval_reply)
+
+    def test_agent_task_workbench_groups_read_model_sections(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            pending_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="等待主人确认的任务",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=pending_task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"select_persona","target":"aike"}',
+                risk_level="write_local",
+                reason="测试工作台待确认分区",
+            )
+            ordinary_pending_ids = [
+                self.agent_tasks.create_agent_task(
+                    session_key="private:10001",
+                    user_id="10001",
+                    goal=f"旧测试待处理任务 {index}",
+                )
+                for index in range(5)
+            ]
+            failed_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="失败任务",
+            )
+            done_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="完成任务",
+            )
+            cancelled_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="取消任务",
+            )
+            self.agent_tasks.cancel_agent_task(
+                task_id=cancelled_task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            with self.database.connect() as connection:
+                now = self.database.utc_now()
+                connection.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = ?, result = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (self.agent_tasks.AGENT_TASK_FAILED, "失败：测试错误", now, failed_task_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = ?, result = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (self.agent_tasks.AGENT_TASK_DONE, "完成：测试结果", now, done_task_id),
+                )
+            workbench = self.agent_tasks.format_agent_task_workbench(
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+        self.assertIn("Agent 任务工作台", workbench)
+        self.assertIn("待主人确认：", workbench)
+        self.assertIn("失败任务：", workbench)
+        self.assertIn("待处理任务：", workbench)
+        self.assertIn("可复盘/已完成：", workbench)
+        self.assertIn(f"审批 #{approval_id} [待审批]", workbench)
+        self.assertIn(f"任务 #{pending_task_id} [待处理]", workbench)
+        self.assertIn(f"待审批：#{approval_id}", workbench)
+        self.assertIn("普通待处理/积压：", workbench)
+        self.assertNotIn(f"任务 #{ordinary_pending_ids[-1]} [待处理]", workbench)
+        self.assertIn("5 项普通待处理任务已折叠", workbench)
+        self.assertIn("不批量取消任务，只做只读降噪", workbench)
+        self.assertIn(f"任务 #{failed_task_id} [失败]", workbench)
+        self.assertIn(f"任务 #{done_task_id} [已完成]", workbench)
+        self.assertIn(f"任务 #{cancelled_task_id} [已取消]", workbench)
+        self.assertIn("只读保证", workbench)
 
     def test_agent_task_cancel_is_scoped_and_records_event(self):
         temp_dir, patcher = self.temp_database()
@@ -987,6 +1073,8 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(parse("task status"), (self.agent_tasks.AGENT_TASK_COMMAND_STATUS, ""))
         self.assertEqual(parse("下一步"), (self.agent_tasks.AGENT_TASK_COMMAND_NEXT_STEP, ""))
         self.assertEqual(parse("现在卡在哪"), (self.agent_tasks.AGENT_TASK_COMMAND_NEXT_STEP, ""))
+        self.assertEqual(parse("任务工作台"), (self.agent_tasks.AGENT_TASK_COMMAND_WORKBENCH, ""))
+        self.assertEqual(parse("任务看板"), (self.agent_tasks.AGENT_TASK_COMMAND_WORKBENCH, ""))
         self.assertEqual(parse("审批状态"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_STATUS, ""))
         self.assertEqual(parse("审批演练"), (self.agent_tasks.AGENT_TASK_COMMAND_APPROVAL_DRILL, ""))
         self.assertEqual(
