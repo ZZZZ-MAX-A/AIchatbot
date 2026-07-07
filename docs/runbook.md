@@ -681,6 +681,8 @@ logs/ai_chat_error.log
 
 P2.1 起，主人侧任务/审批 runtime 已从 QQ adapter 中抽到 `owner_agent_runtime.py`。`src/plugins/ai_chat/__init__.py` 仍负责 NoneBot/QQ 事件接入、鉴权和发送回复；任务状态、任务详情、任务工作台、审批详情、确认/拒绝、审批演练和 owner_write 审批请求创建由 `OwnerAgentContext(session_key, user_id)` 驱动的 service 处理。这是代码层解耦，不是独立进程、HTTP API 或 Web Console。
 
+P2.2 起，`owner_read_command` 的主人只读管理命令分发已从 QQ adapter 中抽到 `owner_read_runtime.py`。QQ adapter 仍负责把当前 QQ event 绑定到 DiagnosticsGraph、MemoryRAG、MemoryAdmin、角色卡、名单和观测读取函数；service 只做只读命令路由和结果/错误归一。这同样是代码层解耦，不新增 HTTP API、Web Console、数据库写入或任何新执行能力。
+
 当前边界：
 
 ```text

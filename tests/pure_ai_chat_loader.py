@@ -170,6 +170,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.graph.main_agent_bridge",
         AI_CHAT_ROOT / "graph" / "main_agent_bridge.py",
     )
+    modules["owner_read_runtime"] = load_module(
+        "src.plugins.ai_chat.owner_read_runtime",
+        AI_CHAT_ROOT / "owner_read_runtime.py",
+    )
     modules["retrieval"] = load_module(
         "src.plugins.ai_chat.graph.retrieval",
         AI_CHAT_ROOT / "graph" / "retrieval.py",

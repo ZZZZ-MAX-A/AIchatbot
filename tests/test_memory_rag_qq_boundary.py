@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ENTRY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "__init__.py"
+OWNER_READ_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_read_runtime.py"
 
 
 class MemoryRagQqBoundaryTests(unittest.TestCase):
@@ -48,6 +49,9 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("format_owner_agent_task_read", source)
         self.assertIn("execute_owner_agent_task_command", source)
         self.assertIn("create_owner_agent_approval_request", source)
+        self.assertIn("OwnerReadRuntime", source)
+        self.assertIn("run_owner_read_command", source)
+        self.assertIn("owner_read_runtime_from_event", source)
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)
         self.assertIn("RuntimeIntent.MAIN_AGENT", source)
@@ -70,17 +74,19 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
 
     def test_agent_owner_read_includes_aggregate_ops_health(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        runtime_source = OWNER_READ_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn("agent_ops_health_reply", source)
-        self.assertIn('if command == "ops_health":', source)
+        self.assertIn('if command == "ops_health":', runtime_source)
         self.assertIn("Agent 聚合诊断", source)
         self.assertIn("视觉/Ollama、MemoryRAG/Embedding", source)
 
     def test_agent_owner_read_includes_read_only_vision_troubleshoot(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        runtime_source = OWNER_READ_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn("agent_vision_troubleshoot_reply", source)
-        self.assertIn('if command == "vision_troubleshoot":', source)
+        self.assertIn('if command == "vision_troubleshoot":', runtime_source)
         self.assertIn("run_diagnostics_graph(event, DiagnosticsView.VISION)", source)
         self.assertIn("run_diagnostics_graph(event, DiagnosticsView.IMAGE_CACHE)", source)
         self.assertIn("recent_root_graph_chat_observation_lines()[:16]", source)
@@ -90,9 +96,10 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
 
     def test_agent_owner_read_includes_read_only_memory_rag_troubleshoot(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        runtime_source = OWNER_READ_RUNTIME.read_text(encoding="utf-8")
 
         self.assertIn("agent_memory_rag_troubleshoot_reply", source)
-        self.assertIn('if command == "memory_rag_troubleshoot":', source)
+        self.assertIn('if command == "memory_rag_troubleshoot":', runtime_source)
         self.assertIn("run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)", source)
         self.assertIn("rag_index_detail_lines()", source)
         self.assertIn("memory_rag_troubleshoot_findings", source)
