@@ -344,6 +344,10 @@ def load_legacy_memory_modules():
             "src.plugins.ai_chat.agent_tasks",
             AI_CHAT_ROOT / "agent_tasks.py",
         ),
+        "owner_agent_runtime": load_module(
+            "src.plugins.ai_chat.owner_agent_runtime",
+            AI_CHAT_ROOT / "owner_agent_runtime.py",
+        ),
         "summaries": load_module(
             "src.plugins.ai_chat.summaries",
             AI_CHAT_ROOT / "summaries.py",

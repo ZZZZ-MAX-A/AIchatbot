@@ -472,6 +472,52 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 21 tests OK
 ```
 
+## v1.6 MainAgent Owner Runtime service 解耦第一步
+
+状态：已落地 P2.1 代码层 service 解耦。目标是先让主人侧任务/审批 runtime 脱离 QQ `MessageEvent`，为后续 Runtime service、Owner Console 后端读模型和更清晰的适配层边界铺路。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_agent_runtime.py。
+新增 OwnerAgentContext(session_key, user_id)，作为主人侧任务/审批 runtime 的最小上下文。
+将任务状态、任务详情、任务工作台、审批详情、确认/拒绝、审批演练和审批请求创建逻辑从 QQ adapter 抽到 owner_agent_runtime service。
+src/plugins/ai_chat/__init__.py 现在只负责 NoneBot/QQ 事件接入、owner 鉴权、session/user 上下文转换、RootGraph 调度和回复发送。
+run_main_agent_task_command、语义 agent_task_read、语义 agent_task_command、owner_write 审批请求创建均改为委托 service。
+新增 service 层单测，验证 OwnerAgentContext 可在没有 QQ event 的情况下读取工作台、任务详情和审批详情。
+更新 QQ 边界测试，约束 __init__.py 继续保持 adapter 形态，不回退到直接承载任务/审批 runtime。
+docs/runbook.md 补充 P2.1 边界说明。
+```
+
+边界：
+
+```text
+这是代码层解耦，不是独立进程。
+不新增 HTTP API。
+不新增 Web Owner Console。
+不改数据库 schema。
+不改变现有 /agent 命令行为。
+不新增 shell、任意文件写入、未注册数据库写入或多步写执行能力。
+owner_write_command 仍必须审批，确认后仅已注册且 approval_resume_enabled=true 的工具会受控恢复。
+普通聊天仍不会触发 MainAgent 任务/审批 runtime。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 22 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 47 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 281 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

@@ -1,5 +1,4 @@
 import asyncio
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,45 +27,6 @@ from .access_store import (
     ensure_access_store,
     merged_access,
     remove_item,
-)
-from .agent_tasks import (
-    AGENT_TASK_COMMAND_APPROVAL_DETAIL,
-    AGENT_TASK_COMMAND_APPROVAL_APPROVE,
-    AGENT_TASK_COMMAND_APPROVAL_REJECT,
-    AGENT_TASK_COMMAND_APPROVAL_DRILL,
-    AGENT_TASK_COMMAND_APPROVAL_STATUS,
-    AGENT_TASK_COMMAND_CANCEL,
-    AGENT_TASK_COMMAND_CREATE,
-    AGENT_TASK_COMMAND_DETAIL,
-    AGENT_TASK_COMMAND_NEXT_STEP,
-    AGENT_TASK_COMMAND_STATUS,
-    AGENT_TASK_COMMAND_WORKBENCH,
-    AGENT_APPROVAL_PENDING,
-    AGENT_APPROVAL_APPROVED,
-    cancel_agent_task,
-    create_agent_approval_drill_reply,
-    create_agent_approval_request_reply,
-    create_agent_task,
-    decide_agent_approval,
-    format_agent_approval_decision,
-    format_agent_task_cancelled,
-    format_agent_task_created,
-    format_agent_task_detail,
-    format_agent_task_list,
-    format_agent_task_next_step,
-    format_agent_task_workbench,
-    format_agent_approval_detail,
-    format_agent_approval_list,
-    get_agent_approval,
-    get_agent_task,
-    is_implicit_latest_agent_reference,
-    is_latest_agent_reference,
-    list_agent_task_events,
-    list_agent_approvals,
-    list_agent_tasks,
-    parse_agent_task_command,
-    parse_agent_task_id,
-    resume_agent_approval,
 )
 from .base_prompt import load_base_chat_reminder
 from .chat_contracts import (
@@ -183,6 +143,13 @@ from .memory import (
 from .owner_notify import (
     format_owner_notification,
     validate_owner_notification_content,
+)
+from .owner_agent_runtime import (
+    OwnerAgentContext,
+    create_owner_agent_approval_request,
+    execute_owner_agent_task_command,
+    format_owner_agent_task_read,
+    run_owner_agent_task_command,
 )
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
@@ -4619,59 +4586,11 @@ def main_agent_static_reply(query: str) -> str | None:
     return None
 
 
-def latest_agent_approval_id(event: MessageEvent) -> int | None:
-    approvals = list_agent_approvals(
+def owner_agent_context_from_event(event: MessageEvent) -> OwnerAgentContext:
+    return OwnerAgentContext(
         session_key=session_key(event),
         user_id=user_id(event),
-        limit=1,
     )
-    return approvals[0].id if approvals else None
-
-
-def resolve_agent_approval_id_for_decision(
-    event: MessageEvent,
-    reference: str,
-    *,
-    verb: str,
-) -> tuple[int | None, str | None]:
-    stripped_reference = reference.strip()
-    if is_implicit_latest_agent_reference(stripped_reference):
-        approvals = list_agent_approvals(
-            session_key=session_key(event),
-            user_id=user_id(event),
-            status=AGENT_APPROVAL_PENDING,
-            limit=2,
-        )
-        if not approvals:
-            return None, (
-                "当前会话没有待审批项。\n"
-                f"如果要操作历史审批，请使用：/agent {verb} <审批ID>"
-            )
-        if len(approvals) > 1:
-            ids = "、".join(f"#{approval.id}" for approval in approvals)
-            return None, (
-                f"当前会话有多个待审批项：{ids}。\n"
-                f"请明确指定审批 ID：/agent {verb} <审批ID>"
-            )
-        return approvals[0].id, None
-
-    approval_id = parse_agent_task_id(stripped_reference)
-    if approval_id is None and (
-        not stripped_reference or is_latest_agent_reference(stripped_reference)
-    ):
-        approval_id = latest_agent_approval_id(event)
-    if approval_id is None:
-        return None, f"请提供审批 ID，或使用：/agent {verb} 最新"
-    return approval_id, None
-
-
-def latest_agent_task_id(event: MessageEvent) -> int | None:
-    tasks = list_agent_tasks(
-        session_key=session_key(event),
-        user_id=user_id(event),
-        limit=1,
-    )
-    return tasks[0].id if tasks else None
 
 
 async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
@@ -4807,150 +4726,11 @@ def create_main_agent_approval_resume_tool_registry():
 
 
 def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
-    parsed = parse_agent_task_command(query)
-    if parsed is None:
-        return None
-
-    action, goal = parsed
-    if action == AGENT_TASK_COMMAND_APPROVAL_STATUS:
-        approvals = list_agent_approvals(
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        return format_agent_approval_list(approvals)
-
-    if action == AGENT_TASK_COMMAND_NEXT_STEP:
-        return format_agent_task_next_step(
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-
-    if action == AGENT_TASK_COMMAND_WORKBENCH:
-        return format_agent_task_workbench(
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-
-    if action == AGENT_TASK_COMMAND_APPROVAL_DRILL:
-        if not goal:
-            return (
-                "请提供审批演练目标：/agent 审批演练 <目标>\n"
-                "该命令只创建 dry-run 任务和审批请求，不执行任何工具。"
-            )
-        return create_agent_approval_drill_reply(
-            session_key=session_key(event),
-            user_id=user_id(event),
-            goal=goal,
-        )
-
-    if action == AGENT_TASK_COMMAND_APPROVAL_DETAIL:
-        approval_id = parse_agent_task_id(goal)
-        if approval_id is None and is_latest_agent_reference(goal):
-            approval_id = latest_agent_approval_id(event)
-        if approval_id is None:
-            return "请提供审批 ID：/agent 审批详情 <审批ID>\n也可以用：/agent 审批详情 最新"
-        approval = get_agent_approval(
-            approval_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        if approval is None:
-            return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-        task = get_agent_task(
-            approval.task_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        events = list_agent_task_events(approval.task_id, limit=5)
-        return format_agent_approval_detail(approval, task=task, events=events)
-
-    if action in {
-        AGENT_TASK_COMMAND_APPROVAL_APPROVE,
-        AGENT_TASK_COMMAND_APPROVAL_REJECT,
-    }:
-        verb = "确认" if action == AGENT_TASK_COMMAND_APPROVAL_APPROVE else "拒绝"
-        approval_id, resolve_error = resolve_agent_approval_id_for_decision(
-            event,
-            goal,
-            verb=verb,
-        )
-        if resolve_error:
-            return resolve_error
-        approval, changed = decide_agent_approval(
-            approval_id=approval_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-            approved=action == AGENT_TASK_COMMAND_APPROVAL_APPROVE,
-        )
-        if approval is None:
-            return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-        reply = format_agent_approval_decision(approval, changed=changed)
-        if action == AGENT_TASK_COMMAND_APPROVAL_APPROVE and approval.status == AGENT_APPROVAL_APPROVED:
-            _, resumed, resume_text = resume_agent_approval(
-                approval_id=approval.id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-                tool_registry=create_main_agent_approval_resume_tool_registry(),
-            )
-            if resumed or resume_text:
-                reply = f"{reply}\n\n{resume_text}"
-        return reply
-
-    if action == AGENT_TASK_COMMAND_STATUS:
-        tasks = list_agent_tasks(
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        return format_agent_task_list(tasks)
-
-    if action == AGENT_TASK_COMMAND_DETAIL:
-        task_id = parse_agent_task_id(goal)
-        if task_id is None and is_latest_agent_reference(goal):
-            task_id = latest_agent_task_id(event)
-        if task_id is None:
-            return "请提供任务 ID：/agent 任务详情 <任务ID>\n也可以用：/agent 任务详情 最新"
-        task = get_agent_task(
-            task_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        if task is None:
-            return f"未找到当前会话中的 Agent 任务 #{task_id}。"
-        events = list_agent_task_events(task.id)
-        approvals = list_agent_approvals(
-            session_key=session_key(event),
-            user_id=user_id(event),
-            task_id=task.id,
-        )
-        return format_agent_task_detail(task, events, approvals)
-
-    if action == AGENT_TASK_COMMAND_CANCEL:
-        task_id = parse_agent_task_id(goal)
-        if task_id is None:
-            return "请提供任务 ID：/agent 取消任务 <任务ID>"
-        task, changed = cancel_agent_task(
-            task_id=task_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-        )
-        if task is None:
-            return f"未找到当前会话中的 Agent 任务 #{task_id}。"
-        return format_agent_task_cancelled(task, changed=changed)
-
-    if action == AGENT_TASK_COMMAND_CREATE:
-        if not goal:
-            return "请提供任务目标：/agent 任务 <目标>\n当前版本只允许已注册且启用审批恢复的工具在确认后受控恢复；不执行任意 shell、任意真实写文件或未注册数据库写入。"
-        task_id = create_agent_task(
-            session_key=session_key(event),
-            user_id=user_id(event),
-            goal=goal,
-        )
-        task = get_agent_task(task_id)
-        if task is None:
-            return "Agent 任务创建失败：任务记录未找到。"
-        return format_agent_task_created(task)
-
-    return None
+    return run_owner_agent_task_command(
+        owner_agent_context_from_event(event),
+        query,
+        approval_resume_tool_registry_factory=create_main_agent_approval_resume_tool_registry,
+    )
 
 
 def normalize_main_agent_query(query: str) -> str:
@@ -5128,69 +4908,11 @@ async def run_main_agent_qq_command(
         raise RuntimeError(f"unsupported owner read command: {command}")
 
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
-        if command == "next_step":
-            return format_agent_task_next_step(
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-        if command == "workbench":
-            return format_agent_task_workbench(
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-        if command == "list_tasks":
-            tasks = list_agent_tasks(
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            return format_agent_task_list(tasks)
-        if command == "list_approvals":
-            approvals = list_agent_approvals(
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            return format_agent_approval_list(approvals)
-        if command == "task_detail":
-            task_id = parse_agent_task_id(reference)
-            if task_id is None and (not reference or is_latest_agent_reference(reference)):
-                task_id = latest_agent_task_id(event)
-            if task_id is None:
-                return "请提供任务 ID，或使用：/agent 最新任务详情"
-            task = get_agent_task(
-                task_id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            if task is None:
-                return f"未找到当前会话中的 Agent 任务 #{task_id}。"
-            events = list_agent_task_events(task.id)
-            approvals = list_agent_approvals(
-                session_key=session_key(event),
-                user_id=user_id(event),
-                task_id=task.id,
-            )
-            return format_agent_task_detail(task, events, approvals)
-        if command == "approval_detail":
-            approval_id = parse_agent_task_id(reference)
-            if approval_id is None and (not reference or is_latest_agent_reference(reference)):
-                approval_id = latest_agent_approval_id(event)
-            if approval_id is None:
-                return "请提供审批 ID，或使用：/agent 最新审批详情"
-            approval = get_agent_approval(
-                approval_id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            if approval is None:
-                return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-            task = get_agent_task(
-                approval.task_id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            events = list_agent_task_events(approval.task_id, limit=5)
-            return format_agent_approval_detail(approval, task=task, events=events)
-        raise RuntimeError(f"unsupported agent task read command: {command}")
+        return format_owner_agent_task_read(
+            owner_agent_context_from_event(event),
+            command,
+            reference,
+        )
 
     async def execute_agent_task_command(
         command: str,
@@ -5198,95 +4920,25 @@ async def run_main_agent_qq_command(
         goal: str,
         _context,
     ) -> str:
-        if command == "create_task":
-            if not goal:
-                return "请提供任务目标：/agent 帮我创建一个任务：<目标>"
-            task_id = create_agent_task(
-                session_key=session_key(event),
-                user_id=user_id(event),
-                goal=goal,
-            )
-            task = get_agent_task(task_id)
-            if task is None:
-                return "Agent 任务创建失败：任务记录未找到。"
-            return format_agent_task_created(task)
-
-        if command == "create_approval_drill":
-            if not goal:
-                return "请提供审批演练目标：/agent 创建审批演练：<目标>"
-            return create_agent_approval_drill_reply(
-                session_key=session_key(event),
-                user_id=user_id(event),
-                goal=goal,
-            )
-
-        if command == "cancel_task":
-            task_id = parse_agent_task_id(reference)
-            if task_id is None and (not reference or is_latest_agent_reference(reference)):
-                task_id = latest_agent_task_id(event)
-            if task_id is None:
-                return "请提供任务 ID，或使用：/agent 取消最新任务"
-            task, changed = cancel_agent_task(
-                task_id=task_id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-            )
-            if task is None:
-                return f"未找到当前会话中的 Agent 任务 #{task_id}。"
-            return format_agent_task_cancelled(task, changed=changed)
-
-        if command in {"approve_approval", "reject_approval"}:
-            verb = "确认" if command == "approve_approval" else "拒绝"
-            approval_id, resolve_error = resolve_agent_approval_id_for_decision(
-                event,
-                reference,
-                verb=verb,
-            )
-            if resolve_error:
-                return resolve_error
-            approval, changed = decide_agent_approval(
-                approval_id=approval_id,
-                session_key=session_key(event),
-                user_id=user_id(event),
-                approved=command == "approve_approval",
-            )
-            if approval is None:
-                return f"未找到当前会话中的 Agent 审批 #{approval_id}。"
-            reply = format_agent_approval_decision(approval, changed=changed)
-            if command == "approve_approval" and approval.status == AGENT_APPROVAL_APPROVED:
-                _, resumed, resume_text = resume_agent_approval(
-                    approval_id=approval.id,
-                    session_key=session_key(event),
-                    user_id=user_id(event),
-                    tool_registry=create_main_agent_approval_resume_tool_registry(),
-                )
-                if resumed or resume_text:
-                    reply = f"{reply}\n\n{resume_text}"
-            return reply
-
-        raise RuntimeError(f"unsupported agent task command: {command}")
+        return execute_owner_agent_task_command(
+            owner_agent_context_from_event(event),
+            command,
+            reference,
+            goal,
+            approval_resume_tool_registry_factory=create_main_agent_approval_resume_tool_registry,
+        )
 
     async def request_agent_tool_approval(agent_state, risk_level, policy_reason) -> str:
         arguments = agent_state.metadata.get("tool_arguments", {})
         if not isinstance(arguments, dict):
             arguments = {}
-        command = str(arguments.get("command") or agent_state.requested_tool).strip()
-        goal = f"语义主人管理审批：{command}"
-        if agent_state.query.strip():
-            goal = f"{goal} / {agent_state.query.strip()}"
-        task_id = create_agent_task(
-            session_key=session_key(event),
-            user_id=user_id(event),
-            goal=goal,
-        )
-        return create_agent_approval_request_reply(
-            task_id=task_id,
-            session_key=session_key(event),
-            user_id=user_id(event),
-            tool_name=agent_state.requested_tool,
-            tool_input_json=json.dumps(dict(arguments), ensure_ascii=False),
-            risk_level=risk_level.value,
-            reason=policy_reason or "owner write command requires approval",
+        return create_owner_agent_approval_request(
+            owner_agent_context_from_event(event),
+            query=agent_state.query,
+            requested_tool=agent_state.requested_tool,
+            arguments=dict(arguments),
+            risk_level=risk_level,
+            policy_reason=policy_reason,
         )
 
     call_main_agent = None
