@@ -633,12 +633,16 @@ def list_agent_approvals(
     *,
     session_key: str | None = None,
     user_id: str | None = None,
+    task_id: int | None = None,
     status: str | None = None,
     limit: int = 5,
 ) -> list[AgentApproval]:
     ensure_database()
     clauses: list[str] = []
     params: list[object] = []
+    if task_id is not None:
+        clauses.append("a.task_id = ?")
+        params.append(task_id)
     if session_key:
         clauses.append("t.session_key = ?")
         params.append(session_key)
@@ -1219,9 +1223,50 @@ def format_agent_task_cancelled(task: AgentTask, *, changed: bool) -> str:
     )
 
 
-def format_agent_task_detail(task: AgentTask, events: list[AgentTaskEvent]) -> str:
+def _approval_next_action(approval: AgentApproval) -> str:
+    if approval.status == AGENT_APPROVAL_PENDING:
+        return f"下一步：/agent 确认 {approval.id} 或 /agent 拒绝 {approval.id}"
+    if approval.status == AGENT_APPROVAL_APPROVED:
+        return f"下一步：查看 /agent 任务详情 {approval.task_id} 的恢复执行事件。"
+    if approval.status == AGENT_APPROVAL_REJECTED:
+        return "下一步：已拒绝，不会恢复执行；如仍需要处理，请重新创建明确任务或审批。"
+    return "下一步：该审批当前不可确认；请查看任务详情判断是否需要重新发起。"
+
+
+def _task_next_action(task: AgentTask, approvals: list[AgentApproval]) -> str:
+    pending_approvals = [
+        approval for approval in approvals if approval.status == AGENT_APPROVAL_PENDING
+    ]
+    if pending_approvals:
+        latest = pending_approvals[0]
+        return f"下一步：先处理审批 #{latest.id}：/agent 确认 {latest.id} 或 /agent 拒绝 {latest.id}"
+    if task.status == AGENT_TASK_FAILED:
+        return "下一步：查看事件末尾的失败原因；当前版本不会自动重试失败任务。"
+    if task.status == AGENT_TASK_PENDING:
+        return "下一步：核对目标；如果需要写操作，必须由已注册工具创建审批后再确认。"
+    if task.status == AGENT_TASK_DONE:
+        return "下一步：任务已完成，可用 /agent 下一步 查看是否还有其他待处理事项。"
+    if task.status == AGENT_TASK_CANCELLED:
+        return "下一步：任务已取消；如仍需要处理，请重新创建任务。"
+    return "下一步：可用 /agent 下一步 查看当前会话的最高优先级事项。"
+
+
+def _event_brief_line(event: AgentTaskEvent) -> str:
+    summary = event.error or event.output_summary or event.kind
+    return (
+        f"{event.kind} [{agent_task_status_label(event.status)}] "
+        f"{_shorten_text(summary, limit=120)}"
+    )
+
+
+def format_agent_task_detail(
+    task: AgentTask,
+    events: list[AgentTaskEvent],
+    approvals: list[AgentApproval] | None = None,
+) -> str:
+    related_approvals = approvals or []
     lines = [
-        f"Agent 任务 #{task.id}：{task.title}",
+        f"Agent 任务详情卡 #{task.id}：{task.title}",
         f"状态：{agent_task_status_label(task.status)}",
         f"目标：{task.goal}",
         f"创建：{task.created_at}",
@@ -1229,16 +1274,30 @@ def format_agent_task_detail(task: AgentTask, events: list[AgentTaskEvent]) -> s
     ]
     if task.result:
         lines.append(f"结果：{task.result}")
+    lines.append(_task_next_action(task, related_approvals))
+    lines.append("")
+    lines.append("关联审批：")
+    if related_approvals:
+        for approval in related_approvals:
+            lines.append(
+                f"- 审批 #{approval.id} [{agent_approval_status_label(approval.status)}] "
+                f"{approval.tool_name} / {approval.risk_level}；"
+                f"原因：{_shorten_text(approval.reason, limit=80)}；"
+                f"查看：/agent 审批详情 {approval.id}"
+            )
+    else:
+        lines.append("- 暂无关联审批。")
     lines.append("")
     lines.append("事件：")
     if events:
         for event in events:
-            summary = event.output_summary or event.kind
             lines.append(
-                f"- {event.step_index}. {event.kind} [{agent_task_status_label(event.status)}] {summary}"
+                f"- {event.step_index}. {_event_brief_line(event)}"
             )
     else:
         lines.append("- 暂无事件。")
+    lines.append("")
+    lines.append("协作入口：/agent 下一步")
     lines.append("")
     lines.append(AGENT_APPROVAL_RESUME_BOUNDARY_TEXT)
     return "\n".join(lines)
@@ -1381,9 +1440,14 @@ def format_agent_approval_list(approvals: list[AgentApproval]) -> str:
     return "\n".join(lines)
 
 
-def format_agent_approval_detail(approval: AgentApproval) -> str:
+def format_agent_approval_detail(
+    approval: AgentApproval,
+    *,
+    task: AgentTask | None = None,
+    events: list[AgentTaskEvent] | None = None,
+) -> str:
     lines = [
-        f"Agent 审批 #{approval.id}",
+        f"Agent 审批详情卡 #{approval.id}",
         f"审批ID：#{approval.id}",
         f"状态：{agent_approval_status_label(approval.status)}",
         f"任务ID：#{approval.task_id}",
@@ -1398,6 +1462,22 @@ def format_agent_approval_detail(approval: AgentApproval) -> str:
         lines.append(f"过期：{approval.expires_at}")
     if approval.decided_at:
         lines.append(f"决定：{approval.decided_at}")
+    lines.append("")
+    lines.append("关联任务：")
+    if task is not None:
+        lines.append(
+            f"- 任务 #{task.id} [{agent_task_status_label(task.status)}] {task.title}；"
+            f"查看：/agent 任务详情 {task.id}"
+        )
+        if events:
+            latest_event = events[-1]
+            lines.append(f"- 最近事件：{_event_brief_line(latest_event)}")
+        else:
+            lines.append("- 最近事件：暂无。")
+    else:
+        lines.append(f"- 任务 #{approval.task_id}；查看：/agent 任务详情 {approval.task_id}")
+    lines.append("")
+    lines.append(_approval_next_action(approval))
     lines.append("")
     lines.append("当前版本仅允许已注册且启用审批恢复的工具在确认后受控恢复。")
     return "\n".join(lines)

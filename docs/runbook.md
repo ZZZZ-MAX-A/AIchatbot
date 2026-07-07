@@ -796,6 +796,8 @@ QQ 测试顺序：
 
 这些命令只读当前会话的 agent_tasks / agent_approvals，优先级是：待审批 > 失败任务 > 待处理任务 > 无事项。它们不会创建任务、确认审批、恢复工具或执行任何写操作。
 
+任务详情卡和审批详情卡会互相挂钩：任务详情会列出关联审批、状态和建议操作；审批详情会列出关联任务、任务状态和最近事件。两者都只是读取 agent_tasks / agent_task_events / agent_approvals，不调用 Main LLM 或 dev_context。
+
 预期结果：
 
 ```text
@@ -821,7 +823,8 @@ QQ 测试顺序：
   该命令不触发 Main LLM 或 dev_context。
 
 /agent 任务详情 <任务ID>
-  展示当前会话任务详情和事件记录。
+  展示当前会话任务详情卡、关联审批摘要和事件记录。
+  如果任务有待审批项，会提示 /agent 确认 <审批ID> 或 /agent 拒绝 <审批ID>。
   该命令不触发 Main LLM 或 dev_context。
 
 /agent 取消任务 <任务ID>
@@ -844,7 +847,7 @@ QQ 测试顺序：
   该命令不触发 Main LLM 或 dev_context。
 
 /agent 审批详情 <审批ID>
-  展示当前会话审批详情。
+  展示当前会话审批详情卡、关联任务摘要和最近任务事件。
   也可以用 /agent 审批详情 最新 查看当前会话最近审批。
   该命令不触发 Main LLM 或 dev_context。
 
@@ -853,7 +856,7 @@ QQ 测试顺序：
   只允许决定当前会话、当前用户的 pending 审批。
   也可以用 /agent 确认 最新 或 /agent 拒绝 最新 操作当前会话最近审批。
   会更新 agent_approvals.status / decided_at，并写入 agent_task_events 审批决定事件。
-  当前版本只记录审批决定，不恢复执行任何工具。
+  只有已注册且 approval_resume_enabled=true 的工具会在确认后受控恢复；其他工具只记录审批决定，不恢复执行。
   该命令不触发 Main LLM 或 dev_context。
 
 内部审批请求链路：
@@ -862,7 +865,7 @@ QQ 测试顺序：
   可用 format_agent_approval_requested 生成给主人看的审批请求回复。
   create_tool_policy_checker 会把 PolicyEngine 的 require_approval 决策转换为 approval_required 中断。
   中断阶段只返回审批请求，不进入 execute_tool。
-  当前仍不开放自动恢复执行。
+  当前仅开放已注册且启用审批恢复的工具在主人确认后受控恢复，不开放任意 shell、任意真实写文件或未注册数据库写入。
 
 /agent-debug ...
   返回原始 dev_context / CombinedRAG 召回。

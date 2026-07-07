@@ -371,6 +371,55 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 278 tests OK
 ```
 
+## v1.6 MainAgent 任务详情卡第一步
+
+状态：已落地 P1.4 小范围任务协作增强。目标是让任务和审批不再是两张割裂的表，而是在重启、中断或切换工作后，主人能从任意一张详情卡看懂当前接续点。
+
+本次完成：
+
+```text
+任务详情从普通事件列表升级为任务详情卡。
+/agent 任务详情 <任务ID> / 最新任务详情 会展示：
+  任务状态、目标、结果、创建/更新时间
+  当前建议下一步
+  关联审批摘要
+  任务事件列表
+  /agent 下一步 协作入口
+审批详情从普通审批记录升级为审批详情卡。
+/agent 审批详情 <审批ID> / 最新审批详情 会展示：
+  审批状态、工具、风险、原因、输入摘要
+  关联任务摘要
+  关联任务最近事件
+  当前建议下一步
+新增 list_agent_approvals(task_id=...)，用于只读查询某个任务的关联审批。
+固定 /agent 入口和语义 agent_task_read 入口都接入详情卡。
+```
+
+边界：
+
+```text
+详情卡仍是只读协作查询，不创建任务、不取消任务、不确认/拒绝审批、不恢复工具。
+详情卡只读取当前会话、当前用户范围内的 agent_tasks / agent_task_events / agent_approvals。
+普通聊天仍不会触发 MainAgent 任务协作。
+不开放多步自动执行任务、自动修复失败任务、shell、任意文件写入或未注册数据库写入。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 20 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 47 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 279 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
