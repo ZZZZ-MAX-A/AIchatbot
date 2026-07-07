@@ -78,6 +78,7 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         cls.memory_modules = load_legacy_memory_modules()
         cls.database = cls.memory_modules["database"]
         cls.agent_tasks = cls.memory_modules["agent_tasks"]
+        cls.owner_agent_runtime = cls.memory_modules["owner_agent_runtime"]
         cls.summaries = cls.memory_modules["summaries"]
         cls.manual_memory = cls.memory_modules["manual_memory"]
 
@@ -301,6 +302,48 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn(f"任务 #{done_task_id} [已完成]", workbench)
         self.assertIn(f"任务 #{cancelled_task_id} [已取消]", workbench)
         self.assertIn("只读保证", workbench)
+
+    def test_owner_agent_runtime_uses_context_without_qq_event(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            context = self.owner_agent_runtime.OwnerAgentContext(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            task_id = self.agent_tasks.create_agent_task(
+                session_key=context.session_key,
+                user_id=context.user_id,
+                goal="验证 service 层任务详情",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="验证 service 层不依赖 QQ event",
+            )
+            workbench = self.owner_agent_runtime.run_owner_agent_task_command(
+                context,
+                "任务工作台",
+                approval_resume_tool_registry_factory=lambda: None,
+            )
+            task_detail = self.owner_agent_runtime.format_owner_agent_task_read(
+                context,
+                "task_detail",
+                "latest",
+            )
+            approval_detail = self.owner_agent_runtime.format_owner_agent_task_read(
+                context,
+                "approval_detail",
+                "latest",
+            )
+
+        self.assertIn("Agent 任务工作台", workbench)
+        self.assertIn(f"审批 #{approval_id} [待审批]", workbench)
+        self.assertIn(f"Agent 任务详情卡 #{task_id}", task_detail)
+        self.assertIn(f"/agent 审批详情 {approval_id}", task_detail)
+        self.assertIn(f"Agent 审批详情卡 #{approval_id}", approval_detail)
+        self.assertIn(f"/agent 任务详情 {task_id}", approval_detail)
 
     def test_agent_task_cancel_is_scoped_and_records_event(self):
         temp_dir, patcher = self.temp_database()

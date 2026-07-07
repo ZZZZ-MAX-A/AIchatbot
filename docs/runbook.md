@@ -679,6 +679,8 @@ logs/ai_chat_error.log
 
 当前 MainAgentGraph 已接入 ToolRegistry。真实 `/agent` runner 的 LLM 可见工具包括 `dev_context`、`owner_read_command`、`agent_task_read` 和 `owner_write_command`；隐藏的确定性控制面工具 `agent_task_command` 用于创建/取消任务、确认/拒绝审批和审批演练，不交给 LLM 自由调用。`ActionRequest` 的 `tool_request` 会先经过 registry 校验工具名、参数和工具风险等级，再进入 `ToolPolicyCheck`。`owner_write_command` 必须审批，确认后仅已注册且 `approval_resume_enabled=true` 的工具会受控恢复执行；`dry_run_write_file` 只在显式 dry-run/test registry 中存在，`llm_visible=false`，用于审批链路测试，不写文件。
 
+P2.1 起，主人侧任务/审批 runtime 已从 QQ adapter 中抽到 `owner_agent_runtime.py`。`src/plugins/ai_chat/__init__.py` 仍负责 NoneBot/QQ 事件接入、鉴权和发送回复；任务状态、任务详情、任务工作台、审批详情、确认/拒绝、审批演练和 owner_write 审批请求创建由 `OwnerAgentContext(session_key, user_id)` 驱动的 service 处理。这是代码层解耦，不是独立进程、HTTP API 或 Web Console。
+
 当前边界：
 
 ```text
