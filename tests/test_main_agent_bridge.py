@@ -432,6 +432,15 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertEqual(result.text, "next_step:")
 
+        result = asyncio.run(
+            registry.execute(
+                "agent_task_read",
+                {"command": "workbench"},
+                self.tool_registry.ToolContext(is_owner=True),
+            )
+        )
+        self.assertEqual(result.text, "workbench:")
+
         with self.assertRaises(self.tool_registry.ToolExecutionError):
             asyncio.run(
                 registry.execute(
@@ -500,6 +509,14 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(
             self.main_agent_bridge.classify_agent_task_read_command("现在卡在哪"),
             ("next_step", ""),
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("看看任务工作台"),
+            ("workbench", ""),
+        )
+        self.assertEqual(
+            self.main_agent_bridge.classify_agent_task_read_command("打开任务看板"),
+            ("workbench", ""),
         )
         self.assertEqual(
             self.main_agent_bridge.classify_agent_task_read_command("看看任务卡"),

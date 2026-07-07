@@ -49,6 +49,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("format_agent_task_detail", source)
         self.assertIn("format_agent_task_next_step", source)
+        self.assertIn("format_agent_task_workbench", source)
         self.assertIn("list_agent_approvals", source)
         self.assertIn("format_agent_approval_detail", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)

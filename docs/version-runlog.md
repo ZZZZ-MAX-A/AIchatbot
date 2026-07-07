@@ -420,6 +420,58 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 279 tests OK
 ```
 
+## v1.6 MainAgent 任务工作台第一步
+
+状态：已落地 P1.5 任务协作 read-model 增强。目标是让 `/agent 下一步` 和新工作台视图从“近期任务列表”升级成更接近 Owner Console 后端读模型的分区摘要。
+
+本次完成：
+
+```text
+新增 AGENT_TASK_COMMAND_WORKBENCH / workbench 只读命令。
+/agent 任务工作台、/agent 任务看板、/agent 协作台 会展示 Agent 任务工作台。
+语义 MainAgent 任务读工具也能识别“看看任务工作台”“打开任务看板”等说法，路由到 agent_task_read/workbench。
+/agent 下一步 继续保留最高优先级建议，同时新增工作台概览分区。
+工作台分区包括：
+  待主人确认
+  失败任务
+  待处理任务
+  可复盘/已完成
+每条任务行包含任务 ID、状态、标题、最近事件和 /agent 任务详情入口。
+待审批任务会在任务行上标出待审批编号。
+待审批行包含 /agent 审批详情、/agent 确认、/agent 拒绝入口。
+工作台待处理分区现在优先显示有待审批的任务；没有待审批的普通 pending 任务会作为“普通待处理/积压”默认折叠为计数，避免旧测试任务刷屏。
+可复盘/已完成分区默认只展示最近少量记录，其余折叠为计数，避免历史执行结果刷屏。
+折叠只是只读降噪，不会批量取消或修改旧任务。
+```
+
+边界：
+
+```text
+任务工作台是只读查询，不创建任务、不取消任务、不确认/拒绝审批、不恢复工具。
+只读取当前会话、当前用户范围内的 agent_tasks / agent_task_events / agent_approvals。
+普通聊天仍不会触发 MainAgent 任务协作。
+不开放多步自动执行任务、自动修复失败任务、shell、任意文件写入或未注册数据库写入。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 21 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 47 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 280 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 21 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

@@ -83,6 +83,7 @@ OWNER_READ_COMMANDS: tuple[str, ...] = (
 )
 AGENT_TASK_READ_COMMANDS: tuple[str, ...] = (
     "next_step",
+    "workbench",
     "list_tasks",
     "task_detail",
     "list_approvals",
@@ -1637,6 +1638,23 @@ def classify_agent_task_read_command(query: str) -> tuple[str, str] | None:
     mentions_approval = any(marker in compact for marker in ("审批", "审核", "approval", "approvals"))
     mentions_task = any(marker in compact for marker in ("任务", "待办", "task", "todo"))
 
+    if any(
+        marker in compact
+        for marker in (
+            "任务工作台",
+            "任务看板",
+            "任务摘要",
+            "任务索引",
+            "协作台",
+            "工作台",
+            "看板",
+            "workbench",
+            "dashboard",
+            "taskdashboard",
+            "taskworkbench",
+        )
+    ):
+        return ("workbench", "")
     if any(
         marker in compact
         for marker in (

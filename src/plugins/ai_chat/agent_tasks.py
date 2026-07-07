@@ -30,6 +30,7 @@ AGENT_TASK_COMMAND_STATUS = "status"
 AGENT_TASK_COMMAND_DETAIL = "detail"
 AGENT_TASK_COMMAND_CANCEL = "cancel"
 AGENT_TASK_COMMAND_NEXT_STEP = "next_step"
+AGENT_TASK_COMMAND_WORKBENCH = "workbench"
 AGENT_TASK_COMMAND_APPROVAL_STATUS = "approval_status"
 AGENT_TASK_COMMAND_APPROVAL_DETAIL = "approval_detail"
 AGENT_TASK_COMMAND_APPROVAL_APPROVE = "approval_approve"
@@ -160,6 +161,20 @@ def parse_agent_task_command(query: str) -> tuple[str, str] | None:
         "blocked",
     }:
         return (AGENT_TASK_COMMAND_NEXT_STEP, "")
+    if lowered in {
+        "任务工作台",
+        "任务看板",
+        "任务摘要",
+        "任务索引",
+        "协作台",
+        "工作台",
+        "看板",
+        "workbench",
+        "dashboard",
+        "task workbench",
+        "task dashboard",
+    }:
+        return (AGENT_TASK_COMMAND_WORKBENCH, "")
     if lowered in {"审批演练", "模拟审批", "approval drill"}:
         return (AGENT_TASK_COMMAND_APPROVAL_DRILL, "")
     for prefix in ("审批演练 ", "模拟审批 ", "approval drill "):
@@ -463,6 +478,37 @@ def list_agent_tasks(
             tuple(params),
         ).fetchall()
     return [_task_from_row(row) for row in rows]
+
+
+def count_agent_pending_tasks_without_pending_approval(
+    *,
+    session_key: str | None = None,
+    user_id: str | None = None,
+) -> int:
+    ensure_database()
+    clauses = ["t.status = ?"]
+    params: list[object] = [AGENT_TASK_PENDING]
+    if session_key:
+        clauses.append("t.session_key = ?")
+        params.append(session_key)
+    if user_id:
+        clauses.append("t.user_id = ?")
+        params.append(user_id)
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT COUNT(*) AS item_count
+            FROM agent_tasks AS t
+            WHERE {' AND '.join(clauses)}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM agent_approvals AS a
+                  WHERE a.task_id = t.id AND a.status = ?
+              )
+            """,
+            tuple(params + [AGENT_APPROVAL_PENDING]),
+        ).fetchone()
+    return int(row["item_count"] if row else 0)
 
 
 def list_agent_task_events(task_id: int, *, limit: int = 10) -> list[AgentTaskEvent]:
@@ -1326,18 +1372,208 @@ def _task_event_brief(task: AgentTask) -> str:
     )
 
 
-def _task_brief_line(task: AgentTask) -> str:
-    return (
-        f"- 任务 #{task.id} [{agent_task_status_label(task.status)}] "
-        f"{task.title}；{_task_event_brief(task)}"
-    )
-
-
-def _approval_brief_line(approval: AgentApproval) -> str:
+def _approval_workbench_line(approval: AgentApproval) -> str:
+    action = ""
+    if approval.status == AGENT_APPROVAL_PENDING:
+        action = f"；操作：/agent 确认 {approval.id} 或 /agent 拒绝 {approval.id}"
     return (
         f"- 审批 #{approval.id} [{agent_approval_status_label(approval.status)}] "
         f"任务 #{approval.task_id} {approval.tool_name} / {approval.risk_level}"
+        f"；查看：/agent 审批详情 {approval.id}{action}"
     )
+
+
+def _task_workbench_line(
+    task: AgentTask,
+    pending_approval_ids_by_task: dict[int, list[int]] | None = None,
+) -> str:
+    approval_ids = (pending_approval_ids_by_task or {}).get(task.id, [])
+    approval_text = ""
+    if approval_ids:
+        approval_text = "；待审批：" + "、".join(f"#{approval_id}" for approval_id in approval_ids)
+    return (
+        f"- 任务 #{task.id} [{agent_task_status_label(task.status)}] "
+        f"{task.title}{approval_text}；{_task_event_brief(task)}；"
+        f"查看：/agent 任务详情 {task.id}"
+    )
+
+
+def _pending_approval_ids_by_task(approvals: list[AgentApproval]) -> dict[int, list[int]]:
+    grouped: dict[int, list[int]] = {}
+    for approval in approvals:
+        grouped.setdefault(approval.task_id, []).append(approval.id)
+    return grouped
+
+
+def _latest_event_kind(task: AgentTask) -> str:
+    event = latest_agent_task_event(task.id)
+    return event.kind if event is not None else ""
+
+
+def _settled_pending_tasks(tasks: list[AgentTask]) -> list[AgentTask]:
+    settled_event_kinds = {
+        "approval_rejected",
+        "approval_approved",
+        "tool_resume_finished",
+        "tool_resume_failed",
+    }
+    return [
+        task for task in tasks
+        if task.status == AGENT_TASK_PENDING and _latest_event_kind(task) in settled_event_kinds
+    ]
+
+
+def _recent_closed_tasks(*, session_key: str, user_id: str, limit: int = 5) -> list[AgentTask]:
+    done_tasks = list_agent_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        status=AGENT_TASK_DONE,
+        limit=limit,
+    )
+    cancelled_tasks = list_agent_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        status=AGENT_TASK_CANCELLED,
+        limit=limit,
+    )
+    return sorted(done_tasks + cancelled_tasks, key=lambda task: task.id, reverse=True)[:limit]
+
+
+def _append_task_workbench_sections(
+    lines: list[str],
+    *,
+    pending_approvals: list[AgentApproval],
+    failed_tasks: list[AgentTask],
+    pending_tasks: list[AgentTask],
+    closed_tasks: list[AgentTask],
+    ordinary_pending_total: int,
+    ordinary_pending_visible_limit: int = 0,
+    failed_visible_limit: int = 2,
+    closed_visible_limit: int = 3,
+) -> None:
+    approval_ids_by_task = _pending_approval_ids_by_task(pending_approvals)
+    pending_with_approval = [
+        task for task in pending_tasks if task.id in approval_ids_by_task
+    ]
+    ordinary_pending = [
+        task for task in pending_tasks if task.id not in approval_ids_by_task
+    ]
+    settled_pending = _settled_pending_tasks(ordinary_pending)
+    visible_ordinary_pending = ordinary_pending[: max(0, ordinary_pending_visible_limit)]
+    omitted_ordinary_pending = max(0, ordinary_pending_total - len(visible_ordinary_pending))
+    visible_failed_tasks = failed_tasks[: max(0, failed_visible_limit)]
+    omitted_failed_tasks = max(0, len(failed_tasks) - len(visible_failed_tasks))
+    visible_closed_tasks = closed_tasks[: max(0, closed_visible_limit)]
+    omitted_closed_tasks = max(0, len(closed_tasks) - len(visible_closed_tasks))
+
+    lines.append("")
+    lines.append("待主人确认：")
+    if pending_approvals:
+        lines.extend(_approval_workbench_line(approval) for approval in pending_approvals)
+    else:
+        lines.append("- 暂无待审批。")
+
+    lines.append("")
+    lines.append("失败任务：")
+    if visible_failed_tasks:
+        lines.extend(
+            _task_workbench_line(task, approval_ids_by_task)
+            for task in visible_failed_tasks
+        )
+        if omitted_failed_tasks:
+            lines.append(
+                f"- 另有 {omitted_failed_tasks} 项失败任务已折叠；"
+                "可用 /agent 任务状态 或 /agent 任务详情 <任务ID> 复盘。"
+            )
+    else:
+        lines.append("- 暂无失败任务。")
+
+    lines.append("")
+    lines.append("待处理任务：")
+    if pending_with_approval:
+        lines.append("有待审批的任务：")
+        lines.extend(
+            _task_workbench_line(task, approval_ids_by_task)
+            for task in pending_with_approval
+        )
+    if visible_ordinary_pending:
+        lines.append("普通待处理/积压：")
+        lines.extend(
+            _task_workbench_line(task, approval_ids_by_task)
+            for task in visible_ordinary_pending
+        )
+    elif ordinary_pending_total:
+        lines.append("普通待处理/积压：")
+    if omitted_ordinary_pending:
+        lines.append(
+            f"- {ordinary_pending_total} 项普通待处理任务已折叠；"
+            "多半是旧测试或积压项，可用 /agent 任务状态 查看，"
+            "或用 /agent 取消任务 <任务ID> 逐条收纳。"
+        )
+    if settled_pending:
+        sample_ids = "、".join(f"#{task.id}" for task in settled_pending[:5])
+        extra_count = len(settled_pending) - min(5, len(settled_pending))
+        extra_text = f" 等 {len(settled_pending)} 项" if extra_count else ""
+        lines.append(
+            f"- 其中 {sample_ids}{extra_text} 的最近事件已是审批确认/拒绝或工具恢复结果，"
+            "默认按旧残留收纳。"
+        )
+    if not pending_with_approval and not visible_ordinary_pending and not omitted_ordinary_pending:
+        lines.append("- 暂无待处理任务。")
+    else:
+        lines.append("提示：工作台默认不批量取消任务，只做只读降噪。")
+
+    lines.append("")
+    lines.append("可复盘/已完成：")
+    if visible_closed_tasks:
+        lines.extend(
+            _task_workbench_line(task, approval_ids_by_task)
+            for task in visible_closed_tasks
+        )
+        if omitted_closed_tasks:
+            lines.append(
+                f"- 另有 {omitted_closed_tasks} 项已完成/已取消任务已折叠；"
+                "可用 /agent 任务状态 或 /agent 任务详情 <任务ID> 复盘。"
+            )
+    else:
+        lines.append("- 暂无已完成或已取消任务。")
+
+
+def _agent_task_priority_lines(
+    *,
+    pending_approvals: list[AgentApproval],
+    failed_tasks: list[AgentTask],
+    pending_tasks: list[AgentTask],
+    recent_tasks: list[AgentTask] | None = None,
+) -> list[str]:
+    if pending_approvals:
+        latest = pending_approvals[0]
+        return [
+            "当前最该处理：有待审批项需要主人确认或拒绝。",
+            f"建议：先查看 /agent 审批详情 {latest.id}，然后使用 /agent 确认 {latest.id} 或 /agent 拒绝 {latest.id}。",
+        ]
+    if failed_tasks:
+        latest = failed_tasks[0]
+        return [
+            "当前最该处理：有失败任务需要查看原因。",
+            f"建议：先发送 /agent 任务详情 {latest.id}，查看失败事件和错误摘要。",
+        ]
+    if pending_tasks:
+        latest = pending_tasks[0]
+        return [
+            "当前最该处理：有待处理任务，但没有待审批项。",
+            f"建议：先发送 /agent 任务详情 {latest.id} 核对目标；当前版本不会自动多步执行普通任务。",
+        ]
+    if recent_tasks:
+        latest = recent_tasks[0]
+        return [
+            "当前没有待处理任务或待审批项。",
+            f"最近任务是 #{latest.id} [{agent_task_status_label(latest.status)}]，可用 /agent 任务详情 {latest.id} 复盘。",
+        ]
+    return [
+        "当前没有任务或审批记录。",
+        "建议：如果要开始协作，可以发送 /agent 任务 <目标>；如果只是查项目上下文，可以发送 /agent 查 <问题>。",
+    ]
 
 
 def format_agent_task_next_step(*, session_key: str, user_id: str) -> str:
@@ -1357,70 +1593,105 @@ def format_agent_task_next_step(*, session_key: str, user_id: str) -> str:
         session_key=session_key,
         user_id=user_id,
         status=AGENT_TASK_PENDING,
-        limit=5,
+        limit=12,
+    )
+    ordinary_pending_total = count_agent_pending_tasks_without_pending_approval(
+        session_key=session_key,
+        user_id=user_id,
     )
     recent_tasks = list_agent_tasks(
         session_key=session_key,
         user_id=user_id,
         limit=5,
     )
+    closed_tasks = _recent_closed_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        limit=5,
+    )
 
     lines = ["Agent 任务协作：下一步"]
-    if pending_approvals:
-        latest = pending_approvals[0]
-        lines.extend(
-            [
-                "当前最该处理：有待审批项需要主人确认或拒绝。",
-                f"建议：先查看 /agent 审批详情 {latest.id}，然后使用 /agent 确认 {latest.id} 或 /agent 拒绝 {latest.id}。",
-            ]
+    lines.extend(
+        _agent_task_priority_lines(
+            pending_approvals=pending_approvals,
+            failed_tasks=failed_tasks,
+            pending_tasks=pending_tasks,
+            recent_tasks=recent_tasks,
         )
-    elif failed_tasks:
-        latest = failed_tasks[0]
-        lines.extend(
-            [
-                "当前最该处理：有失败任务需要查看原因。",
-                f"建议：先发送 /agent 任务详情 {latest.id}，查看失败事件和错误摘要。",
-            ]
-        )
-    elif pending_tasks:
-        latest = pending_tasks[0]
-        lines.extend(
-            [
-                "当前最该处理：有待处理任务，但没有待审批项。",
-                f"建议：先发送 /agent 任务详情 {latest.id} 核对目标；当前版本不会自动多步执行普通任务。",
-            ]
-        )
-    elif recent_tasks:
-        latest = recent_tasks[0]
-        lines.extend(
-            [
-                "当前没有待处理任务或待审批项。",
-                f"最近任务是 #{latest.id} [{agent_task_status_label(latest.status)}]，可用 /agent 任务详情 {latest.id} 复盘。",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "当前没有任务或审批记录。",
-                "建议：如果要开始协作，可以发送 /agent 任务 <目标>；如果只是查项目上下文，可以发送 /agent 查 <问题>。",
-            ]
-        )
+    )
+    _append_task_workbench_sections(
+        lines,
+        pending_approvals=pending_approvals,
+        failed_tasks=failed_tasks,
+        pending_tasks=pending_tasks,
+        closed_tasks=closed_tasks,
+        ordinary_pending_total=ordinary_pending_total,
+        ordinary_pending_visible_limit=0,
+        closed_visible_limit=2,
+    )
 
     lines.append("")
-    lines.append("待主人确认：")
-    if pending_approvals:
-        lines.extend(_approval_brief_line(approval) for approval in pending_approvals)
-    else:
-        lines.append("- 暂无待审批。")
-
+    lines.append("完整工作台：/agent 任务工作台")
     lines.append("")
-    lines.append("近期任务：")
-    if recent_tasks:
-        lines.extend(_task_brief_line(task) for task in recent_tasks)
-    else:
-        lines.append("- 暂无任务。")
+    lines.append(AGENT_APPROVAL_RESUME_BOUNDARY_TEXT)
+    return "\n".join(lines)
 
+
+def format_agent_task_workbench(*, session_key: str, user_id: str) -> str:
+    pending_approvals = list_agent_approvals(
+        session_key=session_key,
+        user_id=user_id,
+        status=AGENT_APPROVAL_PENDING,
+        limit=8,
+    )
+    failed_tasks = list_agent_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        status=AGENT_TASK_FAILED,
+        limit=5,
+    )
+    pending_tasks = list_agent_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        status=AGENT_TASK_PENDING,
+        limit=20,
+    )
+    ordinary_pending_total = count_agent_pending_tasks_without_pending_approval(
+        session_key=session_key,
+        user_id=user_id,
+    )
+    recent_tasks = list_agent_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        limit=5,
+    )
+    closed_tasks = _recent_closed_tasks(
+        session_key=session_key,
+        user_id=user_id,
+        limit=8,
+    )
+
+    lines = ["Agent 任务工作台"]
+    lines.extend(
+        _agent_task_priority_lines(
+            pending_approvals=pending_approvals,
+            failed_tasks=failed_tasks,
+            pending_tasks=pending_tasks,
+            recent_tasks=recent_tasks,
+        )
+    )
+    _append_task_workbench_sections(
+        lines,
+        pending_approvals=pending_approvals,
+        failed_tasks=failed_tasks,
+        pending_tasks=pending_tasks,
+        closed_tasks=closed_tasks,
+        ordinary_pending_total=ordinary_pending_total,
+        ordinary_pending_visible_limit=0,
+        closed_visible_limit=3,
+    )
     lines.append("")
+    lines.append("只读保证：未创建任务、未取消任务、未确认/拒绝审批、未恢复工具。")
     lines.append(AGENT_APPROVAL_RESUME_BOUNDARY_TEXT)
     return "\n".join(lines)
 
