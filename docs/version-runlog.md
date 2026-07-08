@@ -701,6 +701,73 @@ Ran 284 tests OK
 不新增测试依赖。
 ```
 
+## v1.6 Web Owner Console read-model 设计
+
+状态：已落地 P2.6 设计文档。目标是在 MainAgent owner runtime service 解耦后，先定义未来 Web Owner Console 的只读页面和结构化 read model，而不是直接写前端或接 HTTP。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-read-model-design.md。
+
+明确 Web Owner Console v0 定位：
+  只做 read-model 设计
+  不写前端
+  不接 HTTP
+  不做登录/鉴权
+  不新增数据库表
+  不做 Web 写操作
+
+梳理现有 QQ 文本输出后端形态：
+  lines provider -> str
+  Graph execution reply_text -> str
+  AgentTask / AgentApproval -> QQ formatter -> str
+
+确定 Web read model 不应长期复用 QQ 文本输出：
+  不解析 QQ 文案
+  不把文案当接口契约
+  任务/审批优先复用 AgentTask / AgentTaskEvent / AgentApproval 等结构化来源
+
+页面范围分层：
+  v0 必须清楚：Dashboard、Tasks、Task Detail、Approvals、Approval Detail、Diagnostics、Access Control
+  v0 浅层快照：Memory、Settings
+
+定义 read model 草案：
+  OwnerConsoleOverview
+  OwnerConsoleTaskList
+  OwnerConsoleTaskDetail
+  OwnerConsoleApprovalList
+  OwnerConsoleApprovalDetail
+  OwnerConsoleHealthSnapshot
+  OwnerConsoleMemorySnapshot
+  OwnerConsoleAccessControlSnapshot
+  OwnerConsoleRuntimeBoundary
+
+写清未来升级路线：
+  v0 全只读
+  v0.1 只读 actionability metadata
+  v1 如支持审批决定，也必须复用现有 approval resume / owner_write_runtime 链路
+```
+
+稀土掘金文章：
+
+```text
+新增 docs/juejin/14-web-owner-console-read-model-design.md。
+主题：为什么 Web Owner Console 不直接复用 QQ 文本输出，以及为什么要先设计结构化 DTO。
+```
+
+边界：
+
+```text
+本步只做设计和文档，不改变运行时代码。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+不新增 HTTP API。
+不新增 Web 前端。
+不新增工具能力。
+不新增数据库表。
+不执行测试；本次为纯文档变更。
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
