@@ -2854,6 +2854,149 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 317 tests OK
 ```
 
+## v1.6 Owner Console HTTP surface audit
+
+状态：已落地 P2.25。目标是在 P2.21-P2.24 完成 Owner Console v0 只读 HTTP surface 后，补一份集中审计文档，把 RESTful route、HTTP envelope、context 策略、只读边界、diagnostics 取舍和后续升级路线写清楚。
+
+本次完成：
+
+```text
+新增 docs/owner-console-http-surface-audit.md。
+
+更新 docs/web-owner-console-read-model-design.md：
+  在开头补充后续实现状态说明。
+  明确 P2.6 的“不接 HTTP”是当时设计阶段边界。
+  指向 P2.25 HTTP surface audit。
+```
+
+审计结论：
+
+```text
+Owner Console HTTP v0 已经具备完整只读资源面。
+它仍然不是 Web 前端。
+它仍然不做登录/鉴权。
+它仍然不开放写操作。
+它仍然不替代 QQ / NoneBot adapter。
+它仍然不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+```
+
+当前 HTTP surface：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
+GET /api/v1/owner-console/memory
+GET /api/v1/owner-console/diagnostics
+```
+
+文档重点：
+
+```text
+启动入口：
+  .\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+
+禁止直接使用：
+  uvicorn src.plugins.ai_chat.owner_console_fastapi_app:app
+
+原因：
+  必须避免执行 src/plugins/ai_chat/__init__.py。
+  Web adapter 不能加载 QQ/NoneBot 插件入口。
+```
+
+RESTful 规范：
+
+```text
+API prefix 固定为 /api/v1/owner-console。
+只使用 GET。
+静态路径 segment 使用 lowercase kebab-case。
+JSON 字段和 query 参数使用 snake_case。
+集合资源使用复数：tasks、approvals。
+详情资源挂在集合资源下：tasks/{task_id}、approvals/{approval_id}。
+```
+
+HTTP envelope：
+
+```text
+schema_version
+read_model_schema_version
+transport
+api_prefix
+resource
+generated_at
+read_only
+http_api_enabled
+web_write_enabled
+data
+error
+```
+
+context 策略：
+
+```text
+需要 owner context：
+  overview
+  tasks
+  tasks.detail
+  approvals
+  approvals.detail
+
+构造方式：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+禁止：
+  query 覆盖 user_id
+  query 覆盖 session_key
+```
+
+非 context 快照：
+
+```text
+routes
+access-control
+settings
+memory
+diagnostics
+```
+
+diagnostics 取舍：
+
+```text
+GET /diagnostics 第一版只返回轻量 read-only snapshot。
+不 import diagnostics.py。
+不执行 OpenAI / Ollama / TTS / Vision 探测。
+不读取 QQ adapter 图片缓存。
+不读取最近错误日志。
+未来如果需要主动诊断，应设计 explicit probe endpoint，不把 GET diagnostics 变成探测执行器。
+```
+
+后续建议路线：
+
+```text
+P2.26：HTTP surface contract cleanup，收敛重复 endpoint glue。
+P2.27：本地 FastAPI smoke runbook。
+P2.28：Web Owner Console 前端只读壳。
+P2.29：登录/鉴权设计。
+P2.30：审批操作设计。
+```
+
+测试：
+
+```text
+git diff --check
+OK，仅有 Windows LF/CRLF 提示
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract -v
+Ran 6 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
