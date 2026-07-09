@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Collection
 from typing import Callable, TypeAlias
 
 from .access_store import AccessStore, merged_access
@@ -82,3 +83,26 @@ def parse_owner_console_positive_int(
             details={"field": field_name, "value": value},
         )
     return parsed
+
+
+def parse_owner_console_optional_status(
+    value: str | None,
+    *,
+    allowed_statuses: Collection[str],
+    field_name: str = "status",
+) -> str | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if normalized not in allowed_statuses:
+        raise OwnerConsoleHttpAdapterError(
+            code="bad_request",
+            message=f"{field_name} is not supported",
+            status_code=400,
+            details={
+                "field": field_name,
+                "value": value,
+                "allowed": sorted(allowed_statuses),
+            },
+        )
+    return normalized
