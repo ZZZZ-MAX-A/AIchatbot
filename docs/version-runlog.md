@@ -3317,6 +3317,140 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console minimal App Shell
+
+状态：已落地 P2.31 第一刀。目标是创建 `web/owner-console` 最小 Vite + React + TypeScript 前端工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`，先跑通中文 App Shell、左侧导航、顶部状态条和只读 route contract 展示。
+
+本次完成：
+
+```text
+新增 web/owner-console 前端工程。
+
+新增：
+  package.json
+  package-lock.json
+  vite.config.ts
+  tsconfig.json
+  index.html
+  .env.example
+  README.md
+  src/main.tsx
+  src/vite-env.d.ts
+  src/api/ownerConsoleApi.ts
+  src/api/ownerConsoleEnvelope.ts
+  src/api/ownerConsoleTypes.ts
+  src/app/App.tsx
+  src/app/AppShell.tsx
+  src/app/PlaceholderPage.tsx
+  src/components/StatusBadge.tsx
+  src/components/EmptyState.tsx
+  src/styles/app.css
+
+更新 .gitignore：
+  忽略 web/owner-console/dist/
+  忽略 web/owner-console/.vite/
+```
+
+前端第一刀能力：
+
+```text
+左侧中文固定导航：
+  概览
+  任务
+  审批
+  诊断
+  记忆
+  访问控制
+  设置
+
+顶部中文状态条：
+  主人控制台
+  只读模式：已开启 / 异常
+  网页写入：已关闭 / 异常
+  后端连接：连接中 / 已连接 / 已断开
+  接口版本
+  最后刷新
+  刷新
+
+概览页展示：
+  只读接口状态
+  route contract rows
+  route_count
+  allowed_methods
+  write_routes_enabled=false
+```
+
+依赖与安全：
+
+```text
+npm install 后初始 Vite 5.x 链路触发 npm audit 漏洞提示。
+根据 npm audit 修复建议，升级到 vite 8.1.4 和 @vitejs/plugin-react 6.0.3。
+npm audit 后为 0 vulnerabilities。
+```
+
+边界：
+
+```text
+只调用 GET /healthz。
+只调用 GET /api/v1/owner-console/routes。
+不接 overview / tasks / approvals 业务数据。
+不新增 FastAPI endpoint。
+不修改 FastAPI 行为。
+不打开 /docs /openapi.json。
+不新增 CORS。
+不新增登录/鉴权。
+不开放 Web 写操作。
+不新增审批确认/拒绝入口。
+不触发 MainAgent。
+不读取 Python 文件、数据库、.env 或日志。
+```
+
+本地 smoke：
+
+```text
+FastAPI backend:
+  .\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+
+Vite frontend:
+  npm run dev
+
+本地访问：
+  http://127.0.0.1:5173/owner-console
+
+进程状态：
+  127.0.0.1:8090 LISTENING
+  127.0.0.1:5173 LISTENING
+
+HTTP smoke：
+  GET http://127.0.0.1:5173/owner-console -> 200
+  GET http://127.0.0.1:5173/healthz -> ok=true, read_only=true, web_write_enabled=false
+  GET http://127.0.0.1:5173/api/v1/owner-console/routes -> resource=routes, route_count=10, methods=GET
+```
+
+浏览器验证：
+
+```text
+已尝试使用本地浏览器控制工具。
+当前环境返回可用浏览器列表为空，因此本轮未完成截图级浏览器验证。
+已用 Vite build、HTTP smoke 和 API proxy smoke 兜底验证。
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

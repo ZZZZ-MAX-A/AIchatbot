@@ -16,6 +16,8 @@ node_modules/
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
+web/owner-console/dist/
+web/owner-console/.vite/
 
 # Runtime data
 logs/*

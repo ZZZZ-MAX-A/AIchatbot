@@ -2,6 +2,8 @@
 
 本文记录 P2.30 Web Owner Console UI 布局设计。当前阶段只做页面结构和中文化展示设计，不创建前端工程、不写 React 组件、不写 CSS、不修改 FastAPI 行为。
 
+后续实现状态：P2.31 已创建 `web/owner-console` 最小只读 App Shell，采用本文定义的中文左侧导航和中文顶部状态条，第一刀只接 `/healthz` 和 `/api/v1/owner-console/routes`。
+
 ## 1. 设计定位
 
 Web Owner Console 第一版走简约工具风格：
