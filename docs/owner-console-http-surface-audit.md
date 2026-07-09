@@ -25,6 +25,12 @@ docs/owner-console-fastapi-smoke-runbook.md
 docs/web-owner-console-read-only-shell-design.md
 ```
 
+未来前端技术栈和目录边界见：
+
+```text
+docs/web-owner-console-frontend-stack-design.md
+```
+
 ## 1. 实现定位
 
 Owner Console HTTP v0 是 Web Owner Console read model 的本地 HTTP adapter。它只负责：

@@ -3160,6 +3160,80 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console frontend stack design
+
+状态：已落地 P2.29 设计文档。目标是在创建真实前端工程之前，先确定技术栈、目录边界、启动命名、API client 边界和 Python/Node 分层，避免把前端工程混入 `src/plugins/ai_chat` 或让 Web 入口绕过 HTTP read model。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-frontend-stack-design.md。
+
+设计推荐：
+  未来前端目录使用 web/owner-console。
+  技术栈使用 Vite + React + TypeScript。
+  路由使用 React Router。
+  图标使用 lucide-react。
+  样式先用 plain CSS 或 CSS Modules。
+  数据请求先用 native fetch。
+  第一版不引入 Next.js、SSR、TanStack Query、Redux/Zustand、Tailwind 或大型 UI 框架。
+
+文档覆盖：
+  为什么不放在 Python src 里。
+  未来目录草案。
+  ownerConsoleApi 方法命名。
+  TypeScript DTO 策略。
+  前端页面路径设计。
+  状态管理策略。
+  样式和组件策略。
+  Vite dev proxy 与 CORS 边界。
+  npm scripts 命名建议。
+  Python / Node 禁止 import 边界。
+  未来测试策略。
+  第一版前端工程创建标准。
+
+更新 docs/web-owner-console-read-only-shell-design.md：
+  补充 P2.29 前端栈设计链接。
+
+更新 docs/owner-console-http-surface-audit.md：
+  补充 P2.29 前端栈与目录边界链接。
+```
+
+边界：
+
+```text
+不创建 package.json。
+不安装 Node 依赖。
+不写 React 组件。
+不写 CSS。
+不启动前端 dev server。
+不修改 FastAPI 运行时代码。
+不新增 endpoint。
+不新增 CORS。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不改变 QQ / NoneBot adapter。
+```
+
+设计结论：
+
+```text
+前端工程未来放在 web/owner-console，而不是 src/ 或 src/plugins/ai_chat。
+前端只能通过 GET /healthz 和 GET /api/v1/owner-console/* 读取数据。
+第一版只接 /healthz 和 /routes，验证 App Shell 和 contract boundary。
+Vite dev proxy 可以解决本地开发跨端口问题，不提前打开 FastAPI CORS。
+```
+
+测试：
+
+```text
+git diff --check
+OK，仅有 Windows LF/CRLF 提示
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
