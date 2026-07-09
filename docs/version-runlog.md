@@ -4255,6 +4255,71 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console frontend contract guard
+
+状态：已落地 P2.37。目标是把 P2.36 的人工前端只读审计固化成本地自动检查，避免后续新增页面或 API client 时无意间扩大 Web Owner Console v0 的能力边界。
+
+本次完成：
+
+```text
+新增 web/owner-console/scripts/readonly-guard.mjs：
+  检查 fetch() 只出现在 ownerConsoleApi.ts。
+  检查 HTTP method 只允许 GET。
+  检查源码不引用 /openapi、/docs、/redoc。
+  检查源码不出现 approveApproval / rejectApproval / resumeApproval 等写操作风格 API 名称。
+  检查 ownerConsoleApi.ts 保留当前只读 allowlist。
+  检查任务详情 / 审批详情动态路径仍使用正整数 ID 校验。
+  检查主导航页面路由仍全部存在。
+  检查 PlaceholderPage 没有被重新引入。
+
+更新 web/owner-console/package.json：
+  新增 npm run guard:readonly。
+
+更新 web/owner-console/README.md：
+  更新当前已接入的只读端点列表。
+  增加 guard:readonly 检查命令。
+
+新增 docs/web-owner-console-frontend-contract-guard.md：
+  记录 guard 定位、命令、检查项、禁止项、验证组合和后续路线。
+
+更新 docs/web-owner-console-frontend-readonly-audit.md：
+  将人工审计命令升级为包含 npm run guard:readonly。
+  标记 P2.37 guard 已落地。
+
+更新前端栈和 UI 布局设计文档的后续实现状态。
+```
+
+边界：
+
+```text
+不新增后端接口。
+不新增前端写能力。
+不新增登录/鉴权。
+不修改 FastAPI 运行时代码。
+不触发 MainAgent。
+不改变 QQ / /agent 行为。
+guard 只是前端静态边界检查，不替代后端 HTTP contract 测试。
+```
+
+测试：
+
+```text
+npm run guard:readonly
+Owner Console frontend read-only guard passed.
+
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

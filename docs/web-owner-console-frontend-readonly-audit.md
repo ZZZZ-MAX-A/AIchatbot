@@ -235,6 +235,7 @@ rg -n "PlaceholderPage|占位|暂无业务快照" web\owner-console\src
 构建与后端契约验证：
 
 ```text
+npm run guard:readonly
 npm run typecheck
 npm run build
 npm audit
@@ -249,7 +250,7 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 更稳的路线：
 
 ```text
-P2.37：补一层前端 smoke / contract guard，自动校验 ownerConsoleApi 只允许 GET 和 allowlist。
+P2.37：补一层前端 smoke / contract guard，自动校验 ownerConsoleApi 只允许 GET 和 allowlist。已落地，见 docs/web-owner-console-frontend-contract-guard.md。
 P2.38：整理 Web Owner Console v0 使用手册和启动 runbook。
 P2.39：再讨论静态部署方式，例如 Vite build 后由 FastAPI 挂载 dist，或本地反向代理。
 P2.40：单独设计登录/鉴权。
