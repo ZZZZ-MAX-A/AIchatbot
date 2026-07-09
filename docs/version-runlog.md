@@ -4021,6 +4021,88 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Access Control data
+
+状态：已落地 P2.35 第三刀。目标是在记忆页之后接入访问控制页真实只读数据，让 `/owner-console/access-control` 可以读取 `/api/v1/owner-console/access-control` 并展示主人配置、聊天入口、陌生私聊策略、白名单、黑名单和运行边界。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleAccessList。
+  增加 OwnerConsoleAccessControlSnapshot。
+  增加 OwnerConsoleAccessControlEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /access-control。
+  新增 getAccessControl({ item_limit })。
+
+新增 web/owner-console/src/pages/AccessControlPage.tsx：
+  读取 GET /api/v1/owner-console/access-control?item_limit=50。
+  展示主人配置状态。
+  展示私聊入口、群聊入口和陌生私聊策略。
+  展示私聊白名单、群聊白名单、用户黑名单的数量、可见条目和截断状态。
+  展示运行边界。
+  400 时中文提示检查列表数量限制。
+
+更新 App route：
+  /owner-console/access-control 使用 AccessControlPage。
+
+更新 app.css：
+  增加 access-list-items 样式，用于只读名单条目展示。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/access-control。
+不添加白名单。
+不移除白名单。
+不拉黑用户。
+不解除拉黑。
+不修改私聊/群聊开关。
+不修改陌生私聊策略。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/access-control -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/access-control?item_limit=50
+  resource=access-control
+  read_only=true
+  web_write_enabled=false
+  owner_configured=true
+  private_chat_enabled=true
+  group_chat_enabled=true
+  unknown_private_policy=deny
+  private_whitelist_count=2
+  group_whitelist_count=2
+  user_blacklist_count=0
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

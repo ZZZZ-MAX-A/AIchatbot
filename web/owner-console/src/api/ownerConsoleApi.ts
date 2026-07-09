@@ -3,6 +3,7 @@ import {
   checkOwnerConsoleEnvelope,
 } from "./ownerConsoleEnvelope";
 import type {
+  OwnerConsoleAccessControlEnvelope,
   OwnerConsoleApprovalDetailEnvelope,
   OwnerConsoleApprovalListEnvelope,
   OwnerConsoleDiagnosticsEnvelope,
@@ -24,6 +25,7 @@ const allowedPaths = new Set([
   `${API_BASE}/overview`,
   `${API_BASE}/diagnostics`,
   `${API_BASE}/memory`,
+  `${API_BASE}/access-control`,
   `${API_BASE}/tasks`,
   `${API_BASE}/approvals`,
 ]);
@@ -167,6 +169,21 @@ export const ownerConsoleApi = {
   async getMemory(signal?: AbortSignal): Promise<OwnerConsoleMemoryEnvelope> {
     const envelope = await getJson<OwnerConsoleMemoryEnvelope>(
       `${API_BASE}/memory`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getAccessControl(
+    params: { item_limit: number },
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessControlEnvelope> {
+    const envelope = await getJson<OwnerConsoleAccessControlEnvelope>(
+      `${API_BASE}/access-control${buildQuery(params)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);

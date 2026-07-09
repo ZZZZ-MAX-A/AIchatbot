@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./AppShell";
 import { PlaceholderPage } from "./PlaceholderPage";
+import { AccessControlPage } from "../pages/AccessControlPage";
 import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
@@ -46,7 +47,7 @@ export function App() {
         />
         <Route
           path="/owner-console/access-control"
-          element={<PlaceholderPage title="访问控制" />}
+          element={<AccessControlPage />}
         />
         <Route
           path="/owner-console/settings"

@@ -248,6 +248,28 @@ export type OwnerConsoleMemorySnapshot = {
 export type OwnerConsoleMemoryEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleMemorySnapshot>;
 
+export type OwnerConsoleAccessList = {
+  label: string;
+  count: number;
+  items: string[];
+  truncated: boolean;
+};
+
+export type OwnerConsoleAccessControlSnapshot = {
+  generated_at: string;
+  owner_configured: boolean;
+  private_chat_enabled: boolean;
+  group_chat_enabled: boolean;
+  unknown_private_policy: string;
+  private_whitelist: OwnerConsoleAccessList;
+  group_whitelist: OwnerConsoleAccessList;
+  user_blacklist: OwnerConsoleAccessList;
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleAccessControlEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleAccessControlSnapshot>;
+
 export type OwnerConsoleTaskList = {
   generated_at: string;
   status_filter: string | null;
