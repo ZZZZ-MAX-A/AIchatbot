@@ -181,6 +181,73 @@ export type OwnerConsoleOverviewEnvelope =
 export type OwnerConsoleDiagnosticsEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleHealthSnapshot>;
 
+export type OwnerConsoleMemoryCounts = {
+  message_count: number;
+  session_count: number;
+  session_summary_count: number;
+  summarized_message_count: number;
+  manual_memory_count: number;
+  manual_memory_subject_count: number;
+  gap_scene_summary_count: number;
+  gap_scene_source_message_count: number;
+  rag_document_count: number;
+  rag_active_document_count: number;
+  rag_embedding_count: number;
+};
+
+export type OwnerConsoleMemoryContextPolicy = {
+  memory_compression_enabled: boolean;
+  gap_scene_summaries_enabled: boolean;
+  long_term_memory_context_enabled: boolean;
+  max_context_messages: number;
+  max_stored_messages_per_session: number;
+  summary_keep_recent_messages: number;
+  summary_batch_messages: number;
+  summary_min_source_messages: number;
+  max_session_summaries_in_context: number;
+  max_gap_scene_summaries_in_context: number;
+  max_long_term_memories_in_context: number;
+};
+
+export type OwnerConsoleMemoryRagSnapshot = {
+  enabled: boolean;
+  inject_in_chat: boolean;
+  owner_only_debug: boolean;
+  top_k: number;
+  min_score: number;
+  max_context_chars: number;
+  include_manual_facts: boolean;
+  include_manual_preferences: boolean;
+  include_session_summaries: boolean;
+  include_short_messages: boolean;
+  include_gap_scene_summaries: boolean;
+};
+
+export type OwnerConsoleProjectDocRagSnapshot = {
+  enabled: boolean;
+  explicit_agent_dev_context_only: boolean;
+  ordinary_chat_injection_allowed: boolean;
+  top_k: number;
+  min_score: number;
+  max_context_chars: number;
+};
+
+export type OwnerConsoleMemorySnapshot = {
+  generated_at: string;
+  counts: OwnerConsoleMemoryCounts;
+  context_policy: OwnerConsoleMemoryContextPolicy;
+  memory_rag: OwnerConsoleMemoryRagSnapshot;
+  project_doc_rag: OwnerConsoleProjectDocRagSnapshot;
+  memory_content_exposed: boolean;
+  project_doc_content_exposed: boolean;
+  retrieval_executed: boolean;
+  index_rebuild_executed: boolean;
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleMemoryEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleMemorySnapshot>;
+
 export type OwnerConsoleTaskList = {
   generated_at: string;
   status_filter: string | null;
