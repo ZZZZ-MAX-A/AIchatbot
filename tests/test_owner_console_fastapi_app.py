@@ -58,6 +58,8 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/healthz",
                 "/api/v1/owner-console/routes",
                 "/api/v1/owner-console/overview",
+                "/api/v1/owner-console/tasks",
+                "/api/v1/owner-console/approvals",
             ],
         )
 
@@ -102,7 +104,10 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(rows["overview"]["read_page"], "dashboard")
         self.assertTrue(rows["routes"]["http_api_enabled"])
         self.assertTrue(rows["overview"]["http_api_enabled"])
-        self.assertFalse(rows["tasks"]["http_api_enabled"])
+        self.assertTrue(rows["tasks"]["http_api_enabled"])
+        self.assertTrue(rows["approvals"]["http_api_enabled"])
+        self.assertFalse(rows["tasks.detail"]["http_api_enabled"])
+        self.assertFalse(rows["approvals.detail"]["http_api_enabled"])
         self.assertEqual(rows["tasks.detail"]["path_params"], ["task_id"])
         self.assertEqual(
             rows["approvals.detail"]["path_params"],
@@ -113,12 +118,14 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertTrue(data["boundary"]["owner_write_requires_approval"])
 
-    def test_smoke_app_only_exposes_get_healthz_and_routes(self):
+    def test_app_only_exposes_enabled_get_routes_without_writes(self):
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
         self.assertEqual(self.client.get("/docs").status_code, 404)
         self.assertEqual(self.client.post("/api/v1/owner-console/routes").status_code, 405)
         self.assertEqual(self.client.post("/api/v1/owner-console/overview").status_code, 405)
-        self.assertEqual(self.client.get("/api/v1/owner-console/tasks").status_code, 404)
+        self.assertEqual(self.client.post("/api/v1/owner-console/tasks").status_code, 405)
+        self.assertEqual(self.client.post("/api/v1/owner-console/approvals").status_code, 405)
+        self.assertEqual(self.client.get("/api/v1/owner-console/tasks/1").status_code, 404)
         self.assertEqual(
             self.client.post("/api/v1/owner-console/approvals/1").status_code,
             404,
@@ -190,6 +197,135 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(
             data["boundary"]["ordinary_chat_can_trigger_main_agent"]
         )
+
+    def test_tasks_and_approvals_endpoints_use_owner_context_and_filters(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_PRIVATE_CHAT": "true",
+                "ENABLE_GROUP_CHAT": "true",
+            },
+            clear=True,
+        ):
+            owner_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="owner task waiting for approval",
+            )
+            failed_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="owner failed task",
+            )
+            other_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:20002",
+                user_id="20002",
+                goal="other user task",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=owner_task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"clear_error_log"}',
+                risk_level="write_local",
+                reason="clear errors",
+            )
+            self.agent_tasks.create_agent_approval(
+                task_id=other_task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"clear_image_cache"}',
+                risk_level="write_local",
+                reason="other approval",
+            )
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = ?, result = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        self.agent_tasks.AGENT_TASK_FAILED,
+                        "failed during HTTP list test",
+                        failed_task_id,
+                    ),
+                )
+
+            tasks_response = self.client.get(
+                "/api/v1/owner-console/tasks?status=pending&limit=20"
+            )
+            approvals_response = self.client.get(
+                "/api/v1/owner-console/approvals?status=pending&limit=20"
+            )
+
+        self.assertEqual(tasks_response.status_code, 200)
+        tasks_payload = tasks_response.json()
+        self.assertEqual(tasks_payload["resource"], "tasks")
+        self.assertTrue(tasks_payload["read_only"])
+        self.assertTrue(tasks_payload["http_api_enabled"])
+        self.assertFalse(tasks_payload["web_write_enabled"])
+        self.assertIsNone(tasks_payload["error"])
+        task_data = tasks_payload["data"]
+        self.assertEqual(task_data["status_filter"], "pending")
+        self.assertEqual(task_data["limit"], 20)
+        self.assertEqual(task_data["total_visible"], 1)
+        self.assertEqual([row["task_id"] for row in task_data["rows"]], [owner_task_id])
+        self.assertEqual(task_data["rows"][0]["pending_approval_ids"], [approval_id])
+        self.assertNotIn(other_task_id, [row["task_id"] for row in task_data["rows"]])
+        self.assertFalse(
+            task_data["boundary"]["ordinary_chat_can_trigger_main_agent"]
+        )
+
+        self.assertEqual(approvals_response.status_code, 200)
+        approvals_payload = approvals_response.json()
+        self.assertEqual(approvals_payload["resource"], "approvals")
+        self.assertTrue(approvals_payload["read_only"])
+        self.assertTrue(approvals_payload["http_api_enabled"])
+        self.assertFalse(approvals_payload["web_write_enabled"])
+        self.assertIsNone(approvals_payload["error"])
+        approval_data = approvals_payload["data"]
+        self.assertEqual(approval_data["status_filter"], "pending")
+        self.assertEqual(approval_data["limit"], 20)
+        self.assertEqual(approval_data["total_visible"], 1)
+        self.assertEqual(
+            [row["approval_id"] for row in approval_data["rows"]],
+            [approval_id],
+        )
+        self.assertEqual(approval_data["rows"][0]["task_id"], owner_task_id)
+        self.assertTrue(
+            approval_data["rows"][0]["actionability"]["future_operation_only"]
+        )
+
+    def test_tasks_and_approvals_endpoints_validate_status_limit_and_owner(self):
+        with patch.dict(os.environ, {}, clear=True):
+            missing_owner = self.client.get("/api/v1/owner-console/tasks")
+
+        self.assertEqual(missing_owner.status_code, 403)
+        self.assertEqual(missing_owner.json()["error"]["code"], "forbidden")
+
+        with patch.dict(os.environ, {"BOT_OWNER_QQ": "10001"}, clear=True):
+            invalid_status = self.client.get(
+                "/api/v1/owner-console/tasks?status=missing"
+            )
+            invalid_limit = self.client.get(
+                "/api/v1/owner-console/approvals?limit=abc"
+            )
+
+        self.assertEqual(invalid_status.status_code, 400)
+        status_payload = invalid_status.json()
+        self.assertEqual(status_payload["resource"], "tasks")
+        self.assertEqual(status_payload["error"]["code"], "bad_request")
+        self.assertEqual(status_payload["error"]["details"]["field"], "status")
+        self.assertIn("pending", status_payload["error"]["details"]["allowed"])
+        self.assertFalse(status_payload["web_write_enabled"])
+
+        self.assertEqual(invalid_limit.status_code, 400)
+        limit_payload = invalid_limit.json()
+        self.assertEqual(limit_payload["resource"], "approvals")
+        self.assertEqual(limit_payload["error"]["code"], "bad_request")
+        self.assertEqual(limit_payload["error"]["details"]["field"], "limit")
+        self.assertFalse(limit_payload["web_write_enabled"])
 
     def test_overview_endpoint_requires_owner_config_and_valid_limits(self):
         with patch.dict(os.environ, {}, clear=True):

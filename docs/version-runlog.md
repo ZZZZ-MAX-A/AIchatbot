@@ -2130,6 +2130,146 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 309 tests OK
 ```
 
+## v1.6 Owner Console FastAPI task / approval list endpoints
+
+状态：已落地 P2.20 第一刀。目标是在 P2.19 接通 overview 后，继续接入两个只读列表资源：`GET /api/v1/owner-console/tasks` 和 `GET /api/v1/owner-console/approvals`。本步仍不接详情页、不做登录鉴权、不开放 Web 写操作。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/tasks
+  GET /api/v1/owner-console/approvals
+
+更新 src/plugins/ai_chat/owner_console_http_adapter.py：
+  parse_owner_console_optional_status
+
+更新 tests/test_owner_console_fastapi_app.py：
+  覆盖 tasks / approvals 列表读取、owner context 作用域、status 过滤、limit 校验和写方法拒绝。
+
+更新 tests/test_owner_console_fastapi_launcher.py：
+  launcher route smoke 增加 tasks / approvals。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/approvals
+```
+
+`GET /api/v1/owner-console/tasks` 策略：
+
+```text
+从 BOT_OWNER_QQ 构造 OwnerConsoleContext：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+查询参数：
+  status，可选，必须属于 agent task status 集合
+  limit，可选，默认 20，必须为 >= 1 的整数
+
+调用：
+  runtime.build_task_list(context, status, limit)
+
+返回：
+  owner_console_http_success_response(resource=tasks, data=OwnerConsoleTaskList)
+```
+
+`GET /api/v1/owner-console/approvals` 策略：
+
+```text
+从 BOT_OWNER_QQ 构造 OwnerConsoleContext：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+查询参数：
+  status，可选，必须属于 agent approval status 集合
+  limit，可选，默认 20，必须为 >= 1 的整数
+
+调用：
+  runtime.build_approval_list(context, status, limit)
+
+返回：
+  owner_console_http_success_response(resource=approvals, data=OwnerConsoleApprovalList)
+```
+
+错误处理：
+
+```text
+BOT_OWNER_QQ 未配置：
+  HTTP 403
+  error.code = forbidden
+
+status 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = status
+  error.details.allowed = 当前允许的 status 列表
+
+limit 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = limit
+
+其他异常：
+  HTTP 500
+  error.code = internal_error
+```
+
+route contract 行为：
+
+```text
+FastAPI /routes endpoint 当前标记：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks.http_api_enabled=true
+  approvals.http_api_enabled=true
+
+仍未开放：
+  task_detail.http_api_enabled=false
+  approval_detail.http_api_enabled=false
+  diagnostics.http_api_enabled=false
+  memory.http_api_enabled=false
+  access-control.http_api_enabled=false
+  settings.http_api_enabled=false
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不接 task_detail / approval_detail 详情页。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 8 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 311 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

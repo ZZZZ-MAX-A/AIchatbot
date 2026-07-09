@@ -49,6 +49,8 @@ print(json.dumps(payload, sort_keys=True))
                 "/healthz",
                 "/api/v1/owner-console/routes",
                 "/api/v1/owner-console/overview",
+                "/api/v1/owner-console/tasks",
+                "/api/v1/owner-console/approvals",
             ],
         )
 
