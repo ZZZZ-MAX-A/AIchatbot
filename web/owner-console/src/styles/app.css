@@ -524,6 +524,41 @@ button {
   font-weight: 700;
 }
 
+.approval-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+}
+
+.approval-table__row {
+  display: grid;
+  grid-template-columns:
+    86px 76px minmax(150px, 1fr) 108px minmax(120px, 0.7fr)
+    minmax(190px, 1.3fr) 108px 150px 96px;
+  min-height: 44px;
+  border-top: 1px solid #e2e7ef;
+}
+
+.approval-table__row:first-child {
+  border-top: none;
+}
+
+.approval-table__row span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.approval-table__row--head {
+  background: #f6f7f9;
+  color: #4b5563;
+  font-weight: 700;
+}
+
 .table-link {
   color: #1d4ed8;
   font-weight: 600;
@@ -745,6 +780,14 @@ button {
 
   .task-table__row {
     min-width: 1040px;
+  }
+
+  .approval-table {
+    overflow-x: auto;
+  }
+
+  .approval-table__row {
+    min-width: 1120px;
   }
 
   .event-table,

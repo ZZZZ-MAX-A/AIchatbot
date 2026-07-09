@@ -3693,6 +3693,86 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Approvals list data
+
+状态：已落地 P2.34 第二刀。目标是在任务列表和任务详情之后补齐审批列表页真实只读数据，让 `/owner-console/approvals` 可以读取 `/api/v1/owner-console/approvals` 并以中文表格展示主人私聊上下文内的审批记录。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleApprovalList。
+  增加 OwnerConsoleApprovalListEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /approvals。
+  新增 getApprovals({ status, limit })。
+
+新增 web/owner-console/src/pages/ApprovalsPage.tsx：
+  读取 GET /api/v1/owner-console/approvals?limit=20。
+  支持中文状态筛选：全部、待审批、已确认、已拒绝、已过期。
+  展示审批 ID、任务 ID、工具、风险等级、状态、原因摘要、操作状态、创建时间和详情入口。
+  操作状态只展示“网页只读”等元信息，不提供确认/拒绝入口。
+  403 时中文提示检查 BOT_OWNER_QQ。
+  400 时中文提示检查审批状态筛选或 limit。
+
+更新 App route：
+  /owner-console/approvals 使用 ApprovalsPage。
+
+更新 app.css：
+  增加 approval table 样式。
+  移动端保持横向滚动，避免表格挤压布局。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/approvals。
+不确认审批。
+不拒绝审批。
+不恢复执行工具。
+不新增审批操作按钮。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/approvals -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/approvals?limit=20
+  resource=approvals
+  read_only=true
+  web_write_enabled=false
+  total_visible=19
+  rows=19
+
+GET http://127.0.0.1:5173/api/v1/owner-console/approvals?status=pending&limit=20
+  resource=approvals
+  pending_total=2
+  pending_rows=2
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

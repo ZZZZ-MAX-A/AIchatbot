@@ -201,6 +201,18 @@ export type OwnerConsoleTaskDetail = {
 export type OwnerConsoleTaskDetailEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleTaskDetail>;
 
+export type OwnerConsoleApprovalList = {
+  generated_at: string;
+  status_filter: string | null;
+  limit: number;
+  total_visible: number;
+  rows: OwnerConsoleApprovalRow[];
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleApprovalListEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleApprovalList>;
+
 export type OwnerConsoleSnapshot = {
   health: OwnerConsoleHealth | null;
   routes: OwnerConsoleRoutesEnvelope | null;
