@@ -210,7 +210,15 @@ button {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 18px;
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .page-header h1 {
@@ -526,6 +534,95 @@ button {
   text-decoration: underline;
 }
 
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #c7ceda;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.detail-panel {
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.detail-panel h2 {
+  margin: 0 0 14px;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.detail-text {
+  margin: 0;
+  color: #374151;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.event-table,
+.approval-mini-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+}
+
+.event-table__row,
+.approval-mini-table__row {
+  display: grid;
+  min-height: 42px;
+  border-top: 1px solid #e2e7ef;
+}
+
+.event-table__row {
+  grid-template-columns:
+    68px 110px 130px 110px minmax(160px, 1fr)
+    minmax(160px, 1fr) 160px;
+}
+
+.approval-mini-table__row {
+  grid-template-columns: 92px minmax(160px, 1fr) 110px 110px 110px;
+}
+
+.event-table__row:first-child,
+.approval-mini-table__row:first-child {
+  border-top: none;
+}
+
+.event-table__row span,
+.approval-mini-table__row span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.event-table__row--head,
+.approval-mini-table__row--head {
+  background: #f6f7f9;
+  color: #4b5563;
+  font-weight: 700;
+}
+
 .diagnostic-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -598,7 +695,8 @@ button {
 
   .metric-grid,
   .dashboard-grid,
-  .diagnostic-grid {
+  .diagnostic-grid,
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -647,5 +745,18 @@ button {
 
   .task-table__row {
     min-width: 1040px;
+  }
+
+  .event-table,
+  .approval-mini-table {
+    overflow-x: auto;
+  }
+
+  .event-table__row {
+    min-width: 1060px;
+  }
+
+  .approval-mini-table__row {
+    min-width: 720px;
   }
 }
