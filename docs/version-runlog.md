@@ -2270,6 +2270,590 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 311 tests OK
 ```
 
+## v1.6 Owner Console FastAPI task / approval detail endpoints
+
+状态：已落地 P2.21 第一刀。目标是在 P2.20 列表端点之后，继续接入两个只读详情资源：`GET /api/v1/owner-console/tasks/{task_id}` 和 `GET /api/v1/owner-console/approvals/{approval_id}`。本步仍不做审批确认/拒绝，不接 Web 前端，不新增登录鉴权，也不改变 QQ / `/agent` 的任何运行时行为。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/tasks/{task_id}
+  GET /api/v1/owner-console/approvals/{approval_id}
+
+更新 src/plugins/ai_chat/owner_console_http_adapter.py：
+  parse_owner_console_required_positive_int
+
+更新 tests/test_owner_console_fastapi_app.py：
+  覆盖 task detail / approval detail 的 owner context 作用域、path id 校验、event_limit / preview_limit 校验、not_found envelope 和写方法拒绝。
+
+更新 tests/test_owner_console_fastapi_launcher.py：
+  launcher route smoke 增加 task detail / approval detail。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+```
+
+`GET /api/v1/owner-console/tasks/{task_id}` 策略：
+
+```text
+从 BOT_OWNER_QQ 构造 OwnerConsoleContext：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+路径参数：
+  task_id，必填，必须为 >= 1 的整数
+
+查询参数：
+  event_limit，可选，默认 20，必须为 >= 1 的整数
+  preview_limit，可选，默认 DEFAULT_PREVIEW_LIMIT，必须为 >= 1 的整数
+
+调用：
+  runtime.build_task_detail(context, task_id, event_limit, preview_limit)
+
+返回：
+  找到时 owner_console_http_success_response(resource=tasks, data=OwnerConsoleTaskDetail)
+  不存在或不属于 owner 私聊上下文时 HTTP 404 / error.code=not_found
+```
+
+`GET /api/v1/owner-console/approvals/{approval_id}` 策略：
+
+```text
+从 BOT_OWNER_QQ 构造 OwnerConsoleContext：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+路径参数：
+  approval_id，必填，必须为 >= 1 的整数
+
+查询参数：
+  event_limit，可选，默认 5，必须为 >= 1 的整数
+  preview_limit，可选，默认 DEFAULT_PREVIEW_LIMIT，必须为 >= 1 的整数
+
+调用：
+  runtime.build_approval_detail(context, approval_id, event_limit, preview_limit)
+
+返回：
+  找到时 owner_console_http_success_response(resource=approvals, data=OwnerConsoleApprovalDetail)
+  不存在或不属于 owner 私聊上下文时 HTTP 404 / error.code=not_found
+```
+
+错误处理：
+
+```text
+BOT_OWNER_QQ 未配置：
+  HTTP 403
+  error.code = forbidden
+
+task_id / approval_id 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = task_id 或 approval_id
+
+event_limit / preview_limit 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = event_limit 或 preview_limit
+
+详情不存在或不属于 owner 私聊上下文：
+  HTTP 404
+  error.code = not_found
+
+其他异常：
+  HTTP 500
+  error.code = internal_error
+```
+
+route contract 行为：
+
+```text
+FastAPI /routes endpoint 当前标记：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks.http_api_enabled=true
+  tasks.detail.http_api_enabled=true
+  approvals.http_api_enabled=true
+  approvals.detail.http_api_enabled=true
+
+仍未开放：
+  diagnostics.http_api_enabled=false
+  memory.http_api_enabled=false
+  access-control.http_api_enabled=false
+  settings.http_api_enabled=false
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 313 tests OK
+```
+
+## v1.6 Owner Console FastAPI access / settings endpoints
+
+状态：已落地 P2.22 第一刀。目标是在 P2.21 接通 task / approval 详情后，继续开放两个低风险只读页面资源：`GET /api/v1/owner-console/access-control` 和 `GET /api/v1/owner-console/settings`。本步仍不接 Web 前端、不新增登录鉴权、不开放写操作，也不执行 MemoryRAG / Diagnostics 运行态读取。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/access-control
+  GET /api/v1/owner-console/settings
+
+更新 src/plugins/ai_chat/owner_console_http_adapter.py：
+  HTTP read runtime 注入只读 role card providers：
+    list_role_cards
+    active_role_card -> active key
+
+更新 tests/test_owner_console_fastapi_app.py：
+  覆盖 access-control / settings 只读 envelope、配置脱敏、访问名单展示、item_limit 校验和无 owner context 读取。
+
+更新 tests/test_owner_console_fastapi_launcher.py：
+  launcher route smoke 增加 access-control / settings。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
+```
+
+`GET /api/v1/owner-console/access-control` 策略：
+
+```text
+不需要 OwnerConsoleContext。
+不要求 BOT_OWNER_QQ 已配置。
+
+从 load_config() 读取访问控制配置：
+  BOT_OWNER_QQ
+  ENABLE_PRIVATE_CHAT
+  ENABLE_GROUP_CHAT
+  ALLOW_UNKNOWN_PRIVATE_CHAT
+  PRIVATE_WHITELIST
+  GROUP_WHITELIST
+  USER_BLACKLIST
+
+通过 build_owner_console_access_from_config(config) 合并 env 与 data/access.json 的只读访问名单。
+
+查询参数：
+  item_limit，可选，默认 50，必须为 >= 1 的整数
+
+调用：
+  runtime.build_access_control_snapshot(item_limit=item_limit)
+
+返回：
+  owner_console_http_success_response(resource=access-control, data=OwnerConsoleAccessControlSnapshot)
+```
+
+`GET /api/v1/owner-console/settings` 策略：
+
+```text
+不需要 OwnerConsoleContext。
+不要求 BOT_OWNER_QQ 已配置。
+
+从 load_config() 读取模型、RAG、MainAgent、TTS、Web/shell/write capability flags。
+
+HTTP read runtime 注入只读 role card provider：
+  role_cards_provider = list_role_cards
+  active_role_card_key_provider = active_role_card().key 或空字符串
+
+调用：
+  runtime.build_settings_snapshot()
+
+返回：
+  owner_console_http_success_response(resource=settings, data=OwnerConsoleSettingsSnapshot)
+```
+
+脱敏策略：
+
+```text
+settings endpoint 复用 OwnerConsoleSettingsSnapshot：
+  base_url 通过 redacted_base_url 输出
+  API key 只输出 api_key_configured=true/false
+  不输出 OPENAI_API_KEY / MAIN_LLM_API_KEY 正文
+  embedding API key 固定不暴露
+```
+
+错误处理：
+
+```text
+item_limit 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = item_limit
+
+其他异常：
+  HTTP 500
+  error.code = internal_error
+```
+
+route contract 行为：
+
+```text
+FastAPI /routes endpoint 当前标记：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks.http_api_enabled=true
+  tasks.detail.http_api_enabled=true
+  approvals.http_api_enabled=true
+  approvals.detail.http_api_enabled=true
+  access-control.http_api_enabled=true
+  settings.http_api_enabled=true
+
+仍未开放：
+  diagnostics.http_api_enabled=false
+  memory.http_api_enabled=false
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 Diagnostics 外部探测。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 12 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 315 tests OK
+```
+
+## v1.6 Owner Console FastAPI memory endpoint
+
+状态：已落地 P2.23 第一刀。目标是在 P2.22 接通 access-control / settings 后，继续开放 `GET /api/v1/owner-console/memory`。本步仍只返回结构化只读快照：计数、配置、RAG 边界与安全标志；不返回任何记忆正文，不执行检索，不重建索引。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/memory
+
+更新 src/plugins/ai_chat/owner_console_http_adapter.py：
+  HTTP read runtime 注入只读 memory stats providers：
+    memory_stats
+    manual_memory_stats
+    gap_scene_summary_stats
+    rag_document_stats
+
+更新 tests/test_owner_console_fastapi_app.py：
+  覆盖 memory endpoint 的只读 envelope、消息计数、上下文策略、MemoryRAG / ProjectDocRAG flags、内容不暴露、检索不执行、索引不重建。
+
+更新 tests/test_owner_console_fastapi_launcher.py：
+  launcher route smoke 增加 memory。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
+GET /api/v1/owner-console/memory
+```
+
+`GET /api/v1/owner-console/memory` 策略：
+
+```text
+不需要 OwnerConsoleContext。
+不要求 BOT_OWNER_QQ 已配置。
+
+从 load_config() 读取：
+  memory compression 配置
+  gap scene summaries 配置
+  long term memory context 配置
+  MemoryRAG 配置
+  ProjectDocRAG 配置
+
+只读统计：
+  memory_stats -> message_count / session_count / summary_count / summarized_message_count
+  manual_memory_stats -> memory_count / subject_count
+  gap_scene_summary_stats -> summary_count / source_message_count
+  rag_document_stats -> document_count / active_document_count / embedding_count
+
+调用：
+  runtime.build_memory_snapshot()
+
+返回：
+  owner_console_http_success_response(resource=memory, data=OwnerConsoleMemorySnapshot)
+```
+
+强边界：
+
+```text
+memory_content_exposed=false
+project_doc_content_exposed=false
+retrieval_executed=false
+index_rebuild_executed=false
+ProjectDocRAG ordinary_chat_injection_allowed=false
+ProjectDocRAG 仍只允许显式 /agent dev_context
+```
+
+错误处理：
+
+```text
+其他异常：
+  HTTP 500
+  error.code = internal_error
+```
+
+route contract 行为：
+
+```text
+FastAPI /routes endpoint 当前标记：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks.http_api_enabled=true
+  tasks.detail.http_api_enabled=true
+  approvals.http_api_enabled=true
+  approvals.detail.http_api_enabled=true
+  access-control.http_api_enabled=true
+  settings.http_api_enabled=true
+  memory.http_api_enabled=true
+
+仍未开放：
+  diagnostics.http_api_enabled=false
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 Diagnostics 外部探测。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 13 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 316 tests OK
+```
+
+## v1.6 Owner Console FastAPI diagnostics endpoint
+
+状态：已落地 P2.24 第一刀。目标是在 P2.23 接通 memory 后，开放最后一个 v0 只读页面资源：`GET /api/v1/owner-console/diagnostics`。本步采用轻量 read-only diagnostics snapshot：只组合安全文本和已有 read model 计数，不主动调用 `diagnostics.py`，不跑 OpenAI / Ollama / TTS / 图片缓存探测，不读取 QQ adapter。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/diagnostics
+
+新增内部 helper：
+  _owner_console_bool
+  _build_owner_console_http_diagnostics
+
+更新 tests/test_owner_console_fastapi_app.py：
+  覆盖 diagnostics endpoint 的只读 envelope、外部探测跳过标记、QQ adapter 未导入标记、memory 计数摘要、正文不暴露。
+
+更新 tests/test_owner_console_fastapi_launcher.py：
+  launcher route smoke 增加 diagnostics。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
+GET /api/v1/owner-console/memory
+GET /api/v1/owner-console/diagnostics
+```
+
+`GET /api/v1/owner-console/diagnostics` 策略：
+
+```text
+不需要 OwnerConsoleContext。
+不要求 BOT_OWNER_QQ 已配置。
+
+从 load_config() 读取安全配置摘要：
+  owner 是否配置
+  private/group chat 开关
+  MainAgent flags
+  ChatGraph flag
+  Vision 配置摘要
+  TTS 配置摘要
+
+复用 runtime.build_memory_snapshot() 读取只读计数：
+  message_count
+  session_count
+  session_summary_count
+  manual_memory_count
+  rag_document_count
+  rag_embedding_count
+
+调用：
+  runtime.build_health_snapshot(...)
+
+返回：
+  owner_console_http_success_response(resource=diagnostics, data=OwnerConsoleHealthSnapshot)
+```
+
+强边界：
+
+```text
+external_probes_executed=false
+qq_adapter_imported=false
+diagnostics_module_imported=false
+ollama_probe_executed=false
+vision_inference_executed=false
+image_cache_stats_collected=false
+tts_probe_executed=false
+recent_error_log_read=false
+recent_errors_collected=false
+memory_content_exposed=false
+project_doc_content_exposed=false
+retrieval_executed=false
+index_rebuild_executed=false
+```
+
+为什么暂不直接复用 diagnostics.py：
+
+```text
+diagnostics.py 会导入 NoneBot / OpenAI / Vision 探测相关依赖。
+Web Owner Console v0 的目标是先建立 side-effect-free HTTP read surface。
+因此 diagnostics endpoint 第一版只暴露结构化、可预测、无外部探测的快照。
+后续如果要做主动诊断，应单独设计 explicit probe endpoint，并继续保持 GET 只读与 probe 操作分离。
+```
+
+route contract 行为：
+
+```text
+FastAPI /routes endpoint 当前标记：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks.http_api_enabled=true
+  tasks.detail.http_api_enabled=true
+  approvals.http_api_enabled=true
+  approvals.detail.http_api_enabled=true
+  access-control.http_api_enabled=true
+  settings.http_api_enabled=true
+  memory.http_api_enabled=true
+  diagnostics.http_api_enabled=true
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 Diagnostics 外部探测。
+不 import diagnostics.py。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 14 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 317 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

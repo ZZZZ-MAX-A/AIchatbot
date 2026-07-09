@@ -50,7 +50,13 @@ print(json.dumps(payload, sort_keys=True))
                 "/api/v1/owner-console/routes",
                 "/api/v1/owner-console/overview",
                 "/api/v1/owner-console/tasks",
+                "/api/v1/owner-console/tasks/{task_id}",
                 "/api/v1/owner-console/approvals",
+                "/api/v1/owner-console/approvals/{approval_id}",
+                "/api/v1/owner-console/access-control",
+                "/api/v1/owner-console/settings",
+                "/api/v1/owner-console/memory",
+                "/api/v1/owner-console/diagnostics",
             ],
         )
 
