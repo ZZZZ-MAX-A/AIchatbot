@@ -4193,6 +4193,68 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console frontend read-only audit
+
+状态：已落地 P2.36 前端只读收口审计。目标是在主导航页面全部接入真实只读数据后，确认前端请求面、页面操作入口和文档边界仍符合 Web Owner Console v0 只读定位。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-frontend-readonly-audit.md：
+  记录主导航页面覆盖状态。
+  记录 ownerConsoleApi 只读请求面。
+  记录 allowlist 和动态详情路径校验。
+  记录页面 button / Link 操作入口审计。
+  记录写相关搜索命中的只读解释。
+  记录当前仍保持的 MainAgent / ProjectDocRAG / Web v0 边界。
+  给出后续建议：优先前端 smoke / contract guard、runbook、部署设计，再单独讨论登录/鉴权和审批操作。
+
+移除 web/owner-console/src/app/PlaceholderPage.tsx：
+  主导航页面已经全部接入真实只读数据。
+  删除未使用占位组件，避免后续审计误把占位文案当作真实页面状态。
+```
+
+审计结论：
+
+```text
+所有 API client 请求都通过 ownerConsoleApi。
+ownerConsoleApi 只使用 fetch GET。
+前端 allowlist 只包含 Owner Console 只读 HTTP 资源。
+动态详情路径只允许正整数 ID。
+没有请求 /docs、/redoc 或 /openapi.json。
+没有 approve / reject / resume / create / cancel 类型 API client。
+页面按钮仅用于刷新或筛选。
+页面链接仅用于查看详情或返回列表。
+没有 Web 审批确认、拒绝、恢复执行、配置保存、角色卡切换、名单修改、记忆写入或索引重建入口。
+```
+
+边界：
+
+```text
+不新增后端接口。
+不新增前端写能力。
+不新增登录/鉴权。
+不修改 FastAPI 运行时代码。
+不触发 MainAgent。
+不改变 QQ / /agent 行为。
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
