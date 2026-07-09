@@ -3234,6 +3234,89 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console UI layout design
+
+状态：已落地 P2.30 设计文档。目标是在创建真实前端工程前，先确定简约 UI 风格、中文导航、中文顶部状态条、页面信息层级和只读边界展示规则。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-ui-layout-design.md。
+
+设计结论：
+  页面走简约工具风格。
+  优先展示结构、内容和状态。
+  左侧固定导航全部中文化。
+  顶部状态条全部中文化。
+  后端 JSON 字段继续保持英文 snake_case，前端展示统一转为中文标签。
+
+中文主导航：
+  概览
+  任务
+  审批
+  诊断
+  记忆
+  访问控制
+  设置
+
+任务详情和审批详情不放入主导航，从列表点击进入。
+
+顶部状态条中文标签：
+  主人控制台
+  只读模式：已开启
+  网页写入：已关闭
+  后端连接：已连接 / 已断开
+  接口版本：owner_console.http.v1
+  最后刷新：YYYY-MM-DD HH:mm:ss
+  刷新
+```
+
+文档覆盖：
+
+```text
+三段式布局：左侧导航、顶部状态条、主内容区。
+字段中文化规则。
+页面状态中文化规则。
+只读边界 UI 规则。
+概览 / 任务 / 任务详情 / 审批 / 审批详情 页面信息层级。
+诊断 / 记忆 / 访问控制 / 设置 页面信息层级。
+通用组件清单。
+视觉风格约束。
+第一版 UI 完成标准。
+```
+
+更新：
+
+```text
+docs/web-owner-console-read-only-shell-design.md
+docs/web-owner-console-frontend-stack-design.md
+docs/owner-console-http-surface-audit.md
+```
+
+边界：
+
+```text
+不创建前端工程。
+不安装 npm 依赖。
+不写 React 组件。
+不写 CSS。
+不修改 FastAPI 运行时代码。
+不新增 endpoint。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不改变 QQ / NoneBot adapter。
+```
+
+测试：
+
+```text
+git diff --check
+OK，仅有 Windows LF/CRLF 提示
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

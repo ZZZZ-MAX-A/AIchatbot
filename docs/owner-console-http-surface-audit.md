@@ -31,6 +31,12 @@ docs/web-owner-console-read-only-shell-design.md
 docs/web-owner-console-frontend-stack-design.md
 ```
 
+未来 UI 布局和中文化展示规则见：
+
+```text
+docs/web-owner-console-ui-layout-design.md
+```
+
 ## 1. 实现定位
 
 Owner Console HTTP v0 是 Web Owner Console read model 的本地 HTTP adapter。它只负责：
