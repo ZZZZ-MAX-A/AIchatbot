@@ -1640,6 +1640,496 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 297 tests OK
 ```
 
+## v1.6 Owner Console RESTful HTTP adapter contract
+
+状态：已落地 P2.16 第一刀。目标是在不接 FastAPI、不启动 HTTP 服务、不写前端的前提下，先把未来 Web Owner Console 的 HTTP 命名规范、RESTful 路径契约和统一响应 envelope 固化下来，避免后续接口路径和项目命名发散。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_console_http_models.py。
+
+HTTP adapter DTO / 常量：
+  OWNER_CONSOLE_HTTP_SCHEMA_VERSION = owner_console.http.v1
+  OWNER_CONSOLE_HTTP_API_PREFIX = /api/v1/owner-console
+  OWNER_CONSOLE_HTTP_ALLOWED_METHODS = GET
+  OWNER_CONSOLE_HTTP_ERROR_CODES
+  OwnerConsoleHttpError
+  OwnerConsoleHttpRouteRow
+  OwnerConsoleHttpRouteContractSnapshot
+
+HTTP envelope helper：
+  owner_console_http_success_response
+  owner_console_http_error_response
+
+新增 src/plugins/ai_chat/owner_console_http_contract.py。
+
+RESTful route contract：
+  OwnerConsoleHttpRouteSpec
+  OWNER_CONSOLE_HTTP_ROUTE_SPECS
+  build_owner_console_http_route_contract_snapshot
+```
+
+当前 HTTP namespace 固定为：
+
+```text
+/api/v1/owner-console
+```
+
+当前只读 RESTful 路径契约：
+
+```text
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/diagnostics
+GET /api/v1/owner-console/memory
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
+```
+
+命名规范：
+
+```text
+API prefix 统一为 /api/v1/owner-console。
+HTTP path 静态段统一小写 kebab-case。
+集合资源使用复数：tasks、approvals。
+详情资源使用 /{id}：tasks/{task_id}、approvals/{approval_id}。
+查询参数沿用 Python / DTO 的 snake_case。
+第一版只允许 GET。
+Dashboard 页面在 HTTP 资源层命名为 overview，避免把前端页面名和 API 资源名混在一起。
+```
+
+HTTP route contract 复用 P2.15 read route contract：
+
+```text
+overview -> read_page=dashboard -> build_overview -> OwnerConsoleOverview
+tasks -> read_page=tasks -> build_task_list -> OwnerConsoleTaskList
+tasks.detail -> read_page=task_detail -> build_task_detail -> OwnerConsoleTaskDetail
+approvals -> read_page=approvals -> build_approval_list -> OwnerConsoleApprovalList
+approvals.detail -> read_page=approval_detail -> build_approval_detail -> OwnerConsoleApprovalDetail
+diagnostics -> read_page=diagnostics -> build_health_snapshot -> OwnerConsoleHealthSnapshot
+memory -> read_page=memory -> build_memory_snapshot -> OwnerConsoleMemorySnapshot
+access-control -> read_page=access_control -> build_access_control_snapshot -> OwnerConsoleAccessControlSnapshot
+settings -> read_page=settings -> build_settings_snapshot -> OwnerConsoleSettingsSnapshot
+routes -> build_route_contract_snapshot -> OwnerConsoleReadRouteContractSnapshot
+```
+
+HTTP success envelope：
+
+```text
+schema_version=owner_console.http.v1
+read_model_schema_version=owner_console.read_model.v0
+transport=http
+api_prefix=/api/v1/owner-console
+resource
+generated_at
+read_only=true
+http_api_enabled=false
+web_write_enabled=false
+data
+error=null
+```
+
+HTTP error envelope：
+
+```text
+schema_version=owner_console.http.v1
+read_model_schema_version=owner_console.read_model.v0
+transport=http
+api_prefix=/api/v1/owner-console
+resource
+generated_at
+read_only=true
+http_api_enabled=false
+web_write_enabled=false
+data=null
+error:
+  code
+  message
+  details
+```
+
+第一版错误码固定为：
+
+```text
+bad_request
+forbidden
+not_found
+provider_unavailable
+internal_error
+```
+
+上下文策略先只进入契约，不开放实现：
+
+```text
+context_strategy=owner_private_session_from_config
+context_override_allowed=false
+write_routes_enabled=false
+```
+
+设计取舍：
+
+```text
+P2.16 仍不是 HTTP API。
+本步不接 FastAPI，不启动服务，不注册 route。
+http_api_enabled=false 表示当前只是 adapter contract，不声称真实 HTTP 已开放。
+HTTP contract 只规定未来路径、方法、资源名、read model 映射和 envelope。
+未来 FastAPI 层必须作为薄 adapter 服从该 contract：
+  HTTP request / auth
+  -> OwnerConsoleContext / 参数校验
+  -> OwnerConsoleReadRuntime
+  -> owner_console_http_success_response / owner_console_http_error_response
+```
+
+边界：
+
+```text
+不新增真实 HTTP API。
+不写前端。
+不新增登录/鉴权。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不 import QQ adapter。
+不依赖 FastAPI。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_http_contract -v
+Ran 3 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 300 tests OK
+```
+
+## v1.6 Owner Console FastAPI local smoke adapter
+
+状态：已落地 P2.17 第一刀。目标是在 P2.16 RESTful HTTP contract 之后，验证 FastAPI 可以作为极薄的本地 HTTP adapter 承载 Owner Console 只读 contract，但仍不接全量页面、不写前端、不做登录鉴权、不开放 Web 写操作。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_console_fastapi_app.py。
+
+新增：
+  OWNER_CONSOLE_FASTAPI_APP_TITLE
+  OWNER_CONSOLE_FASTAPI_SMOKE_ROUTES
+  create_owner_console_fastapi_app
+  app
+
+当前 FastAPI smoke app 只注册：
+  GET /healthz
+  GET /api/v1/owner-console/routes
+```
+
+`GET /healthz` 返回本地 smoke 状态：
+
+```text
+ok=true
+service=owner-console
+schema_version=owner_console.http.v1
+api_prefix=/api/v1/owner-console
+read_only=true
+http_api_enabled=true
+web_write_enabled=false
+enabled_routes:
+  /healthz
+  /api/v1/owner-console/routes
+```
+
+`GET /api/v1/owner-console/routes` 返回 P2.16 定义的 RESTful route contract，并通过 HTTP envelope 包装：
+
+```text
+schema_version=owner_console.http.v1
+read_model_schema_version=owner_console.read_model.v0
+transport=http
+api_prefix=/api/v1/owner-console
+resource=routes
+read_only=true
+http_api_enabled=true
+web_write_enabled=false
+data=OwnerConsoleHttpRouteContractSnapshot
+error=null
+```
+
+设计取舍：
+
+```text
+FastAPI app factory 默认关闭 docs/redoc/openapi。
+当前不注册 /api/v1/owner-console/tasks 等页面接口。
+当前不接 OwnerConsoleContext。
+当前不装配 OwnerConsoleReadProviders。
+当前只证明 FastAPI 能按 P2.16 envelope 和路径规范返回 routes contract。
+
+本步中 response envelope 的 http_api_enabled=true 只表示当前 smoke endpoint 已通过 HTTP 暴露。
+route contract data 内仍由 P2.16 contract 记录未来完整页面接口的只读映射和边界。
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不接任务/审批/记忆/诊断等完整页面接口。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不 import QQ adapter。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 4 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 16 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 304 tests OK
+```
+
+## v1.6 Owner Console side-effect-free FastAPI launcher
+
+状态：已落地 P2.18 第一刀。目标是在 P2.17 已有 FastAPI smoke app 后，补上独立启动边界：未来本地 Uvicorn 应从 side-effect-free launcher 进入，而不是直接 import `src.plugins.ai_chat.owner_console_fastapi_app`，避免 Python 先执行 QQ/NoneBot 插件入口 `src/plugins/ai_chat/__init__.py`。
+
+本次完成：
+
+```text
+新增 src/owner_console_fastapi_launcher.py。
+
+新增：
+  OWNER_CONSOLE_FASTAPI_MODULE
+  ensure_owner_console_import_boundary
+  load_owner_console_fastapi_module
+  create_app
+  app
+```
+
+推荐未来本地启动入口：
+
+```text
+.\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+```
+
+设计取舍：
+
+```text
+launcher 位于 src/owner_console_fastapi_launcher.py，而不是 src/plugins/ai_chat 包内。
+导入 launcher 只会执行 src/__init__.py 这个空包入口，不会正常 import src.plugins.ai_chat 包。
+launcher 会先在 sys.modules 中建立轻量 package stub：
+  src
+  src.plugins
+  src.plugins.ai_chat
+
+然后再 import：
+  src.plugins.ai_chat.owner_console_fastapi_app
+
+这样 owner_console_fastapi_app 内部的相对导入仍然可用，
+但不会执行 src/plugins/ai_chat/__init__.py。
+```
+
+安全保护：
+
+```text
+如果 src.plugins.ai_chat 已经以真实 __file__ 初始化，
+launcher 会拒绝继续建立 side-effect-free import boundary。
+
+这避免在同一进程已经加载 QQ 插件入口后，
+又误以为当前 FastAPI app 仍处于无 QQ side effect 的独立边界。
+```
+
+当前 launcher 仍只承载 P2.17 smoke app：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不新增数据库表。
+不新增工具能力。
+不接完整 tasks / approvals / memory / diagnostics 页面接口。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher -v
+Ran 3 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 7 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 307 tests OK
+```
+
+## v1.6 Owner Console FastAPI overview endpoint
+
+状态：已落地 P2.19 第一刀。目标是在 P2.18 已解决 side-effect-free launcher 后，接入第一个真正需要 `OwnerConsoleContext` 的只读 HTTP endpoint：`GET /api/v1/owner-console/overview`。本步仍不接完整页面、不做登录鉴权、不开放 Web 写操作。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_console_http_adapter.py。
+
+新增：
+  OwnerConsoleHttpAdapterError
+  build_owner_console_context_from_config
+  build_owner_console_access_from_config
+  create_owner_console_http_read_runtime
+  parse_owner_console_positive_int
+
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  GET /api/v1/owner-console/overview
+
+更新 src/plugins/ai_chat/owner_console_http_contract.py：
+  build_owner_console_http_route_contract_snapshot 支持 enabled_route_names。
+```
+
+当前 FastAPI app 已开放：
+
+```text
+GET /healthz
+GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+```
+
+`GET /api/v1/owner-console/overview` 策略：
+
+```text
+从 load_config() 读取 BOT_OWNER_QQ。
+构造 OwnerConsoleContext：
+  user_id = BOT_OWNER_QQ
+  session_key = private:{BOT_OWNER_QQ}
+
+创建 OwnerConsoleReadRuntime：
+  config_provider = 当前请求读取到的 config
+  access_provider = merged_access(config.private_whitelist, config.group_whitelist, config.user_blacklist)
+
+调用：
+  runtime.build_overview(context, task_limit, approval_limit)
+
+返回：
+  owner_console_http_success_response(resource=overview, data=OwnerConsoleOverview)
+```
+
+查询参数：
+
+```text
+task_limit:
+  默认 5
+  必须为 >= 1 的整数
+
+approval_limit:
+  默认 5
+  必须为 >= 1 的整数
+```
+
+错误处理：
+
+```text
+BOT_OWNER_QQ 未配置：
+  HTTP 403
+  error.code = forbidden
+  error.details.config_key = BOT_OWNER_QQ
+
+task_limit / approval_limit 非法：
+  HTTP 400
+  error.code = bad_request
+  error.details.field = 对应字段名
+
+其他异常：
+  HTTP 500
+  error.code = internal_error
+```
+
+route contract 行为：
+
+```text
+直接调用 build_owner_console_http_route_contract_snapshot() 时仍保持设计态：
+  http_api_enabled=false
+
+FastAPI /routes endpoint 返回时传入 enabled_route_names：
+  routes.http_api_enabled=true
+  overview.http_api_enabled=true
+  tasks / approvals / memory / diagnostics / settings 等仍为 false
+```
+
+设计取舍：
+
+```text
+第一版没有登录系统，因此不允许 query 参数覆盖 user_id 或 session_key。
+context_override_allowed 仍为 false。
+overview 只查询 owner 私聊上下文 private:{BOT_OWNER_QQ}。
+本步只读取 agent_tasks / agent_approvals 的只读 read model。
+access_provider 使用 merged_access，但 overview 当前不会读取访问名单；这是给后续 settings/access-control endpoint 复用的 adapter 边界。
+```
+
+边界：
+
+```text
+不新增 Web 前端。
+不新增登录/鉴权。
+不允许任意 user_id / session_key 查询。
+不新增数据库表。
+不新增工具能力。
+不接 tasks / approvals / memory / diagnostics / settings 等完整页面接口。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不执行 QQ/NoneBot 插件入口。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 6 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 309 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
