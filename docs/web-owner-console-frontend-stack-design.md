@@ -2,7 +2,7 @@
 
 本文记录 P2.29 Web Owner Console 前端技术栈与目录边界设计。当前阶段只做设计，不创建前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
 
-后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已接入概览页 `/overview` 和 `/diagnostics` 只读数据。P2.33 已接入任务列表 `/tasks` 只读数据。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}` 只读数据。P2.35 已接入诊断页 `/diagnostics`、记忆页 `/memory`、访问控制页 `/access-control` 和设置页 `/settings` 只读数据，主导航页面已全部接入真实数据，仍不修改 FastAPI 行为、不开放 Web 写操作。
+后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已接入概览页 `/overview` 和 `/diagnostics` 只读数据。P2.33 已接入任务列表 `/tasks` 只读数据。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}` 只读数据。P2.35 已接入诊断页 `/diagnostics`、记忆页 `/memory`、访问控制页 `/access-control` 和设置页 `/settings` 只读数据，主导航页面已全部接入真实数据。P2.36 已完成前端只读收口审计，见 `docs/web-owner-console-frontend-readonly-audit.md`，仍不修改 FastAPI 行为、不开放 Web 写操作。
 
 ## 1. 目标
 
@@ -592,10 +592,15 @@ mock service worker。
 P2.30：创建 web/owner-console 最小 Vite + React + TypeScript 工程，只接 /healthz 和 /routes。
 P2.31：实现 App Shell 导航和统一 envelope / error state。
 P2.32：接 Dashboard / Tasks / Approvals 列表。
-P2.33：接 Task Detail / Approval Detail。
-P2.34：接 Diagnostics / Memory / Access Control / Settings。
-P2.35：再讨论登录/鉴权设计。
-P2.36：再讨论审批操作设计。
+P2.33：接任务列表。
+P2.34：接任务详情 / 审批列表 / 审批详情。
+P2.35：接 Diagnostics / Memory / Access Control / Settings。
+P2.36：完成前端只读收口审计。
+P2.37：补前端 smoke / contract guard。
+P2.38：整理使用手册和启动 runbook。
+P2.39：再讨论本地部署方式。
+P2.40：再讨论登录/鉴权设计。
+P2.41：再讨论审批操作设计。
 ```
 
 下一步不建议直接做：
