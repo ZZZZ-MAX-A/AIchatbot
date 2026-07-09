@@ -335,6 +335,7 @@ netstat -ano | Select-String ':5173'
 ```text
 docs/web-owner-console-read-model-design.md
 docs/web-owner-console-read-only-shell-design.md
+docs/web-owner-console-local-deployment-design.md
 docs/owner-console-fastapi-smoke-runbook.md
 docs/web-owner-console-frontend-stack-design.md
 docs/web-owner-console-ui-layout-design.md
@@ -348,7 +349,9 @@ web/owner-console/README.md
 建议继续顺序：
 
 ```text
-P2.39：讨论本地部署方式，例如 FastAPI 挂载 dist 或本地反向代理。
-P2.40：单独讨论登录/鉴权。
-P2.41：单独设计 Web 审批操作，不能直接在 v0 只读页面上加按钮。
+P2.39：本地部署方式设计，见 docs/web-owner-console-local-deployment-design.md。
+P2.39a：按设计实现可选本地静态模式。
+P2.40：设计只读自动刷新策略。
+P2.41：设计本地访问保护 / 鉴权。
+P2.42：单独设计 Web 审批操作，不能直接在 v0 只读页面上加按钮。
 ```
