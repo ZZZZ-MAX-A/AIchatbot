@@ -664,6 +664,53 @@ button {
   overflow-wrap: anywhere;
 }
 
+.feature-flag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.role-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.role-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  padding: 10px 0;
+  border-top: 1px solid #e2e7ef;
+}
+
+.role-card-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.role-card-row:last-child {
+  padding-bottom: 0;
+}
+
+.role-card-row div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.role-card-row strong,
+.role-card-row span {
+  overflow-wrap: anywhere;
+}
+
+.role-card-row span {
+  color: #6b7280;
+  font-size: 13px;
+}
+
 .detail-text {
   margin: 0;
   color: #374151;

@@ -270,6 +270,33 @@ export type OwnerConsoleAccessControlSnapshot = {
 export type OwnerConsoleAccessControlEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleAccessControlSnapshot>;
 
+export type OwnerConsoleModelConfigSnapshot = {
+  model_name: string;
+  base_url_redacted: string;
+  api_key_configured: boolean;
+  timeout_seconds: number;
+};
+
+export type OwnerConsoleRoleCardRow = {
+  key: string;
+  title: string;
+  active: boolean;
+};
+
+export type OwnerConsoleSettingsSnapshot = {
+  generated_at: string;
+  chat_model: OwnerConsoleModelConfigSnapshot;
+  main_agent_model: OwnerConsoleModelConfigSnapshot;
+  embedding: OwnerConsoleModelConfigSnapshot;
+  role_cards: OwnerConsoleRoleCardRow[];
+  active_role_card_key: string;
+  feature_flags: Record<string, boolean>;
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleSettingsEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleSettingsSnapshot>;
+
 export type OwnerConsoleTaskList = {
   generated_at: string;
   status_filter: string | null;
