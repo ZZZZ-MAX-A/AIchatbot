@@ -2,7 +2,7 @@
 
 本文记录 P2.29 Web Owner Console 前端技术栈与目录边界设计。当前阶段只做设计，不创建前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
 
-后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`，仍不修改 FastAPI 行为、不开放 Web 写操作。
+后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已接入概览页 `/overview` 和 `/diagnostics` 只读数据，仍不修改 FastAPI 行为、不开放 Web 写操作。
 
 ## 1. 目标
 

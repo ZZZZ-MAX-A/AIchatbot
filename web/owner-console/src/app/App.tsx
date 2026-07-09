@@ -2,16 +2,14 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./AppShell";
 import { PlaceholderPage } from "./PlaceholderPage";
+import { DashboardPage } from "../pages/DashboardPage";
 
 export function App() {
   return (
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/owner-console" replace />} />
-        <Route
-          path="/owner-console"
-          element={<PlaceholderPage title="概览" />}
-        />
+        <Route path="/owner-console" element={<DashboardPage />} />
         <Route
           path="/owner-console/dashboard"
           element={<Navigate to="/owner-console" replace />}

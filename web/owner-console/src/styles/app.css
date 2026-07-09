@@ -312,6 +312,165 @@ button {
   line-height: 1.6;
 }
 
+.error-state,
+.loading-panel {
+  border: 1px solid #f1b9b5;
+  border-radius: 8px;
+  background: #fff0ef;
+  color: #9f1c12;
+  padding: 18px;
+}
+
+.loading-panel {
+  border-color: #ead08f;
+  background: #fff8e5;
+  color: #7a5600;
+}
+
+.error-state h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.error-state p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.error-state pre {
+  margin: 12px 0 0;
+  overflow-x: auto;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.metric-tile,
+.dashboard-panel,
+.diagnostic-section {
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.metric-tile {
+  display: flex;
+  min-height: 96px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+}
+
+.metric-tile span {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.metric-tile strong {
+  color: #111827;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.dashboard-panel {
+  padding: 18px;
+}
+
+.dashboard-panel h2 {
+  margin: 0 0 14px;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.compact-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+}
+
+.compact-table__row {
+  display: grid;
+  grid-template-columns: 88px minmax(160px, 1fr) 110px minmax(120px, 1fr);
+  min-height: 38px;
+  border-top: 1px solid #e2e7ef;
+}
+
+.compact-table__row:first-child {
+  border-top: none;
+}
+
+.compact-table__row span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.compact-table__row--head {
+  background: #f6f7f9;
+  color: #4b5563;
+  font-weight: 700;
+}
+
+.boundary-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.diagnostic-section {
+  padding: 14px;
+}
+
+.diagnostic-section header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.diagnostic-section h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.diagnostic-section p {
+  margin: 0 0 8px;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.diagnostic-section ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #4b5563;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 @media (max-width: 920px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -344,6 +503,12 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .metric-grid,
+  .dashboard-grid,
+  .diagnostic-grid {
+    grid-template-columns: 1fr;
+  }
+
   .route-table__row {
     grid-template-columns: 120px 70px minmax(180px, 1fr) 90px;
   }
@@ -363,6 +528,14 @@ button {
   }
 
   .route-table__row {
+    min-width: 620px;
+  }
+
+  .compact-table {
+    overflow-x: auto;
+  }
+
+  .compact-table__row {
     min-width: 620px;
   }
 }
