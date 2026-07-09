@@ -2,7 +2,7 @@
 
 本文记录 P2.30 Web Owner Console UI 布局设计。当前阶段只做页面结构和中文化展示设计，不创建前端工程、不写 React 组件、不写 CSS、不修改 FastAPI 行为。
 
-后续实现状态：P2.31 已创建 `web/owner-console` 最小只读 App Shell，采用本文定义的中文左侧导航和中文顶部状态条，第一刀只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已在概览页接入 `/overview` 和 `/diagnostics` 真实只读数据。P2.33 已接入任务列表 `/tasks`，支持中文状态筛选和只读表格展示。P2.34 已接入任务详情 `/tasks/{task_id}` 和审批列表 `/approvals`，展示目标、结果、关联审批、事件时间线和审批状态表格，仍不开放 Web 写操作。
+后续实现状态：P2.31 已创建 `web/owner-console` 最小只读 App Shell，采用本文定义的中文左侧导航和中文顶部状态条，第一刀只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已在概览页接入 `/overview` 和 `/diagnostics` 真实只读数据。P2.33 已接入任务列表 `/tasks`，支持中文状态筛选和只读表格展示。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}`，展示目标、结果、关联审批、事件时间线、审批状态表格和脱敏工具输入预览，仍不开放 Web 写操作。
 
 ## 1. 设计定位
 

@@ -3,6 +3,7 @@ import {
   checkOwnerConsoleEnvelope,
 } from "./ownerConsoleEnvelope";
 import type {
+  OwnerConsoleApprovalDetailEnvelope,
   OwnerConsoleApprovalListEnvelope,
   OwnerConsoleDiagnosticsEnvelope,
   OwnerConsoleHealth,
@@ -34,6 +35,12 @@ function isAllowedPath(routePath: string): boolean {
   if (routePath.startsWith(taskDetailPrefix)) {
     const taskId = routePath.slice(taskDetailPrefix.length);
     return /^[1-9]\d*$/.test(taskId);
+  }
+
+  const approvalDetailPrefix = `${API_BASE}/approvals/`;
+  if (routePath.startsWith(approvalDetailPrefix)) {
+    const approvalId = routePath.slice(approvalDetailPrefix.length);
+    return /^[1-9]\d*$/.test(approvalId);
   }
 
   return false;
@@ -192,6 +199,22 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleApprovalListEnvelope> {
     const envelope = await getJson<OwnerConsoleApprovalListEnvelope>(
       `${API_BASE}/approvals${buildQuery(params)}`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getApprovalDetail(
+    approvalId: number,
+    params: { event_limit: number; preview_limit: number },
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleApprovalDetailEnvelope> {
+    const envelope = await getJson<OwnerConsoleApprovalDetailEnvelope>(
+      `${API_BASE}/approvals/${approvalId}${buildQuery(params)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);

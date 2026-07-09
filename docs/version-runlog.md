@@ -3773,6 +3773,87 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Approval detail data
+
+状态：已落地 P2.34 第三刀。目标是在审批列表之后补齐审批详情页真实只读数据，让 `/owner-console/approvals/:approval_id` 可以读取 `/api/v1/owner-console/approvals/{approval_id}` 并展示审批风险、脱敏工具输入、关联任务和近期任务事件。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleToolInputPreview。
+  增加 OwnerConsoleApprovalDetail。
+  增加 OwnerConsoleApprovalDetailEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /approvals/{positive_int} 动态路径校验。
+  新增 getApprovalDetail(approval_id, { event_limit, preview_limit })。
+  继续只使用 GET，不接受 owner context query 参数。
+
+新增 web/owner-console/src/pages/ApprovalDetailPage.tsx：
+  读取 GET /api/v1/owner-console/approvals/{approval_id}?event_limit=5&preview_limit=800。
+  展示审批信息、审批原因、工具输入预览、关联任务和近期任务事件。
+  工具输入只展示后端已生成的 preview_json，并显示是否脱敏、是否截断。
+  支持从详情页返回审批列表。
+  支持跳转到关联任务详情。
+  400 / 403 / 404 使用中文错误态说明。
+
+更新 App route：
+  /owner-console/approvals/:approval_id 使用 ApprovalDetailPage。
+
+更新 app.css：
+  增加详情页 section header / footer。
+  增加工具输入预览块样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/approvals/{approval_id}。
+不确认审批。
+不拒绝审批。
+不恢复执行工具。
+不新增审批操作按钮。
+不读取原始 tool_input_json。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/approvals/19 -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/approvals/19?event_limit=5&preview_limit=800
+  resource=approvals
+  read_only=true
+  web_write_enabled=false
+  approval_id=19
+  has_task=true
+  events=5
+  redacted=false
+  truncated=false
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
