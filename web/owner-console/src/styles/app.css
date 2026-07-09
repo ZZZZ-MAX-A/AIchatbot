@@ -433,6 +433,99 @@ button {
   gap: 8px;
 }
 
+.data-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
+.data-toolbar p {
+  margin: 0 0 4px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.data-toolbar strong {
+  font-size: 16px;
+}
+
+.filter-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 36px;
+  padding: 3px;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  background: #f6f7f9;
+}
+
+.filter-tabs__item {
+  min-height: 28px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #4b5563;
+  cursor: pointer;
+}
+
+.filter-tabs__item.is-active {
+  background: #ffffff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 10%);
+}
+
+.task-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+}
+
+.task-table__row {
+  display: grid;
+  grid-template-columns:
+    82px minmax(210px, 1.4fr) minmax(120px, 0.7fr)
+    minmax(180px, 1fr) minmax(96px, 0.6fr) minmax(140px, 1fr) 96px;
+  min-height: 44px;
+  border-top: 1px solid #e2e7ef;
+}
+
+.task-table__row:first-child {
+  border-top: none;
+}
+
+.task-table__row span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.task-table__row--head {
+  background: #f6f7f9;
+  color: #4b5563;
+  font-weight: 700;
+}
+
+.table-link {
+  color: #1d4ed8;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.table-link:hover {
+  text-decoration: underline;
+}
+
 .diagnostic-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -509,6 +602,15 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .data-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filter-tabs {
+    overflow-x: auto;
+  }
+
   .route-table__row {
     grid-template-columns: 120px 70px minmax(180px, 1fr) 90px;
   }
@@ -537,5 +639,13 @@ button {
 
   .compact-table__row {
     min-width: 620px;
+  }
+
+  .task-table {
+    overflow-x: auto;
+  }
+
+  .task-table__row {
+    min-width: 1040px;
   }
 }

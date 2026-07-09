@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./AppShell";
 import { PlaceholderPage } from "./PlaceholderPage";
 import { DashboardPage } from "../pages/DashboardPage";
+import { TasksPage } from "../pages/TasksPage";
 
 export function App() {
   return (
@@ -16,7 +17,7 @@ export function App() {
         />
         <Route
           path="/owner-console/tasks"
-          element={<PlaceholderPage title="任务" />}
+          element={<TasksPage />}
         />
         <Route
           path="/owner-console/tasks/:task_id"

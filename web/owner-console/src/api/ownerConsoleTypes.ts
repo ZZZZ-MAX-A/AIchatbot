@@ -161,6 +161,18 @@ export type OwnerConsoleOverviewEnvelope =
 export type OwnerConsoleDiagnosticsEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleHealthSnapshot>;
 
+export type OwnerConsoleTaskList = {
+  generated_at: string;
+  status_filter: string | null;
+  limit: number;
+  total_visible: number;
+  rows: OwnerConsoleTaskRow[];
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleTaskListEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleTaskList>;
+
 export type OwnerConsoleSnapshot = {
   health: OwnerConsoleHealth | null;
   routes: OwnerConsoleRoutesEnvelope | null;
