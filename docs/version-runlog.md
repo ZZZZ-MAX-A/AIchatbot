@@ -4255,6 +4255,54 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console local deployment design
+
+状态：已落地 P2.39 设计。目标是先把 Web Owner Console 的本地部署形态、路径隔离、静态页面 fallback、docs/openapi 边界和只读 allowlist 说清楚，后续再决定是否实现 FastAPI 挂载 dist。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-local-deployment-design.md：
+  定义开发模式：FastAPI 8090 + Vite 5173 + Vite proxy。
+  定义本地静态模式：FastAPI 可选挂载 web/owner-console/dist 到 /owner-console。
+  明确 /api/v1/owner-console 只承载 JSON API。
+  明确 /owner-console 只承载前端页面。
+  明确 /owner-console/* 客户端路由刷新时 fallback 到 index.html。
+  明确 /api/v1/owner-console/*、/docs、/redoc、/openapi.json 不 fallback 到 index.html。
+  明确 /docs、/redoc、/openapi.json 继续关闭。
+  明确静态页面当前仍只能调用 GET allowlist。
+  补充实现优化和防偏建议：fallback 只服务 /owner-console，不做 API fallback，不做敏感配置注入。
+  记录未来实现步骤和测试清单。
+
+更新 docs/web-owner-console-v0-runbook.md：
+  增加 P2.39 设计文档引用。
+  调整后续路线为 P2.39a 静态模式实现、P2.40 只读自动刷新、P2.41 访问保护、P2.42 Web 审批操作。
+
+更新 docs/web-owner-console-frontend-stack-design.md：
+  追加 P2.39 本地部署方式设计状态。
+
+新增 docs/juejin/15-web-owner-console-local-deployment-design.md：
+  生成稀土掘金文章，说明为什么本地 Web 控制台要先设计部署边界、路径隔离、SPA fallback 和 GET allowlist。
+```
+
+边界：
+
+```text
+不修改 FastAPI app。
+不修改 Vite 配置。
+不生成或提交 dist。
+不新增接口。
+不新增前端写操作。
+不新增登录/鉴权。
+不改变 QQ / NoneBot / /agent 行为。
+```
+
+验证：
+
+```text
+文档更新，无运行时代码改动。
+```
+
 ## v1.6 Web Owner Console v0 runbook
 
 状态：已落地 P2.38。目标是把 Web Owner Console v0 的后端启动、前端启动、页面验收、只读边界、自动化验证和常见问题整理成一份本地使用手册，方便后续继续做部署、鉴权或审批操作前有稳定基线。
