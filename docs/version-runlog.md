@@ -4255,6 +4255,150 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console local start scripts
+
+状态：已落地 P2.39b。目标是让 Web Owner Console 本地静态模式可以一键后台启动和停止，避免日常使用时每次手动输入 uvicorn 环境变量和启动命令。
+
+本次完成：
+
+```text
+新增 scripts/start-owner-console.ps1：
+  默认以本地静态模式后台隐藏启动 FastAPI。
+  默认访问 http://127.0.0.1:8090/owner-console。
+  检查 .venv\Scripts\python.exe 是否存在。
+  检查 8090 是否已被占用。
+  如果已存在 Owner Console 进程，直接提示已运行，不重复启动。
+  如果端口被其他进程占用，拒绝启动并显示进程信息。
+  检查 web/owner-console/dist/index.html 是否存在。
+  支持 -Build 在缺少 dist 时先执行 npm run build。
+  支持 -Foreground 前台调试。
+  支持 -CheckOnly 做启动预检。
+  输出日志到 logs/owner-console.out.log 和 logs/owner-console.err.log。
+
+新增 scripts/stop-owner-console.ps1：
+  只查找 python owner_console_fastapi_launcher:app 且匹配指定端口的进程。
+  默认停止 8090 上的 Owner Console。
+  支持 -Force 强制停止。
+  不按端口杀无关进程。
+
+更新文档：
+  web/owner-console/README.md 增加一键启动/停止命令。
+  docs/web-owner-console-v0-runbook.md 增加脚本用法、日志路径、前台调试方式和 -Build 说明。
+  docs/web-owner-console-local-deployment-design.md 和 docs/web-owner-console-frontend-stack-design.md 标记 P2.39b 已完成。
+```
+
+边界：
+
+```text
+不新增后端 API。
+不新增 Web 写操作。
+不新增登录/鉴权。
+不新增开机自启。
+不注册 Windows Service。
+不改变 QQ / NoneBot / /agent 行为。
+脚本只服务本地 Owner Console 静态模式。
+```
+
+验证：
+
+```text
+PowerShell Parser ParseFile scripts/start-owner-console.ps1
+OK
+
+PowerShell Parser ParseFile scripts/stop-owner-console.ps1
+OK
+
+.\scripts\start-owner-console.ps1 -CheckOnly
+Owner Console start preflight OK.
+
+npm run guard:readonly
+Owner Console frontend read-only guard passed.
+
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 22 tests OK
+```
+
+## v1.6 Web Owner Console optional local static mode
+
+状态：已落地 P2.39a。目标是按 P2.39 设计实现可选本地静态模式，让 FastAPI 在显式开关打开时服务 `web/owner-console/dist`，同时继续保持 API 路径、页面路径和只读边界隔离。
+
+本次完成：
+
+```text
+更新 web/owner-console/vite.config.ts：
+  设置 Vite build base=/owner-console/。
+  build 后资源路径变为 /owner-console/assets/...。
+
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  新增 OWNER_CONSOLE_STATIC_ENABLED 开关，默认 false。
+  新增 OWNER_CONSOLE_STATIC_DIR，默认 web/owner-console/dist。
+  静态模式开启时，/owner-console 和 /owner-console/* 返回前端页面。
+  /owner-console/assets/{file} 返回真实静态资源。
+  缺失 assets 返回 404，不 fallback 到 index.html。
+  /api/v1/owner-console/* 仍然只承载 JSON API。
+  /docs、/redoc、/openapi.json 仍然关闭。
+  静态模式开启但 index.html 不存在时拒绝创建 app。
+
+更新测试：
+  默认静态模式关闭时 /owner-console 仍是 404。
+  静态模式开启时 /owner-console、/owner-console/tasks/1、/owner-console/approvals/1 返回 text/html。
+  静态资源存在时返回资源，缺失时 404。
+  POST /owner-console/tasks 返回 405。
+  API route、POST API 405、docs/redoc/openapi 404 均不受静态 fallback 影响。
+  launcher 测试显式关闭静态模式，避免本机环境变量干扰 smoke。
+
+更新 .env.example 和 config/.env.example：
+  增加 OWNER_CONSOLE_STATIC_ENABLED=false。
+  增加 OWNER_CONSOLE_STATIC_DIR=web/owner-console/dist。
+
+更新文档：
+  docs/web-owner-console-local-deployment-design.md 标记 P2.39a 已实现。
+  docs/web-owner-console-v0-runbook.md 增加本地静态模式启动方式。
+  web/owner-console/README.md 增加静态模式命令。
+  docs/web-owner-console-frontend-stack-design.md 追加 P2.39a 实现状态。
+```
+
+边界：
+
+```text
+不提交 dist 构建产物。
+不新增 API endpoint。
+不新增 POST/PUT/PATCH/DELETE。
+不新增登录/鉴权。
+不新增审批确认/拒绝页面。
+不改变 QQ / NoneBot / /agent 行为。
+不开放 /docs、/redoc、/openapi.json。
+Web Owner Console v0 仍然只读。
+```
+
+验证：
+
+```text
+npm run guard:readonly
+Owner Console frontend read-only guard passed.
+
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 22 tests OK
+```
+
 ## v1.6 Web Owner Console local deployment design
 
 状态：已落地 P2.39 设计。目标是先把 Web Owner Console 的本地部署形态、路径隔离、静态页面 fallback、docs/openapi 边界和只读 allowlist 说清楚，后续再决定是否实现 FastAPI 挂载 dist。

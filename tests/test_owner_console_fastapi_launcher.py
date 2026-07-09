@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -14,7 +16,9 @@ class OwnerConsoleFastApiLauncherTests(unittest.TestCase):
     def test_launcher_import_does_not_execute_ai_chat_plugin_entrypoint(self):
         script = """
 import json
+import os
 import sys
+os.environ["OWNER_CONSOLE_STATIC_ENABLED"] = "false"
 import src.owner_console_fastapi_launcher as launcher
 
 plugin_package = sys.modules.get("src.plugins.ai_chat")
@@ -24,7 +28,7 @@ payload = {
     "plugin_path": list(getattr(plugin_package, "__path__", [])),
     "nonebot_loaded": "nonebot" in sys.modules,
     "qq_entry_loaded": "src.plugins.ai_chat.__init__" in sys.modules,
-            "routes": [getattr(route, "path", "") for route in launcher.app.routes],
+    "routes": [getattr(route, "path", "") for route in launcher.app.routes],
 }
 print(json.dumps(payload, sort_keys=True))
 """
@@ -61,9 +65,14 @@ print(json.dumps(payload, sort_keys=True))
         )
 
     def test_launcher_app_serves_smoke_routes(self):
-        import src.owner_console_fastapi_launcher as launcher
+        with patch.dict(
+            os.environ,
+            {"OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=False,
+        ):
+            import src.owner_console_fastapi_launcher as launcher
 
-        client = TestClient(launcher.create_app())
+            client = TestClient(launcher.create_app())
 
         health_response = client.get("/healthz")
         routes_response = client.get("/api/v1/owner-console/routes")
@@ -80,8 +89,10 @@ print(json.dumps(payload, sort_keys=True))
     def test_launcher_refuses_after_ai_chat_plugin_package_is_initialized(self):
         script = """
 import json
+import os
 import sys
 import types
+os.environ["OWNER_CONSOLE_STATIC_ENABLED"] = "false"
 
 module = types.ModuleType("src.plugins.ai_chat")
 module.__file__ = "D:/AIchatbot/src/plugins/ai_chat/__init__.py"
