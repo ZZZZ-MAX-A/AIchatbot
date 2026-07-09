@@ -480,6 +480,41 @@ def list_agent_tasks(
     return [_task_from_row(row) for row in rows]
 
 
+def count_agent_tasks(
+    *,
+    session_key: str | None = None,
+    user_id: str | None = None,
+    status: str | None = None,
+) -> int:
+    ensure_database()
+    clauses: list[str] = []
+    params: list[object] = []
+    if session_key:
+        clauses.append("session_key = ?")
+        params.append(session_key)
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if status:
+        normalized_status = status.strip().lower()
+        if normalized_status not in AGENT_TASK_STATUSES:
+            raise ValueError(f"unsupported agent task status: {status}")
+        clauses.append("status = ?")
+        params.append(normalized_status)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT COUNT(*) AS item_count
+            FROM agent_tasks
+            {where_clause}
+            """,
+            tuple(params),
+        ).fetchone()
+    return int(row["item_count"] if row else 0)
+
+
 def count_agent_pending_tasks_without_pending_approval(
     *,
     session_key: str | None = None,
@@ -719,6 +754,46 @@ def list_agent_approvals(
             tuple(params),
         ).fetchall()
     return [_approval_from_row(row) for row in rows]
+
+
+def count_agent_approvals(
+    *,
+    session_key: str | None = None,
+    user_id: str | None = None,
+    task_id: int | None = None,
+    status: str | None = None,
+) -> int:
+    ensure_database()
+    clauses: list[str] = []
+    params: list[object] = []
+    if task_id is not None:
+        clauses.append("a.task_id = ?")
+        params.append(task_id)
+    if session_key:
+        clauses.append("t.session_key = ?")
+        params.append(session_key)
+    if user_id:
+        clauses.append("t.user_id = ?")
+        params.append(user_id)
+    if status:
+        normalized_status = status.strip().lower()
+        if normalized_status not in AGENT_APPROVAL_STATUSES:
+            raise ValueError(f"unsupported agent approval status: {status}")
+        clauses.append("a.status = ?")
+        params.append(normalized_status)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT COUNT(*) AS item_count
+            FROM agent_approvals AS a
+            JOIN agent_tasks AS t ON t.id = a.task_id
+            {where_clause}
+            """,
+            tuple(params),
+        ).fetchone()
+    return int(row["item_count"] if row else 0)
 
 
 def decide_agent_approval(

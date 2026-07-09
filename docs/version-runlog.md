@@ -768,6 +768,878 @@ Ran 284 tests OK
 不执行测试；本次为纯文档变更。
 ```
 
+## v1.6 Owner Console Task / Approval read-model builder
+
+状态：已落地 P2.7 第一刀。目标是把 P2.6 中“不要复用 QQ 文本、先做结构化 DTO”的设计落到任务/审批只读 builder 上，验证未来 Web Owner Console 可以不依赖 QQ formatter 读取结构化数据。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_console_read_models.py。
+
+第一批结构化 DTO：
+  OwnerConsoleContext
+  OwnerConsoleRuntimeBoundary
+  OwnerConsoleTaskRow
+  OwnerConsoleTaskEventRow
+  OwnerConsoleTaskList
+  OwnerConsoleTaskDetail
+  OwnerConsoleApprovalActionability
+  OwnerConsoleApprovalRow
+  OwnerConsoleApprovalList
+  OwnerConsoleApprovalDetail
+  OwnerConsoleToolInputPreview
+
+新增 src/plugins/ai_chat/owner_console_read_runtime.py。
+
+第一批只读 builder：
+  build_owner_console_task_list
+  build_owner_console_task_detail
+  build_owner_console_approval_list
+  build_owner_console_approval_detail
+  build_tool_input_preview
+
+实现边界：
+  使用 OwnerConsoleContext(session_key, user_id)，不依赖 QQ MessageEvent。
+  任务/审批直接复用 AgentTask、AgentTaskEvent、AgentApproval 和持久化查询函数。
+  不解析 QQ formatter 文本。
+  不改变现有 /agent 输出。
+  不接 HTTP。
+  不写前端。
+  不调用 owner_write_runtime。
+```
+
+actionability 第一版保持保守：
+
+```text
+pending approval:
+  can_approve=true
+  can_reject=true
+  resume_enabled=None
+  blocked_reason=""
+  future_operation_only=true
+
+非 pending approval:
+  can_approve=false
+  can_reject=false
+  resume_enabled=None
+  blocked_reason="approval is not pending"
+  future_operation_only=true
+```
+
+其中 `resume_enabled=None` 表示 P2.7 尚未接入 tool registry，不声称该审批确认后一定可恢复工具。后续如进入 Web 操作阶段，必须由后端基于 tool registry 和 `approval_resume_enabled=true` 计算真实值。
+
+安全预览：
+
+```text
+tool_input_json 只生成 preview。
+支持敏感 key 脱敏：api_key、token、cookie、password、secret 等。
+支持长度截断，避免把长内容或潜在隐私正文完整塞进 read model。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 4 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units.AgentTaskPersistenceUnitTests -v
+Ran 17 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 288 tests OK
+```
+
+边界：
+
+```text
+本步只新增只读 read-model builder。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+不新增 HTTP API。
+不新增 Web 前端。
+不新增数据库表。
+不新增工具能力。
+不开放 Web 写操作。
+```
+
+## v1.6 Owner Console Overview read-model builder
+
+状态：已落地 P2.8 第一刀。目标是在 P2.7 Task / Approval 结构化 read model 的基础上，新增 Dashboard / Overview 的轻量只读聚合模型，为未来 Web Owner Console 首页做准备。
+
+本次完成：
+
+```text
+agent_tasks.py 新增只读计数 helper：
+  count_agent_tasks
+  count_agent_approvals
+
+owner_console_read_models.py 新增：
+  OwnerConsoleOverviewCounters
+  OwnerConsoleOverview
+
+owner_console_read_runtime.py 新增：
+  build_owner_console_overview
+
+Overview 当前聚合：
+  pending_tasks
+  failed_tasks
+  pending_approvals
+  recent_tasks
+  pending_approvals rows
+  runtime boundary
+```
+
+本步刻意不做深层 Dashboard：
+
+```text
+不接 Diagnostics 深层结构。
+不接 Access Control 深层结构。
+不接 Memory / Settings snapshot。
+不接 HTTP。
+不写前端。
+```
+
+原因是 P2.8 只验证 Dashboard 可以复用 P2.7 的结构化 rows 和精确计数，避免第一版 overview 同时牵扯诊断、访问控制、记忆和设置而膨胀。
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 5 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units.AgentTaskPersistenceUnitTests -v
+Ran 17 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 289 tests OK
+```
+
+边界：
+
+```text
+本步只新增只读 overview builder。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+不新增 HTTP API。
+不新增 Web 前端。
+不新增数据库表。
+不新增工具能力。
+不开放 Web 写操作。
+```
+
+## v1.6 Owner Console Access / Settings snapshot
+
+状态：已落地 P2.9 第一刀。目标是在 Task / Approval / Overview 之后，继续补齐未来 Owner Console 的浅层配置类 read model，先做 Access Control 和 Settings，只读、结构化、脱敏，不接 HTTP 或前端。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OwnerConsoleAccessList
+  OwnerConsoleAccessControlSnapshot
+  OwnerConsoleModelConfigSnapshot
+  OwnerConsoleRoleCardRow
+  OwnerConsoleSettingsSnapshot
+
+owner_console_read_runtime.py 新增：
+  build_owner_console_access_control_snapshot
+  build_owner_console_settings_snapshot
+```
+
+Access Control snapshot 当前包含：
+
+```text
+owner_configured
+private_chat_enabled
+group_chat_enabled
+unknown_private_policy
+private_whitelist
+group_whitelist
+user_blacklist
+runtime boundary
+```
+
+Settings snapshot 当前包含：
+
+```text
+chat_model
+main_agent_model
+embedding
+role_cards
+active_role_card_key
+feature_flags
+runtime boundary
+```
+
+安全处理：
+
+```text
+base_url 使用 redacted_base_url 脱敏，不保留 userinfo/query/token。
+API Key 只展示 api_key_configured 布尔值，不暴露原文。
+访问名单支持 item_limit 截断，避免一次性把大量名单项塞进 read model。
+Settings builder 由调用方传入 role_cards 和 active_role_card_key，不读取角色卡正文。
+```
+
+边界：
+
+```text
+不 import access.py，避免引入 NoneBot MessageEvent。
+不依赖 QQ adapter。
+不读取角色卡正文。
+不修改名单。
+不切换角色卡。
+不修改模型配置。
+不写 .env。
+不接 HTTP。
+不写前端。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 7 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_persistence_units.AgentTaskPersistenceUnitTests -v
+Ran 17 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_legacy_business_rules.AccessRuleTests tests.test_legacy_business_rules.AccessStoreTests tests.test_config_loading -v
+Ran 11 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 291 tests OK
+```
+
+附记：
+
+```text
+本轮短暂验证过独立 Web 入口不能直接 import src.plugins.ai_chat.* 包路径，
+因为 Python 会先执行 QQ 插件包 __init__.py 并触发插件初始化副作用。
+后续如做 FastAPI，只能作为薄 Web adapter 接 read-model 层，不能直接 import QQ adapter。
+```
+
+## v1.6 Owner Console Diagnostics snapshot
+
+状态：已落地 P2.10 第一刀。目标是在不重构 DiagnosticsGraph、不接 HTTP、不写前端的前提下，给未来 Owner Console 的 Diagnostics 页面提供浅层结构化 read model。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OwnerConsoleTextSnapshotSection
+  OwnerConsoleObservationSnapshot
+  OwnerConsoleHealthSnapshot
+
+owner_console_read_runtime.py 新增：
+  build_owner_console_health_snapshot
+```
+
+Health snapshot 当前包含：
+
+```text
+bot_status
+diagnostics
+config
+vision
+image_cache
+memory
+tts
+recent_errors
+observations.main_agent
+observations.root_graph
+runtime boundary
+```
+
+设计取舍：
+
+```text
+P2.10 不强行把 DiagnosticsGraph 内部全部结构化。
+现阶段允许 summary_text / display_lines 过渡。
+builder 可接收 str、list[str]、tuple[str, ...]，也可接收带 result.reply_text / result.error 的 Graph execution-like 对象。
+错误状态会转成 section.ok=false 和 section.error，不让前端猜文本。
+```
+
+边界：
+
+```text
+不 import diagnostics.py，避免引入 nonebot.get_driver / OpenAI 等诊断实现依赖。
+不依赖 QQ adapter。
+不改变 DiagnosticsGraph node sequence。
+不改变 /诊断、/配置状态、/视觉状态、/最近错误 等 QQ 命令输出。
+不接 HTTP。
+不写前端。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 8 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 292 tests OK
+```
+
+## v1.6 Owner Console Memory snapshot
+
+状态：已落地 P2.11 第一刀。目标是在不读取记忆正文、不触发检索、不重建索引的前提下，给未来 Owner Console 的 Memory 页面提供只读结构化快照。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OwnerConsoleMemoryCounts
+  OwnerConsoleMemoryContextPolicy
+  OwnerConsoleMemoryRagSnapshot
+  OwnerConsoleProjectDocRagSnapshot
+  OwnerConsoleMemorySnapshot
+
+owner_console_read_runtime.py 新增：
+  build_owner_console_memory_snapshot
+```
+
+Memory snapshot 当前包含：
+
+```text
+counts:
+  message_count
+  session_count
+  session_summary_count
+  summarized_message_count
+  manual_memory_count
+  manual_memory_subject_count
+  gap_scene_summary_count
+  gap_scene_source_message_count
+  rag_document_count
+  rag_active_document_count
+  rag_embedding_count
+
+context_policy:
+  memory_compression_enabled
+  gap_scene_summaries_enabled
+  long_term_memory_context_enabled
+  max_context_messages
+  max_stored_messages_per_session
+  summary_keep_recent_messages
+  summary_batch_messages
+  summary_min_source_messages
+  max_session_summaries_in_context
+  max_gap_scene_summaries_in_context
+  max_long_term_memories_in_context
+
+memory_rag:
+  enabled
+  inject_in_chat
+  owner_only_debug
+  top_k
+  min_score
+  max_context_chars
+  include_manual_facts
+  include_manual_preferences
+  include_session_summaries
+  include_short_messages
+  include_gap_scene_summaries
+
+project_doc_rag:
+  enabled
+  explicit_agent_dev_context_only=true
+  ordinary_chat_injection_allowed=false
+  top_k
+  min_score
+  max_context_chars
+```
+
+设计取舍：
+
+```text
+builder 接收调用方传入的 stats dict，不直接 import memory.py、manual_memory.py、rag.documents 或 __init__.py。
+这样未来 Web adapter 可以在 adapter 层选择调用现有 stats provider，
+但 read-model 层仍保持纯粹、无 QQ adapter、无插件初始化副作用。
+
+stats dict 中即使携带 content/summary 等额外字段，builder 也只取计数字段。
+OwnerConsoleMemorySnapshot 明确标记：
+  memory_content_exposed=false
+  project_doc_content_exposed=false
+  retrieval_executed=false
+  index_rebuild_executed=false
+```
+
+边界：
+
+```text
+不暴露长期记忆正文。
+不暴露会话摘要正文。
+不暴露 gap scene 摘要正文。
+不暴露 ProjectDocRAG 文档正文。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不写数据库。
+不 import QQ 插件 __init__.py。
+不接 HTTP。
+不写前端。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 9 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 293 tests OK
+```
+
+## v1.6 Owner Console read-model facade
+
+状态：已落地 P2.12 第一刀。目标是在 P2.7-P2.11 的分散 builder 之上收拢一个只读 facade，给未来 FastAPI / Web adapter 一个稳定调用边界，同时继续避免 HTTP、前端和 QQ adapter 依赖。
+
+本次完成：
+
+```text
+owner_console_read_runtime.py 新增 OwnerConsoleReadRuntime。
+
+OwnerConsoleReadRuntime 当前统一暴露：
+  build_overview
+  build_task_list
+  build_task_detail
+  build_approval_list
+  build_approval_detail
+  build_access_control_snapshot
+  build_settings_snapshot
+  build_memory_snapshot
+  build_health_snapshot
+```
+
+依赖注入形式：
+
+```text
+config_provider
+access_provider
+role_cards_provider
+active_role_card_key_provider
+memory_stats_provider
+manual_memory_stats_provider
+gap_scene_stats_provider
+rag_document_stats_provider
+```
+
+设计取舍：
+
+```text
+facade 不直接 import QQ 插件入口，不依赖 MessageEvent。
+facade 不直接 import memory.py、manual_memory.py、rag.documents 或 diagnostics.py。
+需要读取运行时状态时，由未来 adapter 在外层注入 provider。
+这样 FastAPI 未来只需要作为薄 adapter：
+  HTTP request / auth / serialization
+  -> OwnerConsoleContext
+  -> OwnerConsoleReadRuntime
+  -> 结构化 DTO
+而不是直接调用 QQ formatter 或拼接文本输出。
+```
+
+边界：
+
+```text
+本步只新增只读 facade。
+不新增 HTTP API。
+不写前端。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 294 tests OK
+```
+
+## v1.6 Owner Console serialization contract
+
+状态：已落地 P2.13 第一刀。目标是在 read-model builder 和未来 FastAPI / Web adapter 之间定义一个稳定 JSON-safe 序列化契约，避免将来临时把 dataclass、QQ 文本或 Python 对象直接丢给 HTTP 层。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OWNER_CONSOLE_SCHEMA_VERSION
+  owner_console_to_jsonable
+  owner_console_page_response
+
+owner_console_read_runtime.py / OwnerConsoleReadRuntime 新增：
+  serialize_model
+  serialize_page
+```
+
+序列化契约：
+
+```text
+owner_console_to_jsonable:
+  dataclass -> dict
+  dict key -> str
+  list / tuple -> list
+  set / frozenset -> sorted list
+  datetime / date -> isoformat string
+  enum -> enum.value
+  None 保留为 null
+  bool / int / finite float / str 保留原类型
+  non-finite float 拒绝
+  其他未知 Python 对象拒绝
+
+owner_console_page_response:
+  schema_version
+  page
+  generated_at
+  read_only=true
+  http_api_enabled=false
+  web_write_enabled=false
+  data
+```
+
+设计取舍：
+
+```text
+序列化层不做 HTTP，不决定状态码，不做鉴权。
+序列化层只保证 read model 可以安全进入 JSON response envelope。
+敏感信息仍应在 builder 阶段脱敏；序列化层不负责猜测业务语义。
+page response 明确 read_only=true / web_write_enabled=false，避免未来 Web adapter 把只读 DTO 误当可写接口。
+```
+
+边界：
+
+```text
+不新增 HTTP API。
+不写前端。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 11 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 295 tests OK
+```
+
+## v1.6 Owner Console provider wiring audit
+
+状态：已落地 P2.14 第一刀。目标是在不接 FastAPI、不写 Web adapter 的前提下，把未来 Web Owner Console 需要注入哪些 provider 固化成显式契约，并提供轻量 factory，避免以后在路由层散落临时 lambda 胶水。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OwnerConsoleProviderWiringRow
+  OwnerConsoleProviderWiringSnapshot
+
+owner_console_read_runtime.py 新增：
+  OwnerConsoleReadProviderSpec
+  OWNER_CONSOLE_READ_PROVIDER_SPECS
+  OwnerConsoleReadProviders
+  build_owner_console_provider_wiring_snapshot
+  create_owner_console_read_runtime
+```
+
+当前 provider 契约：
+
+```text
+required:
+  config_provider
+  access_provider
+
+optional:
+  role_cards_provider
+  active_role_card_key_provider
+  memory_stats_provider
+  manual_memory_stats_provider
+  gap_scene_stats_provider
+  rag_document_stats_provider
+```
+
+optional provider fallback：
+
+```text
+role_cards_provider -> empty role card list
+active_role_card_key_provider -> empty active role card key
+memory_stats_provider -> zero memory counters
+manual_memory_stats_provider -> zero manual memory counters
+gap_scene_stats_provider -> zero gap scene counters
+rag_document_stats_provider -> zero RAG document counters
+```
+
+Provider wiring snapshot 明确记录：
+
+```text
+runtime_ready
+missing_required
+provider_name
+required
+configured
+read_model_area
+owner_console_methods
+fallback_behavior
+direct_qq_dependency_allowed=false
+write_side_effect_allowed=false
+runtime boundary
+```
+
+设计取舍：
+
+```text
+audit 只检查 provider 是否注入，不调用 provider，不读取数据库。
+factory 只把 provider bundle 转成 OwnerConsoleReadRuntime，不 import QQ 插件入口。
+factory 不直接 import memory.py、manual_memory.py、rag.documents 或 diagnostics.py。
+未来 FastAPI adapter 只需要组装 OwnerConsoleReadProviders，再调用 create_owner_console_read_runtime。
+```
+
+边界：
+
+```text
+不新增 HTTP API。
+不写前端。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 12 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 296 tests OK
+```
+
+## v1.6 Owner Console read-only route contract
+
+状态：已落地 P2.15 第一刀。目标是在 P2.12 facade、P2.13 serialization 和 P2.14 provider wiring 之后，把未来 Web Owner Console 的只读页面入口固化成显式 route contract，避免后续接 FastAPI 时临时把页面、DTO、runtime method 和参数散落在路由层。
+
+本次完成：
+
+```text
+owner_console_read_models.py 新增：
+  OwnerConsoleReadRouteRow
+  OwnerConsoleReadRouteContractSnapshot
+
+owner_console_read_runtime.py 新增：
+  OwnerConsoleReadRouteSpec
+  OWNER_CONSOLE_READ_ROUTE_SPECS
+  build_owner_console_route_contract_snapshot
+
+OwnerConsoleReadRuntime 新增：
+  build_route_contract_snapshot
+```
+
+当前只读页面契约：
+
+```text
+dashboard:
+  runtime_method=build_overview
+  read_model=OwnerConsoleOverview
+  requires_context=true
+  optional_params=task_limit, approval_limit
+
+tasks:
+  runtime_method=build_task_list
+  read_model=OwnerConsoleTaskList
+  requires_context=true
+  optional_params=status, limit
+
+task_detail:
+  runtime_method=build_task_detail
+  read_model=OwnerConsoleTaskDetail
+  requires_context=true
+  required_params=task_id
+  optional_params=event_limit, preview_limit
+
+approvals:
+  runtime_method=build_approval_list
+  read_model=OwnerConsoleApprovalList
+  requires_context=true
+  optional_params=status, limit
+
+approval_detail:
+  runtime_method=build_approval_detail
+  read_model=OwnerConsoleApprovalDetail
+  requires_context=true
+  required_params=approval_id
+  optional_params=event_limit, preview_limit
+
+diagnostics:
+  runtime_method=build_health_snapshot
+  read_model=OwnerConsoleHealthSnapshot
+  requires_context=false
+
+memory:
+  runtime_method=build_memory_snapshot
+  read_model=OwnerConsoleMemorySnapshot
+  requires_context=false
+
+access_control:
+  runtime_method=build_access_control_snapshot
+  read_model=OwnerConsoleAccessControlSnapshot
+  requires_context=false
+
+settings:
+  runtime_method=build_settings_snapshot
+  read_model=OwnerConsoleSettingsSnapshot
+  requires_context=false
+```
+
+每一行 route contract 都显式标记：
+
+```text
+read_only=true
+http_api_enabled=false
+web_write_enabled=false
+direct_qq_dependency_allowed=false
+write_side_effect_allowed=false
+```
+
+设计取舍：
+
+```text
+P2.15 仍不是 HTTP API。
+route contract 只是未来 Web adapter 的页面到 read-model facade 映射表。
+它不决定 URL path、HTTP method、鉴权、状态码或前端布局。
+真正接 FastAPI 时，路由层应只做薄适配：
+  HTTP request / auth
+  -> OwnerConsoleContext / 参数校验
+  -> OwnerConsoleReadRuntime
+  -> serialize_page
+
+这样可以继续保持：
+  Web 页面不解析 QQ 文本输出
+  Web adapter 不 import QQ 插件 __init__.py
+  Web adapter 不直接拼业务 DTO
+  页面可用性由 read model / facade / route contract 三层共同约束
+```
+
+边界：
+
+```text
+不新增 HTTP API。
+不写前端。
+不新增登录/鉴权。
+不新增数据库表。
+不新增工具能力。
+不调用写 runtime。
+不确认/拒绝审批。
+不恢复工具。
+不执行 MemoryRAG / ProjectDocRAG 检索。
+不重建 RAG 索引。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+ProjectDocRAG 仍只允许显式 /agent dev_context，不进入普通聊天。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime -v
+Ran 13 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge -v
+Ran 50 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_graph_runners.DiagnosticsGraphRunnerTests tests.test_diagnostics_units -v
+Ran 10 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 297 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
