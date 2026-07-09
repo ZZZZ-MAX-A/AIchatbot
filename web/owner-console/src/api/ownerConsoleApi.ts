@@ -7,6 +7,7 @@ import type {
   OwnerConsoleHealth,
   OwnerConsoleOverviewEnvelope,
   OwnerConsoleRoutesEnvelope,
+  OwnerConsoleTaskDetailEnvelope,
   OwnerConsoleTaskListEnvelope,
 } from "./ownerConsoleTypes";
 
@@ -21,6 +22,20 @@ const allowedPaths = new Set([
   `${API_BASE}/diagnostics`,
   `${API_BASE}/tasks`,
 ]);
+
+function isAllowedPath(routePath: string): boolean {
+  if (allowedPaths.has(routePath)) {
+    return true;
+  }
+
+  const taskDetailPrefix = `${API_BASE}/tasks/`;
+  if (routePath.startsWith(taskDetailPrefix)) {
+    const taskId = routePath.slice(taskDetailPrefix.length);
+    return /^[1-9]\d*$/.test(taskId);
+  }
+
+  return false;
+}
 
 export class OwnerConsoleApiError extends Error {
   readonly status: number;
@@ -48,7 +63,7 @@ async function getJson<TResponse>(
   signal?: AbortSignal,
 ): Promise<TResponse> {
   const routePath = path.split("?")[0];
-  if (!allowedPaths.has(routePath)) {
+  if (!isAllowedPath(routePath)) {
     throw new Error("前端请求路径不在只读 allowlist 内");
   }
 
@@ -144,6 +159,22 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleTaskListEnvelope> {
     const envelope = await getJson<OwnerConsoleTaskListEnvelope>(
       `${API_BASE}/tasks${buildQuery(params)}`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getTaskDetail(
+    taskId: number,
+    params: { event_limit: number; preview_limit: number },
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTaskDetailEnvelope> {
+    const envelope = await getJson<OwnerConsoleTaskDetailEnvelope>(
+      `${API_BASE}/tasks/${taskId}${buildQuery(params)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);

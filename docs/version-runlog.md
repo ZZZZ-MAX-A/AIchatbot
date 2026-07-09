@@ -3615,6 +3615,84 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Task detail data
+
+状态：已落地 P2.34 第一刀。目标是在任务列表之后接入任务详情页真实只读数据，让 `/owner-console/tasks/:task_id` 可以读取 `/api/v1/owner-console/tasks/{task_id}` 并展示单个任务的目标、结果、关联审批和事件时间线。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleTaskEventRow。
+  增加 OwnerConsoleTaskDetail。
+  增加 OwnerConsoleTaskDetailEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /tasks/{positive_int} 动态路径校验。
+  新增 getTaskDetail(task_id, { event_limit, preview_limit })。
+  继续只使用 GET，不接受 owner context query 参数。
+
+新增 web/owner-console/src/pages/TaskDetailPage.tsx：
+  读取 GET /api/v1/owner-console/tasks/{task_id}?event_limit=20&preview_limit=800。
+  展示任务信息、目标、结果、下一步、关联审批和事件时间线。
+  支持从详情页返回任务列表。
+  400 / 403 / 404 使用中文错误态说明。
+
+更新 App route：
+  /owner-console/tasks/:task_id 使用 TaskDetailPage。
+
+更新 app.css：
+  增加详情页 header action。
+  增加返回链接、详情分区、关联审批小表格和事件时间线表格样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/tasks/{task_id}。
+不创建任务。
+不取消任务。
+不重试任务。
+不推进任务。
+不确认或拒绝审批。
+不新增审批操作按钮。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/tasks/24 -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/tasks/24?event_limit=20&preview_limit=800
+  resource=tasks
+  read_only=true
+  web_write_enabled=false
+  task_id=24
+  events=5
+  approvals=1
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

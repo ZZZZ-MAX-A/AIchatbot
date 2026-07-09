@@ -87,6 +87,20 @@ export type OwnerConsoleTaskRow = {
   next_action: string;
 };
 
+export type OwnerConsoleTaskEventRow = {
+  event_id: number;
+  task_id: number;
+  step_index: number;
+  kind: string;
+  tool_name: string;
+  input_preview: string;
+  output_summary: string;
+  status: string;
+  status_label: string;
+  error: string;
+  created_at: string;
+};
+
 export type OwnerConsoleApprovalActionability = {
   can_approve: boolean;
   can_reject: boolean;
@@ -172,6 +186,20 @@ export type OwnerConsoleTaskList = {
 
 export type OwnerConsoleTaskListEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleTaskList>;
+
+export type OwnerConsoleTaskDetail = {
+  generated_at: string;
+  task: OwnerConsoleTaskRow;
+  goal: string;
+  result: string;
+  events: OwnerConsoleTaskEventRow[];
+  approvals: OwnerConsoleApprovalRow[];
+  next_action: string;
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleTaskDetailEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleTaskDetail>;
 
 export type OwnerConsoleSnapshot = {
   health: OwnerConsoleHealth | null;
