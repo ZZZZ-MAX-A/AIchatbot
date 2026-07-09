@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./AppShell";
 import { PlaceholderPage } from "./PlaceholderPage";
+import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
 import { TasksPage } from "../pages/TasksPage";
@@ -26,7 +27,7 @@ export function App() {
         />
         <Route
           path="/owner-console/approvals"
-          element={<PlaceholderPage title="审批" />}
+          element={<ApprovalsPage />}
         />
         <Route
           path="/owner-console/approvals/:approval_id"

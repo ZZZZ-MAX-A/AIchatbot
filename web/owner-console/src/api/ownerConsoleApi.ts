@@ -3,6 +3,7 @@ import {
   checkOwnerConsoleEnvelope,
 } from "./ownerConsoleEnvelope";
 import type {
+  OwnerConsoleApprovalListEnvelope,
   OwnerConsoleDiagnosticsEnvelope,
   OwnerConsoleHealth,
   OwnerConsoleOverviewEnvelope,
@@ -21,6 +22,7 @@ const allowedPaths = new Set([
   `${API_BASE}/overview`,
   `${API_BASE}/diagnostics`,
   `${API_BASE}/tasks`,
+  `${API_BASE}/approvals`,
 ]);
 
 function isAllowedPath(routePath: string): boolean {
@@ -175,6 +177,21 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleTaskDetailEnvelope> {
     const envelope = await getJson<OwnerConsoleTaskDetailEnvelope>(
       `${API_BASE}/tasks/${taskId}${buildQuery(params)}`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getApprovals(
+    params: { status?: string | null; limit: number },
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleApprovalListEnvelope> {
+    const envelope = await getJson<OwnerConsoleApprovalListEnvelope>(
+      `${API_BASE}/approvals${buildQuery(params)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
