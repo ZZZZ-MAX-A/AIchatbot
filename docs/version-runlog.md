@@ -3532,6 +3532,89 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Tasks list data
+
+状态：已落地 P2.33 第一刀。目标是在中文 App Shell 和 Dashboard 之后，接入任务列表页真实只读数据，让 `/owner-console/tasks` 可以读取 `/api/v1/owner-console/tasks` 并以表格展示主人私聊上下文内的任务。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleTaskList。
+  增加 OwnerConsoleTaskListEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /tasks。
+  新增 getTasks({ status, limit })。
+
+新增 web/owner-console/src/pages/TasksPage.tsx：
+  读取 GET /api/v1/owner-console/tasks?limit=20。
+  支持中文状态筛选：全部、待处理、已完成、失败、已取消。
+  展示任务 ID、目标摘要、状态、最近事件、待审批、下一步、详情入口。
+  403 时中文提示检查 BOT_OWNER_QQ。
+  400 时中文提示检查任务状态筛选或 limit。
+
+更新 App route：
+  /owner-console/tasks 使用 TasksPage。
+
+更新 app.css：
+  增加 data toolbar。
+  增加 segmented filter tabs。
+  增加 task table。
+  增加只读详情链接样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/tasks。
+不创建任务。
+不取消任务。
+不重试任务。
+不推进任务。
+不新增审批按钮。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/tasks -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/tasks?limit=20
+  resource=tasks
+  read_only=true
+  web_write_enabled=false
+  total_visible=20
+  rows=20
+
+GET http://127.0.0.1:5173/api/v1/owner-console/tasks?status=pending&limit=20
+  resource=tasks
+  status_filter=pending
+  total_visible=9
+  rows=9
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

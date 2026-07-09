@@ -7,6 +7,7 @@ import type {
   OwnerConsoleHealth,
   OwnerConsoleOverviewEnvelope,
   OwnerConsoleRoutesEnvelope,
+  OwnerConsoleTaskListEnvelope,
 } from "./ownerConsoleTypes";
 
 const API_BASE =
@@ -18,6 +19,7 @@ const allowedPaths = new Set([
   `${API_BASE}/routes`,
   `${API_BASE}/overview`,
   `${API_BASE}/diagnostics`,
+  `${API_BASE}/tasks`,
 ]);
 
 export class OwnerConsoleApiError extends Error {
@@ -127,6 +129,21 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleDiagnosticsEnvelope> {
     const envelope = await getJson<OwnerConsoleDiagnosticsEnvelope>(
       `${API_BASE}/diagnostics`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getTasks(
+    params: { status?: string | null; limit: number },
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTaskListEnvelope> {
+    const envelope = await getJson<OwnerConsoleTaskListEnvelope>(
+      `${API_BASE}/tasks${buildQuery(params)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
