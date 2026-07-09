@@ -2,7 +2,7 @@
 
 本文记录 P2.28 Web Owner Console 只读前端壳设计。当前阶段仍不实现真实前端，只定义未来第一版页面壳如何消费现有 Owner Console HTTP GET endpoints，以及如何保持只读、安全和命名一致。
 
-后续实现状态：P2.29 已补充前端技术栈和目录边界设计，见 `docs/web-owner-console-frontend-stack-design.md`。截至该设计，仍不创建真实前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
+后续实现状态：P2.29 已补充前端技术栈和目录边界设计，见 `docs/web-owner-console-frontend-stack-design.md`。P2.30 已补充简约 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。截至该设计，仍不创建真实前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
 
 ## 1. 定位
 

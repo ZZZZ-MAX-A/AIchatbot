@@ -2,6 +2,8 @@
 
 本文记录 P2.29 Web Owner Console 前端技术栈与目录边界设计。当前阶段只做设计，不创建前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
 
+后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。截至该设计，仍不创建真实前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
+
 ## 1. 目标
 
 P2.29 要解决的问题不是“马上做网页”，而是先把未来网页工程放在哪里、用什么技术栈、如何和 Python/FastAPI 分层说清楚。
