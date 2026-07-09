@@ -61,6 +61,65 @@ def _owner_console_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _owner_console_runtime_from_config(config: Any) -> Any:
+    return create_owner_console_http_read_runtime(
+        config_provider=lambda: config,
+    )
+
+
+def _owner_console_success(resource: str, data: Any) -> Any:
+    return owner_console_http_success_response(
+        resource,
+        data,
+        http_api_enabled=True,
+    )
+
+
+def _owner_console_error_response(
+    resource: str,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> JSONResponse:
+    payload = owner_console_http_error_response(
+        resource,
+        code=code,
+        message=message,
+        details=details,
+        http_api_enabled=True,
+    )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _owner_console_adapter_error(
+    resource: str,
+    exc: OwnerConsoleHttpAdapterError,
+) -> JSONResponse:
+    return _owner_console_error_response(
+        resource,
+        status_code=exc.status_code,
+        code=exc.code,
+        message=exc.message,
+        details=exc.details,
+    )
+
+
+def _owner_console_internal_error(
+    resource: str,
+    message: str,
+    exc: Exception,
+) -> JSONResponse:
+    return _owner_console_error_response(
+        resource,
+        status_code=500,
+        code="internal_error",
+        message=message,
+        details={"error_type": type(exc).__name__},
+    )
+
+
 def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
     memory = runtime.build_memory_snapshot()
     counts = memory.counts
@@ -154,18 +213,14 @@ def create_owner_console_fastapi_app() -> FastAPI:
                 enabled_route_names=OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES,
             )
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "routes",
-                code="internal_error",
                 message="failed to build owner console route contract",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "routes",
             snapshot,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/overview", response_model=None)
@@ -186,36 +241,26 @@ def create_owner_console_fastapi_app() -> FastAPI:
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             overview = runtime.build_overview(
                 context,
                 task_limit=parsed_task_limit,
                 approval_limit=parsed_approval_limit,
             )
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "overview",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "overview",
-                code="internal_error",
                 message="failed to build owner console overview",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "overview",
             overview,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks", response_model=None)
@@ -235,36 +280,26 @@ def create_owner_console_fastapi_app() -> FastAPI:
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             task_list = runtime.build_task_list(
                 context,
                 status=parsed_status,
                 limit=parsed_limit,
             )
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "tasks",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "tasks",
-                code="internal_error",
                 message="failed to build owner console task list",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "tasks",
             task_list,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks/{{task_id}}", response_model=None)
@@ -290,9 +325,7 @@ def create_owner_console_fastapi_app() -> FastAPI:
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             task_detail = runtime.build_task_detail(
                 context,
                 parsed_task_id,
@@ -300,36 +333,27 @@ def create_owner_console_fastapi_app() -> FastAPI:
                 preview_limit=parsed_preview_limit,
             )
             if task_detail is None:
-                payload = owner_console_http_error_response(
+                return _owner_console_error_response(
                     "tasks",
+                    status_code=404,
                     code="not_found",
                     message="owner console task not found",
                     details={"task_id": parsed_task_id},
-                    http_api_enabled=True,
                 )
-                return JSONResponse(status_code=404, content=payload)
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "tasks",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "tasks",
-                code="internal_error",
                 message="failed to build owner console task detail",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "tasks",
             task_detail,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals", response_model=None)
@@ -349,36 +373,26 @@ def create_owner_console_fastapi_app() -> FastAPI:
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             approval_list = runtime.build_approval_list(
                 context,
                 status=parsed_status,
                 limit=parsed_limit,
             )
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "approvals",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "approvals",
-                code="internal_error",
                 message="failed to build owner console approval list",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "approvals",
             approval_list,
-            http_api_enabled=True,
         )
 
     @app.get(
@@ -407,9 +421,7 @@ def create_owner_console_fastapi_app() -> FastAPI:
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             approval_detail = runtime.build_approval_detail(
                 context,
                 parsed_approval_id,
@@ -417,36 +429,27 @@ def create_owner_console_fastapi_app() -> FastAPI:
                 preview_limit=parsed_preview_limit,
             )
             if approval_detail is None:
-                payload = owner_console_http_error_response(
+                return _owner_console_error_response(
                     "approvals",
+                    status_code=404,
                     code="not_found",
                     message="owner console approval not found",
                     details={"approval_id": parsed_approval_id},
-                    http_api_enabled=True,
                 )
-                return JSONResponse(status_code=404, content=payload)
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "approvals",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "approvals",
-                code="internal_error",
                 message="failed to build owner console approval detail",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "approvals",
             approval_detail,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control", response_model=None)
@@ -460,130 +463,90 @@ def create_owner_console_fastapi_app() -> FastAPI:
                 field_name="item_limit",
             )
             config = load_config()
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             access_control = runtime.build_access_control_snapshot(
                 item_limit=parsed_item_limit,
             )
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "access-control",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "access-control",
-                code="internal_error",
                 message="failed to build owner console access control snapshot",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "access-control",
             access_control,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings", response_model=None)
     async def owner_console_settings() -> Any:
         try:
             config = load_config()
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             settings = runtime.build_settings_snapshot()
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "settings",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "settings",
-                code="internal_error",
                 message="failed to build owner console settings snapshot",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "settings",
             settings,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory", response_model=None)
     async def owner_console_memory() -> Any:
         try:
             config = load_config()
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             memory = runtime.build_memory_snapshot()
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "memory",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "memory",
-                code="internal_error",
                 message="failed to build owner console memory snapshot",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "memory",
             memory,
-            http_api_enabled=True,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics", response_model=None)
     async def owner_console_diagnostics() -> Any:
         try:
             config = load_config()
-            runtime = create_owner_console_http_read_runtime(
-                config_provider=lambda: config,
-            )
+            runtime = _owner_console_runtime_from_config(config)
             diagnostics = _build_owner_console_http_diagnostics(runtime, config)
         except OwnerConsoleHttpAdapterError as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_adapter_error(
                 "diagnostics",
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
-                http_api_enabled=True,
+                exc,
             )
-            return JSONResponse(status_code=exc.status_code, content=payload)
         except Exception as exc:
-            payload = owner_console_http_error_response(
+            return _owner_console_internal_error(
                 "diagnostics",
-                code="internal_error",
                 message="failed to build owner console diagnostics snapshot",
-                details={"error_type": type(exc).__name__},
-                http_api_enabled=True,
+                exc=exc,
             )
-            return JSONResponse(status_code=500, content=payload)
-        return owner_console_http_success_response(
+        return _owner_console_success(
             "diagnostics",
             diagnostics,
-            http_api_enabled=True,
         )
 
     return app

@@ -2997,6 +2997,54 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 6 tests OK
 ```
 
+## v1.6 Owner Console FastAPI adapter glue cleanup
+
+状态：已落地 P2.26。目标是在不新增接口、不改变 HTTP 行为的前提下，收敛 `owner_console_fastapi_app.py` 中重复的成功 envelope、错误 envelope 和 runtime 装配胶水，让 FastAPI 层继续保持薄 adapter。
+
+本次完成：
+
+```text
+更新 src/plugins/ai_chat/owner_console_fastapi_app.py：
+  新增 _owner_console_runtime_from_config。
+  新增 _owner_console_success。
+  新增 _owner_console_error_response。
+  新增 _owner_console_adapter_error。
+  新增 _owner_console_internal_error。
+
+各 endpoint 仍保留显式路由函数和显式参数解析。
+重复的 owner_console_http_success_response / owner_console_http_error_response 调用收敛到本地 helper。
+OwnerConsoleHttpAdapterError 的 status_code、code、message、details 透传语义保持不变。
+task / approval detail 的 404 not_found envelope 保持不变。
+```
+
+边界：
+
+```text
+不新增 endpoint。
+不改变 RESTful path。
+不改变 query 参数。
+不改变 HTTP status code。
+不改变 response envelope。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不写前端。
+不引入 QQ / NoneBot adapter 依赖。
+不触碰 owner_write_runtime。
+```
+
+测试：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_app -v
+Ran 14 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_http_contract tests.test_owner_console_read_runtime -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 317 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
