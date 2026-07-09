@@ -4103,6 +4103,96 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Settings data
+
+状态：已落地 P2.35 第四刀。目标是在访问控制页之后接入设置页真实只读数据，让 `/owner-console/settings` 可以读取 `/api/v1/owner-console/settings` 并展示模型配置、Embedding、功能开关、角色卡摘要和运行边界。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleModelConfigSnapshot。
+  增加 OwnerConsoleRoleCardRow。
+  增加 OwnerConsoleSettingsSnapshot。
+  增加 OwnerConsoleSettingsEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /settings。
+  新增 getSettings()。
+
+新增 web/owner-console/src/pages/SettingsPage.tsx：
+  读取 GET /api/v1/owner-console/settings。
+  展示聊天模型、MainAgent 模型和 Embedding 配置。
+  API Key 只展示“已配置/未配置”。
+  Base URL 只展示后端返回的脱敏值。
+  展示功能开关。
+  展示角色卡 key/title 和当前启用项。
+  展示运行边界。
+  400 时中文提示检查设置快照请求。
+
+更新 App route：
+  /owner-console/settings 使用 SettingsPage。
+
+更新 app.css：
+  增加 feature-flag-grid。
+  增加 role-card-list / role-card-row 样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/settings。
+不展示 API Key 原文。
+不展示未脱敏 Base URL 密钥参数。
+不保存配置。
+不切换角色卡。
+不写 data/active-role-card.json。
+不修改功能开关。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/settings -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/settings
+  resource=settings
+  read_only=true
+  web_write_enabled=false
+  chat_model=deepseek-v4-flash
+  chat_api_key_configured=true
+  main_model=gpt-5.5
+  main_api_key_configured=true
+  embedding_model=bge-m3
+  embedding_api_key_configured=false
+  role_cards=2
+  active_role_card_key=aike
+  enable_main_agent=true
+  enable_agent_shell=false
+  enable_agent_web=false
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

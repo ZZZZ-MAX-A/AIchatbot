@@ -1,13 +1,13 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./AppShell";
-import { PlaceholderPage } from "./PlaceholderPage";
 import { AccessControlPage } from "../pages/AccessControlPage";
 import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { MemoryPage } from "../pages/MemoryPage";
+import { SettingsPage } from "../pages/SettingsPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
 import { TasksPage } from "../pages/TasksPage";
 
@@ -51,7 +51,7 @@ export function App() {
         />
         <Route
           path="/owner-console/settings"
-          element={<PlaceholderPage title="设置" />}
+          element={<SettingsPage />}
         />
         <Route path="*" element={<Navigate to="/owner-console" replace />} />
       </Route>

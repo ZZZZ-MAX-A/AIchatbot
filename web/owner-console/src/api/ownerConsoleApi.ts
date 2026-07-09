@@ -11,6 +11,7 @@ import type {
   OwnerConsoleMemoryEnvelope,
   OwnerConsoleOverviewEnvelope,
   OwnerConsoleRoutesEnvelope,
+  OwnerConsoleSettingsEnvelope,
   OwnerConsoleTaskDetailEnvelope,
   OwnerConsoleTaskListEnvelope,
 } from "./ownerConsoleTypes";
@@ -26,6 +27,7 @@ const allowedPaths = new Set([
   `${API_BASE}/diagnostics`,
   `${API_BASE}/memory`,
   `${API_BASE}/access-control`,
+  `${API_BASE}/settings`,
   `${API_BASE}/tasks`,
   `${API_BASE}/approvals`,
 ]);
@@ -184,6 +186,18 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleAccessControlEnvelope> {
     const envelope = await getJson<OwnerConsoleAccessControlEnvelope>(
       `${API_BASE}/access-control${buildQuery(params)}`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getSettings(signal?: AbortSignal): Promise<OwnerConsoleSettingsEnvelope> {
+    const envelope = await getJson<OwnerConsoleSettingsEnvelope>(
+      `${API_BASE}/settings`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
