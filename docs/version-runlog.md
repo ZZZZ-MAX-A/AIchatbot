@@ -3045,6 +3045,56 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 317 tests OK
 ```
 
+## v1.6 Owner Console FastAPI smoke runbook
+
+状态：已落地 P2.27。目标是在 Owner Console HTTP v0 完成只读 surface 和 adapter glue cleanup 后，补一份本地启动与 smoke 验证手册，避免后续调试时误用 QQ plugin 包路径启动，或把 404/405/403 边界误判为故障。
+
+本次完成：
+
+```text
+新增 docs/owner-console-fastapi-smoke-runbook.md。
+
+文档覆盖：
+  启动前检查。
+  推荐 Uvicorn 启动命令。
+  禁止直接使用 src.plugins.ai_chat.owner_console_fastapi_app:app。
+  /healthz smoke 检查。
+  /routes contract 检查。
+  access-control / settings / memory / diagnostics 非 context 快照检查。
+  overview / tasks / approvals owner context 端点检查。
+  /docs /redoc /openapi.json 关闭检查。
+  POST 写方法 405 检查。
+  Owner Console 相关 unittest 回归命令。
+  import boundary 自检。
+  常见问题排查。
+
+更新 docs/owner-console-http-surface-audit.md：
+  增加 P2.27 smoke runbook 链接。
+```
+
+边界：
+
+```text
+不新增 endpoint。
+不修改 FastAPI 运行时代码。
+不启动常驻服务。
+不写前端。
+不新增登录/鉴权。
+不开放 Web 写操作。
+不改变 QQ / NoneBot adapter。
+不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+```
+
+测试：
+
+```text
+git diff --check
+OK，仅有 Windows LF/CRLF 提示
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
