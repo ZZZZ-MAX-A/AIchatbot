@@ -42,6 +42,37 @@ npm install
 npm run dev
 ```
 
+本地静态模式：
+
+```powershell
+cd D:\AIchatbot\web\owner-console
+npm run build
+
+cd D:\AIchatbot
+$env:OWNER_CONSOLE_STATIC_ENABLED='true'
+$env:OWNER_CONSOLE_STATIC_DIR='web/owner-console/dist'
+.\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+```
+
+一键后台启动本地静态模式：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-owner-console.ps1
+```
+
+如果还没有构建前端：
+
+```powershell
+.\scripts\start-owner-console.ps1 -Build
+```
+
+停止后台控制台：
+
+```powershell
+.\scripts\stop-owner-console.ps1
+```
+
 只读边界检查：
 
 ```powershell
@@ -53,6 +84,9 @@ npm run guard:readonly
 
 ```text
 http://127.0.0.1:5173/owner-console
+
+静态模式：
+http://127.0.0.1:8090/owner-console
 ```
 
 完整本地使用手册和排障流程见：

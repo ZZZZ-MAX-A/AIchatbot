@@ -156,6 +156,81 @@ npm run dev
 /api/v1/owner-console -> http://127.0.0.1:8090/api/v1/owner-console
 ```
 
+## 5.1 本地静态模式
+
+如果只想本地打开控制台，而不单独启动 Vite dev server，可以先构建前端：
+
+```powershell
+cd D:\AIchatbot\web\owner-console
+npm run build
+```
+
+然后打开新的 PowerShell，从项目根目录启动带静态页面的 FastAPI：
+
+```powershell
+cd D:\AIchatbot
+$env:OWNER_CONSOLE_STATIC_ENABLED='true'
+$env:OWNER_CONSOLE_STATIC_DIR='web/owner-console/dist'
+.\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+```
+
+访问：
+
+```text
+http://127.0.0.1:8090/owner-console
+```
+
+更方便的后台启动方式：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-owner-console.ps1
+```
+
+如果还没有构建前端，可以让脚本先构建：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-owner-console.ps1 -Build
+```
+
+脚本会：
+
+```text
+检查 .venv\Scripts\python.exe 是否存在。
+检查 8090 是否已被占用。
+检查 web/owner-console/dist/index.html 是否存在。
+设置 OWNER_CONSOLE_STATIC_ENABLED=true。
+设置 OWNER_CONSOLE_STATIC_DIR=web/owner-console/dist。
+后台隐藏启动 uvicorn。
+写日志到 logs/owner-console.out.log 和 logs/owner-console.err.log。
+```
+
+停止后台控制台：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\stop-owner-console.ps1
+```
+
+需要前台调试时：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-owner-console.ps1 -Foreground
+```
+
+边界：
+
+```text
+/api/v1/owner-console/* 仍然只返回 JSON API。
+/owner-console/* 只服务前端页面或静态资源。
+/owner-console/tasks/1 刷新时会 fallback 到 index.html。
+/owner-console/assets/missing.js 返回 404，不 fallback。
+/docs、/redoc、/openapi.json 仍然关闭。
+静态页面仍只能调用 GET allowlist。
+```
+
 ## 6. 手动验收顺序
 
 建议按这个顺序看页面：
@@ -326,9 +401,29 @@ npm install
 netstat -ano | Select-String ':5173'
 ```
 
-### build 后打开 dist 没有数据
+### build 后直接打开 dist 没有数据
 
-当前 v0 日常开发使用 Vite dev server 的 proxy。`npm run build` 只用于构建验证，不代表已经完成静态部署。是否由 FastAPI 挂载 `dist`、是否需要反向代理，留到 P2.39 单独讨论。
+不要直接双击打开 `web/owner-console/dist/index.html`。当前本地静态模式需要由 FastAPI 服务：
+
+```powershell
+cd D:\AIchatbot
+$env:OWNER_CONSOLE_STATIC_ENABLED='true'
+$env:OWNER_CONSOLE_STATIC_DIR='web/owner-console/dist'
+.\.venv\Scripts\python.exe -m uvicorn src.owner_console_fastapi_launcher:app --host 127.0.0.1 --port 8090
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:8090/owner-console
+```
+
+或者直接使用脚本：
+
+```powershell
+cd D:\AIchatbot
+.\scripts\start-owner-console.ps1 -Build
+```
 
 ## 10. 相关文档
 
@@ -350,7 +445,8 @@ web/owner-console/README.md
 
 ```text
 P2.39：本地部署方式设计，见 docs/web-owner-console-local-deployment-design.md。
-P2.39a：按设计实现可选本地静态模式。
+P2.39a：按设计实现可选本地静态模式。已完成。
+P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
 P2.40：设计只读自动刷新策略。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：单独设计 Web 审批操作，不能直接在 v0 只读页面上加按钮。

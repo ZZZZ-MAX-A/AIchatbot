@@ -1,6 +1,8 @@
 # Web Owner Console local deployment design
 
-本文记录 P2.39 Web Owner Console 本地部署方式设计。当前阶段只做设计，不修改 FastAPI app、不修改 Vite 配置、不生成前端构建产物、不接登录/鉴权、不开放 Web 写操作。
+本文记录 P2.39 Web Owner Console 本地部署方式设计。P2.39a 已按本文实现第一版可选本地静态模式：开发模式继续保留，显式打开 `OWNER_CONSOLE_STATIC_ENABLED=true` 时，FastAPI 可以把 `web/owner-console/dist` 服务到 `/owner-console`。
+
+当前仍不接登录/鉴权、不开放 Web 写操作、不提交前端构建产物。
 
 ## 1. 设计结论
 
@@ -21,7 +23,7 @@
   访问 http://127.0.0.1:8090/owner-console。
 ```
 
-当前更推荐先实现“可选本地静态模式”，而不是替换开发模式。开发调试继续用 Vite；日常本地查看可以由 FastAPI 统一服务 API 和前端页面。
+P2.39a 已实现“可选本地静态模式”，而不是替换开发模式。开发调试继续用 Vite；日常本地查看可以由 FastAPI 统一服务 API 和前端页面。
 
 ## 2. 当前保持不变
 
@@ -147,7 +149,7 @@ POST /owner-console/... fallback 到 index.html。
 
 ## 6. 静态模式开关
 
-推荐未来实现时加显式开关，避免当前 smoke app 默认行为突然变化：
+当前实现使用显式开关，避免 smoke app 默认行为突然变化：
 
 ```text
 OWNER_CONSOLE_STATIC_ENABLED=false
@@ -174,7 +176,7 @@ true：
 GET /owner-console -> 503 static build not found
 ```
 
-或者启动时直接拒绝启动。两者都可以，后续实现前再选；我更偏向启动时拒绝，因为本地部署问题会更早暴露。
+或者启动时直接拒绝启动。P2.39a 选择启动时拒绝，因为本地部署问题会更早暴露。
 
 ## 7. 只读 API allowlist
 
@@ -235,25 +237,25 @@ v0 不做公网部署，也不需要给第三方开发者探索 API。
 
 ## 9. 推荐实现步骤
 
-后续如果要从设计进入实现，建议分四刀：
+P2.39a 已按以下拆分实现第一版：
 
 ```text
-第一刀：前端构建 base
+第一刀：前端构建 base，已完成
   配置 Vite build base=/owner-console/。
   验证 npm run build 后资源路径正确。
 
-第二刀：FastAPI 静态挂载
+第二刀：FastAPI 静态挂载，已完成
   增加显式静态模式开关。
   /owner-console 和 /owner-console/* 返回 index.html fallback。
   /owner-console/assets/* 返回真实静态资源。
 
-第三刀：路由冲突测试
+第三刀：路由冲突测试，已完成
   验证 /api/v1/owner-console/* 不受静态 fallback 影响。
   验证 /docs、/redoc、/openapi.json 仍是 404。
   验证 POST /api/v1/owner-console/* 仍是 405。
   验证缺失资产返回 404。
 
-第四刀：runbook 更新
+第四刀：runbook 更新，已完成
   增加本地静态模式启动命令。
   说明 dev mode 和 static mode 的选择。
 ```
@@ -301,11 +303,9 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 
 ## 11. 当前暂不做
 
-本阶段不做：
+当前仍不做：
 
 ```text
-不实现 FastAPI 静态挂载。
-不修改 Vite base。
 不新增启动脚本。
 不新增登录/鉴权。
 不新增写 endpoint。
@@ -405,7 +405,8 @@ POST /owner-console/... 不应被当作页面请求处理。
 建议后续路线：
 
 ```text
-P2.39a：按本文实现可选本地静态模式。
+P2.39a：按本文实现可选本地静态模式。已完成。
+P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
 P2.40：设计只读自动刷新策略。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：设计 Web 审批操作。

@@ -39,8 +39,27 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        app = self.fastapi_app_module.create_owner_console_fastapi_app()
+        with patch.dict(
+            os.environ,
+            {"OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=False,
+        ):
+            app = self.fastapi_app_module.create_owner_console_fastapi_app()
         self.client = TestClient(app)
+
+    def build_static_dist(self, root: Path) -> Path:
+        dist = root / "dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        (dist / "index.html").write_text(
+            '<!doctype html><html lang="zh-CN"><body><div id="root"></div></body></html>',
+            encoding="utf-8",
+        )
+        (assets / "index-test.js").write_text(
+            "console.log('owner-console-static-ok');",
+            encoding="utf-8",
+        )
+        return dist
 
     def test_healthz_reports_read_only_smoke_app(self):
         response = self.client.get("/healthz")
@@ -136,6 +155,8 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
     def test_app_only_exposes_enabled_get_routes_without_writes(self):
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
         self.assertEqual(self.client.get("/docs").status_code, 404)
+        self.assertEqual(self.client.get("/owner-console").status_code, 404)
+        self.assertEqual(self.client.get("/owner-console/tasks/1").status_code, 404)
         self.assertEqual(self.client.post("/api/v1/owner-console/routes").status_code, 405)
         self.assertEqual(self.client.post("/api/v1/owner-console/overview").status_code, 405)
         self.assertEqual(self.client.post("/api/v1/owner-console/tasks").status_code, 405)
@@ -161,6 +182,72 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             self.client.post("/api/v1/owner-console/diagnostics").status_code,
             405,
         )
+
+    def test_optional_static_mode_serves_spa_without_touching_api_routes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist = self.build_static_dist(Path(temp_dir))
+            with patch.dict(
+                os.environ,
+                {
+                    "OWNER_CONSOLE_STATIC_ENABLED": "true",
+                    "OWNER_CONSOLE_STATIC_DIR": str(dist),
+                },
+                clear=True,
+            ):
+                app = self.fastapi_app_module.create_owner_console_fastapi_app()
+
+            client = TestClient(app)
+
+            for path in (
+                "/owner-console",
+                "/owner-console/",
+                "/owner-console/tasks",
+                "/owner-console/tasks/1",
+                "/owner-console/approvals/1",
+            ):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200, path)
+                self.assertIn("text/html", response.headers["content-type"])
+                self.assertIn('<div id="root"></div>', response.text)
+
+            asset_response = client.get("/owner-console/assets/index-test.js")
+            self.assertEqual(asset_response.status_code, 200)
+            self.assertIn("owner-console-static-ok", asset_response.text)
+
+            self.assertEqual(
+                client.get("/owner-console/assets/missing.js").status_code,
+                404,
+            )
+            self.assertEqual(client.post("/owner-console/tasks").status_code, 405)
+
+            api_response = client.get("/api/v1/owner-console/routes")
+            self.assertEqual(api_response.status_code, 200)
+            self.assertEqual(
+                api_response.headers["content-type"].split(";")[0],
+                "application/json",
+            )
+            self.assertEqual(api_response.json()["resource"], "routes")
+            self.assertEqual(
+                client.post("/api/v1/owner-console/tasks").status_code,
+                405,
+            )
+            self.assertEqual(client.get("/docs").status_code, 404)
+            self.assertEqual(client.get("/redoc").status_code, 404)
+            self.assertEqual(client.get("/openapi.json").status_code, 404)
+
+    def test_static_mode_requires_existing_dist_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_dist = Path(temp_dir) / "missing-dist"
+            with patch.dict(
+                os.environ,
+                {
+                    "OWNER_CONSOLE_STATIC_ENABLED": "true",
+                    "OWNER_CONSOLE_STATIC_DIR": str(missing_dist),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "static mode is enabled"):
+                    self.fastapi_app_module.create_owner_console_fastapi_app()
 
     def test_overview_endpoint_uses_owner_private_context_from_config(self):
         temp_dir, patcher = self.temp_database()

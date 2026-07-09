@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 
 from .agent_tasks import AGENT_APPROVAL_STATUSES, AGENT_TASK_STATUSES
-from .config import load_config
+from .config import PROJECT_ROOT, load_config
 from .owner_console_http_adapter import (
     OwnerConsoleHttpAdapterError,
     build_owner_console_context_from_config,
@@ -28,6 +30,10 @@ from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT
 
 
 OWNER_CONSOLE_FASTAPI_APP_TITLE = "AIchatbot Owner Console API"
+OWNER_CONSOLE_STATIC_PREFIX = "/owner-console"
+OWNER_CONSOLE_STATIC_ENABLED_ENV = "OWNER_CONSOLE_STATIC_ENABLED"
+OWNER_CONSOLE_STATIC_DIR_ENV = "OWNER_CONSOLE_STATIC_DIR"
+OWNER_CONSOLE_DEFAULT_STATIC_DIR = PROJECT_ROOT / "web" / "owner-console" / "dist"
 OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
     {
         "routes",
@@ -57,8 +63,50 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
 )
 
 
+def _owner_console_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _owner_console_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _owner_console_static_enabled() -> bool:
+    return _owner_console_bool_env(OWNER_CONSOLE_STATIC_ENABLED_ENV, False)
+
+
+def _owner_console_static_dir() -> Path:
+    configured = os.getenv(OWNER_CONSOLE_STATIC_DIR_ENV, "").strip()
+    if not configured:
+        return OWNER_CONSOLE_DEFAULT_STATIC_DIR.resolve()
+
+    path = Path(configured)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _owner_console_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _owner_console_prepare_static_dir() -> Path:
+    static_dir = _owner_console_static_dir()
+    index_file = static_dir / "index.html"
+    if not index_file.is_file():
+        raise RuntimeError(
+            "Owner Console static mode is enabled but "
+            f"{index_file} does not exist. Run npm run build in "
+            "web/owner-console or disable OWNER_CONSOLE_STATIC_ENABLED."
+        )
+    return static_dir
 
 
 def _owner_console_runtime_from_config(config: Any) -> Any:
@@ -183,6 +231,38 @@ def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
         main_agent_observation_lines=[],
         root_graph_observation_lines=[],
     )
+
+
+def _register_owner_console_static_routes(app: FastAPI, static_dir: Path) -> None:
+    index_file = static_dir / "index.html"
+    assets_dir = static_dir / "assets"
+
+    @app.get(OWNER_CONSOLE_STATIC_PREFIX, include_in_schema=False)
+    @app.get(f"{OWNER_CONSOLE_STATIC_PREFIX}/", include_in_schema=False)
+    async def owner_console_static_index() -> FileResponse:
+        return FileResponse(index_file, media_type="text/html")
+
+    @app.get(
+        f"{OWNER_CONSOLE_STATIC_PREFIX}/assets/{{asset_path:path}}",
+        include_in_schema=False,
+    )
+    async def owner_console_static_asset(asset_path: str) -> FileResponse:
+        asset_file = (assets_dir / asset_path).resolve()
+        if (
+            not _owner_console_is_relative_to(asset_file, assets_dir)
+            or not asset_file.is_file()
+        ):
+            raise HTTPException(status_code=404, detail="Owner Console asset not found")
+        return FileResponse(asset_file)
+
+    @app.get(
+        f"{OWNER_CONSOLE_STATIC_PREFIX}/{{client_path:path}}",
+        include_in_schema=False,
+    )
+    async def owner_console_static_fallback(client_path: str) -> FileResponse:
+        if client_path.startswith("assets/"):
+            raise HTTPException(status_code=404, detail="Owner Console asset not found")
+        return FileResponse(index_file, media_type="text/html")
 
 
 def create_owner_console_fastapi_app() -> FastAPI:
@@ -547,6 +627,12 @@ def create_owner_console_fastapi_app() -> FastAPI:
         return _owner_console_success(
             "diagnostics",
             diagnostics,
+        )
+
+    if _owner_console_static_enabled():
+        _register_owner_console_static_routes(
+            app,
+            _owner_console_prepare_static_dir(),
         )
 
     return app
