@@ -109,6 +109,12 @@ export type OwnerConsoleApprovalActionability = {
   future_operation_only: boolean;
 };
 
+export type OwnerConsoleToolInputPreview = {
+  preview_json: string;
+  redacted: boolean;
+  truncated: boolean;
+};
+
 export type OwnerConsoleApprovalRow = {
   approval_id: number;
   task_id: number;
@@ -212,6 +218,19 @@ export type OwnerConsoleApprovalList = {
 
 export type OwnerConsoleApprovalListEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleApprovalList>;
+
+export type OwnerConsoleApprovalDetail = {
+  generated_at: string;
+  approval: OwnerConsoleApprovalRow;
+  reason: string;
+  tool_input: OwnerConsoleToolInputPreview;
+  task: OwnerConsoleTaskRow | null;
+  recent_events: OwnerConsoleTaskEventRow[];
+  boundary: OwnerConsoleRuntimeBoundary;
+};
+
+export type OwnerConsoleApprovalDetailEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleApprovalDetail>;
 
 export type OwnerConsoleSnapshot = {
   health: OwnerConsoleHealth | null;

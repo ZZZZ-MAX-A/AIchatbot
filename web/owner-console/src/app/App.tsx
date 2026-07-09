@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./AppShell";
 import { PlaceholderPage } from "./PlaceholderPage";
+import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
@@ -31,7 +32,7 @@ export function App() {
         />
         <Route
           path="/owner-console/approvals/:approval_id"
-          element={<PlaceholderPage title="审批详情" />}
+          element={<ApprovalDetailPage />}
         />
         <Route
           path="/owner-console/diagnostics"
