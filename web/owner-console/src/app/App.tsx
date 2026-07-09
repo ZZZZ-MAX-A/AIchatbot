@@ -6,6 +6,7 @@ import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
+import { MemoryPage } from "../pages/MemoryPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
 import { TasksPage } from "../pages/TasksPage";
 
@@ -41,7 +42,7 @@ export function App() {
         />
         <Route
           path="/owner-console/memory"
-          element={<PlaceholderPage title="记忆" />}
+          element={<MemoryPage />}
         />
         <Route
           path="/owner-console/access-control"

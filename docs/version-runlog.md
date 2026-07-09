@@ -3929,6 +3929,98 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Memory data
+
+状态：已落地 P2.35 第二刀。目标是在诊断页之后接入记忆页真实只读数据，让 `/owner-console/memory` 可以读取 `/api/v1/owner-console/memory` 并展示 Memory / MemoryRAG / ProjectDocRAG 的计数、配置和隐私边界。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleMemoryCounts。
+  增加 OwnerConsoleMemoryContextPolicy。
+  增加 OwnerConsoleMemoryRagSnapshot。
+  增加 OwnerConsoleProjectDocRagSnapshot。
+  增加 OwnerConsoleMemorySnapshot。
+  增加 OwnerConsoleMemoryEnvelope。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /memory。
+  新增 getMemory()。
+
+新增 web/owner-console/src/pages/MemoryPage.tsx：
+  读取 GET /api/v1/owner-console/memory。
+  展示消息、会话、会话摘要、长期记忆等计数。
+  展示 RAG 文档、RAG 向量、场景摘要等详细计数。
+  展示上下文策略。
+  展示 MemoryRAG 配置。
+  展示 ProjectDocRAG 配置。
+  展示记忆正文、项目文档正文、检索、索引重建等隐私边界状态。
+  403 时中文提示检查 BOT_OWNER_QQ。
+  400 时中文提示检查记忆快照请求。
+
+更新 App route：
+  /owner-console/memory 使用 MemoryPage。
+
+更新 app.css：
+  增加 detail-list 样式，用于配置型只读字段展示。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/memory。
+不展示 messages.content。
+不展示 long_term_memories.content。
+不展示 rag_documents.content。
+不执行 MemoryRAG 检索。
+不执行 ProjectDocRAG 检索。
+不重建索引。
+不新增记忆。
+不删除记忆。
+不修改配置。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/memory -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/memory
+  resource=memory
+  read_only=true
+  web_write_enabled=false
+  message_count=384
+  session_count=5
+  manual_memory_count=13
+  rag_document_count=977
+  memory_content_exposed=false
+  project_doc_content_exposed=false
+  retrieval_executed=false
+  index_rebuild_executed=false
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
