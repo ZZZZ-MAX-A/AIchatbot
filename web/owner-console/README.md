@@ -1,10 +1,19 @@
 # Owner Console frontend
 
-Owner Console 前端是 AIchatbot 的本地只读主人控制台。当前第一版只接入：
+Owner Console 前端是 AIchatbot 的本地只读主人控制台。当前 v0 主导航页面已经接入：
 
 ```text
 GET /healthz
 GET /api/v1/owner-console/routes
+GET /api/v1/owner-console/overview
+GET /api/v1/owner-console/tasks
+GET /api/v1/owner-console/tasks/{task_id}
+GET /api/v1/owner-console/approvals
+GET /api/v1/owner-console/approvals/{approval_id}
+GET /api/v1/owner-console/diagnostics
+GET /api/v1/owner-console/memory
+GET /api/v1/owner-console/access-control
+GET /api/v1/owner-console/settings
 ```
 
 边界：
@@ -31,6 +40,13 @@ cd D:\AIchatbot
 cd D:\AIchatbot\web\owner-console
 npm install
 npm run dev
+```
+
+只读边界检查：
+
+```powershell
+cd D:\AIchatbot\web\owner-console
+npm run guard:readonly
 ```
 
 访问：
