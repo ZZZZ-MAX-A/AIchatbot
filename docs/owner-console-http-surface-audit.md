@@ -19,6 +19,12 @@ Owner Console HTTP v0 已经具备完整只读资源面。
 docs/owner-console-fastapi-smoke-runbook.md
 ```
 
+未来只读前端壳的页面到 API 映射见：
+
+```text
+docs/web-owner-console-read-only-shell-design.md
+```
+
 ## 1. 实现定位
 
 Owner Console HTTP v0 是 Web Owner Console read model 的本地 HTTP adapter。它只负责：

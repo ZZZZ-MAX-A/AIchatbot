@@ -3095,6 +3095,71 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console read-only shell design
+
+状态：已落地 P2.28 设计文档。目标是在真正写前端之前，先把未来只读页面壳如何消费现有 Owner Console HTTP GET endpoints 定清楚，避免前端实现时把登录、写操作、审批恢复或 diagnostics 主动探测混进第一版。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-read-only-shell-design.md。
+
+文档覆盖：
+  Web Owner Console read-only shell 定位。
+  App Shell 范围。
+  Dashboard / Tasks / Task Detail / Approvals / Approval Detail 页面映射。
+  Diagnostics / Memory / Access Control / Settings 页面映射。
+  API 到页面 mapping table。
+  HTTP envelope handling 规则。
+  loading / empty / error / forbidden / not_found / contract_mismatch 状态模型。
+  前端 ownerConsoleApi 命名建议。
+  显式刷新策略。
+  安全与隐私检查清单。
+  第一版完成标准。
+  后续路线。
+
+更新 docs/web-owner-console-read-model-design.md：
+  补充 P2.28 只读前端壳设计链接。
+
+更新 docs/owner-console-http-surface-audit.md：
+  补充 P2.28 页面到 API 映射链接。
+```
+
+边界：
+
+```text
+不实现真实前端。
+不新增 endpoint。
+不修改 FastAPI 运行时代码。
+不新增登录/鉴权。
+不开放 Web 写操作。
+不新增审批确认/拒绝入口。
+不触发 MainAgent。
+不触发 MemoryRAG / ProjectDocRAG 检索。
+不触发 diagnostics 主动探测。
+不改变 QQ / NoneBot adapter。
+```
+
+设计结论：
+
+```text
+第一版前端壳只允许调用 GET。
+第一版只做显式刷新，不做自动轮询。
+第一版必须检查 read_only=true、http_api_enabled=true、web_write_enabled=false。
+actionability 只能作为只读展示；不能绑定真实 click handler。
+如果未来需要 approve/reject，必须单独设计 POST endpoint、鉴权和审计。
+```
+
+测试：
+
+```text
+git diff --check
+OK，仅有 Windows LF/CRLF 提示
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

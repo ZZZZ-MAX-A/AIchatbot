@@ -2,7 +2,7 @@
 
 本文记录 P2.6 Web Owner Console read-model 设计。当前阶段只做设计，不写前端、不接 HTTP、不做登录鉴权、不改数据库 schema、不改变 `/agent`、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
 
-后续实现状态：P2.16-P2.24 已经基于本文的 read model 落地本地只读 FastAPI adapter。P2.6 的“不接 HTTP”描述指当时的设计阶段边界；当前 HTTP surface 审计见 `docs/owner-console-http-surface-audit.md`。截至该审计，Owner Console 仍不做前端、不做登录鉴权、不开放 Web 写操作。
+后续实现状态：P2.16-P2.24 已经基于本文的 read model 落地本地只读 FastAPI adapter。P2.6 的“不接 HTTP”描述指当时的设计阶段边界；当前 HTTP surface 审计见 `docs/owner-console-http-surface-audit.md`。P2.28 已补充未来只读前端壳的页面到 API 映射，见 `docs/web-owner-console-read-only-shell-design.md`。截至该设计，Owner Console 仍不做真实前端、不做登录鉴权、不开放 Web 写操作。
 
 ## 1. Web Owner Console v0 定位
 
