@@ -4255,6 +4255,50 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console v0 runbook
+
+状态：已落地 P2.38。目标是把 Web Owner Console v0 的后端启动、前端启动、页面验收、只读边界、自动化验证和常见问题整理成一份本地使用手册，方便后续继续做部署、鉴权或审批操作前有稳定基线。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-v0-runbook.md：
+  记录 Web Owner Console v0 定位。
+  记录当前页面和详情页范围。
+  记录后端 FastAPI launcher 启动方式。
+  记录前端 Vite dev server 启动方式。
+  记录页面手动验收顺序。
+  记录 guard/typecheck/build/audit 和后端 HTTP contract 验证组合。
+  记录只读边界和禁止加入的写入口。
+  记录 backend disconnected、403、404、/docs 404、5173 端口占用等常见排障。
+
+更新 web/owner-console/README.md：
+  增加完整 runbook 引用。
+```
+
+边界：
+
+```text
+不修改 FastAPI 代码。
+不修改 React 代码。
+不新增接口。
+不新增前端写操作。
+不新增登录/鉴权。
+不改变 QQ / NoneBot / /agent 行为。
+```
+
+验证：
+
+```text
+文档更新，无运行时代码改动。
+P2.37 提交前已通过：
+  npm run guard:readonly
+  npm run typecheck
+  npm run build
+  npm audit
+  owner console 后端 HTTP contract 20 tests OK
+```
+
 ## v1.6 Web Owner Console frontend contract guard
 
 状态：已落地 P2.37。目标是把 P2.36 的人工前端只读审计固化成本地自动检查，避免后续新增页面或 API client 时无意间扩大 Web Owner Console v0 的能力边界。

@@ -54,3 +54,9 @@ npm run guard:readonly
 ```text
 http://127.0.0.1:5173/owner-console
 ```
+
+完整本地使用手册和排障流程见：
+
+```text
+docs/web-owner-console-v0-runbook.md
+```
