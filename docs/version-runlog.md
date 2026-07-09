@@ -3854,6 +3854,81 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Diagnostics data
+
+状态：已落地 P2.35 第一刀。目标是在任务/审批主链路之后接入诊断页真实只读数据，让 `/owner-console/diagnostics` 可以读取 `/api/v1/owner-console/diagnostics` 并展示当前 Owner Console 可见的系统诊断快照。
+
+本次完成：
+
+```text
+新增 web/owner-console/src/pages/DiagnosticsPage.tsx：
+  读取 GET /api/v1/owner-console/diagnostics。
+  展示快照时间、机器人状态、最近错误状态。
+  展示机器人状态、诊断状态、配置状态、视觉状态、图片缓存、记忆状态、语音状态、最近错误。
+  展示 MainAgent 观测和 RootGraph 观测。
+  展示运行边界。
+  403 时中文提示检查 BOT_OWNER_QQ。
+  400 时中文提示检查诊断快照请求。
+
+更新 App route：
+  /owner-console/diagnostics 使用 DiagnosticsPage。
+
+更新 app.css：
+  增加 diagnostic card grid。
+  增加 diagnostic card / diagnostic lines / empty line 样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/diagnostics。
+不主动运行诊断探测。
+不测试模型。
+不读取新的图片。
+不清理缓存。
+不清理错误日志。
+不重建索引。
+不修改配置。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console/diagnostics -> 200
+
+GET http://127.0.0.1:5173/api/v1/owner-console/diagnostics
+  resource=diagnostics
+  read_only=true
+  web_write_enabled=false
+  bot_status_lines=4
+  diagnostics_lines=4
+  memory_lines=11
+  recent_errors_ok=true
+  main_agent_observations=0
+  root_graph_observations=0
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。

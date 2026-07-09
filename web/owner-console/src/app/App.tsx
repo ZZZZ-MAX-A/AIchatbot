@@ -5,6 +5,7 @@ import { PlaceholderPage } from "./PlaceholderPage";
 import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
+import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
 import { TasksPage } from "../pages/TasksPage";
 
@@ -36,7 +37,7 @@ export function App() {
         />
         <Route
           path="/owner-console/diagnostics"
-          element={<PlaceholderPage title="诊断" />}
+          element={<DiagnosticsPage />}
         />
         <Route
           path="/owner-console/memory"
