@@ -13,6 +13,12 @@ Owner Console HTTP v0 已经具备完整只读资源面。
 它仍然不改变 /agent、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
 ```
 
+本地启动和 smoke 验证流程见：
+
+```text
+docs/owner-console-fastapi-smoke-runbook.md
+```
+
 ## 1. 实现定位
 
 Owner Console HTTP v0 是 Web Owner Console read model 的本地 HTTP adapter。它只负责：
@@ -594,4 +600,3 @@ Ran 19 tests OK
 $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 Ran 317 tests OK
 ```
-
