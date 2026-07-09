@@ -3451,6 +3451,87 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console Dashboard data
+
+状态：已落地 P2.32 第一刀。目标是在已有中文 App Shell 上接入概览页真实只读数据，先读取 `/overview` 和 `/diagnostics`，让页面能看到任务/审批计数、最近任务、待审批摘要、运行边界和轻量诊断状态。
+
+本次完成：
+
+```text
+更新 web/owner-console/src/api/ownerConsoleTypes.ts：
+  增加 OwnerConsoleOverview / counters / task row / approval row 类型。
+  增加 OwnerConsoleHealthSnapshot / text section / observation 类型。
+  增加 overview 和 diagnostics envelope 类型。
+
+更新 web/owner-console/src/api/ownerConsoleApi.ts：
+  只读 allowlist 增加 /overview 和 /diagnostics。
+  新增 getOverview({ task_limit, approval_limit })。
+  新增 getDiagnostics()。
+  增加 OwnerConsoleApiError，用于保留 HTTP status、error code 和 details。
+
+新增 web/owner-console/src/pages/DashboardPage.tsx：
+  并行读取 overview 和 diagnostics。
+  overview 失败时用中文错误态展示，diagnostics 仍可独立展示。
+  403 时提示检查 BOT_OWNER_QQ。
+  展示待处理任务、失败任务、待审批、网页写入状态。
+  展示最近任务表、待审批表、运行边界、轻量诊断分区。
+
+新增 web/owner-console/src/components/ErrorState.tsx。
+更新 App route：/owner-console 使用 DashboardPage。
+更新 app.css：增加 dashboard、metric、compact table、diagnostic section、error/loading 状态样式。
+```
+
+边界：
+
+```text
+只调用 GET /api/v1/owner-console/overview。
+只调用 GET /api/v1/owner-console/diagnostics。
+不接任务详情。
+不接审批详情。
+不显示审批确认/拒绝按钮。
+不新增 FastAPI endpoint。
+不修改 FastAPI 运行时代码。
+不开放 Web 写操作。
+不新增登录/鉴权。
+不触发 MainAgent。
+不触发 diagnostics 主动探测。
+```
+
+本地 smoke：
+
+```text
+GET http://127.0.0.1:5173/owner-console -> 200
+GET http://127.0.0.1:5173/api/v1/owner-console/overview?task_limit=5&approval_limit=5
+  resource=overview
+  read_only=true
+  web_write_enabled=false
+  pending_tasks=9
+  pending_approvals=2
+
+GET http://127.0.0.1:5173/api/v1/owner-console/diagnostics
+  resource=diagnostics
+  read_only=true
+  web_write_enabled=false
+  bot_status_lines=4
+  diagnostics_lines=4
+```
+
+测试：
+
+```text
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 20 tests OK
+```
+
 ## v0.1 基础聊天
 
 状态：已落地。
