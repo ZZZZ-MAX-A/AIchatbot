@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         cls.memory_modules = load_legacy_memory_modules()
         cls.database = cls.memory_modules["database"]
         cls.agent_tasks = cls.memory_modules["agent_tasks"]
+        cls.memory = cls.memory_modules["memory"]
         cls.fastapi_app_module = load_module(
             "src.plugins.ai_chat.owner_console_fastapi_app",
             AI_CHAT_ROOT / "owner_console_fastapi_app.py",
@@ -59,7 +61,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/routes",
                 "/api/v1/owner-console/overview",
                 "/api/v1/owner-console/tasks",
+                "/api/v1/owner-console/tasks/{task_id}",
                 "/api/v1/owner-console/approvals",
+                "/api/v1/owner-console/approvals/{approval_id}",
+                "/api/v1/owner-console/access-control",
+                "/api/v1/owner-console/settings",
+                "/api/v1/owner-console/memory",
+                "/api/v1/owner-console/diagnostics",
             ],
         )
 
@@ -106,13 +114,20 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["overview"]["http_api_enabled"])
         self.assertTrue(rows["tasks"]["http_api_enabled"])
         self.assertTrue(rows["approvals"]["http_api_enabled"])
-        self.assertFalse(rows["tasks.detail"]["http_api_enabled"])
-        self.assertFalse(rows["approvals.detail"]["http_api_enabled"])
+        self.assertTrue(rows["tasks.detail"]["http_api_enabled"])
+        self.assertTrue(rows["approvals.detail"]["http_api_enabled"])
+        self.assertTrue(rows["access-control"]["http_api_enabled"])
+        self.assertTrue(rows["settings"]["http_api_enabled"])
+        self.assertTrue(rows["memory"]["http_api_enabled"])
+        self.assertTrue(rows["diagnostics"]["http_api_enabled"])
         self.assertEqual(rows["tasks.detail"]["path_params"], ["task_id"])
         self.assertEqual(
             rows["approvals.detail"]["path_params"],
             ["approval_id"],
         )
+        self.assertFalse(rows["access-control"]["requires_context"])
+        self.assertEqual(rows["access-control"]["query_params"], ["item_limit"])
+        self.assertFalse(rows["settings"]["requires_context"])
         self.assertFalse(
             data["boundary"]["ordinary_chat_can_trigger_main_agent"]
         )
@@ -125,10 +140,26 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(self.client.post("/api/v1/owner-console/overview").status_code, 405)
         self.assertEqual(self.client.post("/api/v1/owner-console/tasks").status_code, 405)
         self.assertEqual(self.client.post("/api/v1/owner-console/approvals").status_code, 405)
-        self.assertEqual(self.client.get("/api/v1/owner-console/tasks/1").status_code, 404)
+        self.assertEqual(self.client.post("/api/v1/owner-console/tasks/1").status_code, 405)
         self.assertEqual(
             self.client.post("/api/v1/owner-console/approvals/1").status_code,
-            404,
+            405,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/owner-console/access-control").status_code,
+            405,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/owner-console/settings").status_code,
+            405,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/owner-console/memory").status_code,
+            405,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/owner-console/diagnostics").status_code,
+            405,
         )
 
     def test_overview_endpoint_uses_owner_private_context_from_config(self):
@@ -326,6 +357,483 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(limit_payload["error"]["code"], "bad_request")
         self.assertEqual(limit_payload["error"]["details"]["field"], "limit")
         self.assertFalse(limit_payload["web_write_enabled"])
+
+    def test_detail_endpoints_use_owner_context_limits_and_not_found(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_PRIVATE_CHAT": "true",
+                "ENABLE_GROUP_CHAT": "true",
+            },
+            clear=True,
+        ):
+            owner_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="owner task detail goal",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=owner_task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"clear_error_log"}',
+                risk_level="write_local",
+                reason="clear detail errors",
+            )
+            other_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:20002",
+                user_id="20002",
+                goal="other task detail goal",
+            )
+            other_approval_id = self.agent_tasks.create_agent_approval(
+                task_id=other_task_id,
+                tool_name="owner_write_command",
+                tool_input_json='{"command":"clear_image_cache"}',
+                risk_level="write_local",
+                reason="other detail approval",
+            )
+
+            task_response = self.client.get(
+                f"/api/v1/owner-console/tasks/{owner_task_id}"
+                "?event_limit=1&preview_limit=240"
+            )
+            approval_response = self.client.get(
+                f"/api/v1/owner-console/approvals/{approval_id}"
+                "?event_limit=1&preview_limit=240"
+            )
+            other_task_response = self.client.get(
+                f"/api/v1/owner-console/tasks/{other_task_id}"
+            )
+            other_approval_response = self.client.get(
+                f"/api/v1/owner-console/approvals/{other_approval_id}"
+            )
+
+        self.assertEqual(task_response.status_code, 200)
+        task_payload = task_response.json()
+        self.assertEqual(task_payload["resource"], "tasks")
+        self.assertTrue(task_payload["read_only"])
+        self.assertTrue(task_payload["http_api_enabled"])
+        self.assertFalse(task_payload["web_write_enabled"])
+        self.assertIsNone(task_payload["error"])
+        task_data = task_payload["data"]
+        self.assertEqual(task_data["task"]["task_id"], owner_task_id)
+        self.assertEqual(task_data["goal"], "owner task detail goal")
+        self.assertEqual([row["kind"] for row in task_data["events"]], ["created"])
+        self.assertEqual(
+            [row["approval_id"] for row in task_data["approvals"]],
+            [approval_id],
+        )
+        self.assertFalse(
+            task_data["boundary"]["ordinary_chat_can_trigger_main_agent"]
+        )
+
+        self.assertEqual(approval_response.status_code, 200)
+        approval_payload = approval_response.json()
+        self.assertEqual(approval_payload["resource"], "approvals")
+        self.assertTrue(approval_payload["read_only"])
+        self.assertTrue(approval_payload["http_api_enabled"])
+        self.assertFalse(approval_payload["web_write_enabled"])
+        self.assertIsNone(approval_payload["error"])
+        approval_data = approval_payload["data"]
+        self.assertEqual(approval_data["approval"]["approval_id"], approval_id)
+        self.assertEqual(approval_data["approval"]["task_id"], owner_task_id)
+        self.assertEqual(approval_data["reason"], "clear detail errors")
+        self.assertIn(
+            "clear_error_log",
+            approval_data["tool_input"]["preview_json"],
+        )
+        self.assertEqual(approval_data["task"]["task_id"], owner_task_id)
+        self.assertEqual(
+            [row["kind"] for row in approval_data["recent_events"]],
+            ["created"],
+        )
+
+        self.assertEqual(other_task_response.status_code, 404)
+        self.assertEqual(
+            other_task_response.json()["error"]["details"],
+            {"task_id": other_task_id},
+        )
+        self.assertEqual(other_approval_response.status_code, 404)
+        self.assertEqual(
+            other_approval_response.json()["error"]["details"],
+            {"approval_id": other_approval_id},
+        )
+
+    def test_detail_endpoints_validate_ids_limits_and_owner(self):
+        with patch.dict(os.environ, {}, clear=True):
+            missing_owner = self.client.get("/api/v1/owner-console/tasks/1")
+
+        self.assertEqual(missing_owner.status_code, 403)
+        self.assertEqual(missing_owner.json()["error"]["code"], "forbidden")
+
+        with patch.dict(os.environ, {"BOT_OWNER_QQ": "10001"}, clear=True):
+            invalid_task_id = self.client.get(
+                "/api/v1/owner-console/tasks/not-a-number"
+            )
+            invalid_approval_id = self.client.get(
+                "/api/v1/owner-console/approvals/0"
+            )
+            invalid_event_limit = self.client.get(
+                "/api/v1/owner-console/approvals/1?event_limit=0"
+            )
+            invalid_preview_limit = self.client.get(
+                "/api/v1/owner-console/tasks/1?preview_limit=abc"
+            )
+
+        self.assertEqual(invalid_task_id.status_code, 400)
+        task_id_payload = invalid_task_id.json()
+        self.assertEqual(task_id_payload["resource"], "tasks")
+        self.assertEqual(task_id_payload["error"]["code"], "bad_request")
+        self.assertEqual(task_id_payload["error"]["details"]["field"], "task_id")
+
+        self.assertEqual(invalid_approval_id.status_code, 400)
+        approval_id_payload = invalid_approval_id.json()
+        self.assertEqual(approval_id_payload["resource"], "approvals")
+        self.assertEqual(approval_id_payload["error"]["code"], "bad_request")
+        self.assertEqual(
+            approval_id_payload["error"]["details"]["field"],
+            "approval_id",
+        )
+
+        self.assertEqual(invalid_event_limit.status_code, 400)
+        event_limit_payload = invalid_event_limit.json()
+        self.assertEqual(event_limit_payload["resource"], "approvals")
+        self.assertEqual(
+            event_limit_payload["error"]["details"]["field"],
+            "event_limit",
+        )
+
+        self.assertEqual(invalid_preview_limit.status_code, 400)
+        preview_limit_payload = invalid_preview_limit.json()
+        self.assertEqual(preview_limit_payload["resource"], "tasks")
+        self.assertEqual(
+            preview_limit_payload["error"]["details"]["field"],
+            "preview_limit",
+        )
+
+    def test_access_control_and_settings_endpoints_are_read_only_snapshots(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_PRIVATE_CHAT": "false",
+                "ENABLE_GROUP_CHAT": "true",
+                "ALLOW_UNKNOWN_PRIVATE_CHAT": "true",
+                "PRIVATE_WHITELIST": "10001,20002",
+                "GROUP_WHITELIST": "90001",
+                "USER_BLACKLIST": "30003",
+                "OPENAI_API_KEY": "sk-http-secret",
+                "OPENAI_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
+                "OPENAI_MODEL": "fallback-chat",
+                "CHAT_LLM_MODEL": "chat-http-model",
+                "CHAT_LLM_TIMEOUT_SECONDS": "23",
+                "MAIN_LLM_API_KEY": "main-http-secret",
+                "MAIN_LLM_BASE_URL": "https://main.example.com/v1?token=hidden",
+                "MAIN_LLM_MODEL": "main-http-model",
+                "MAIN_LLM_TIMEOUT_SECONDS": "37",
+                "MEMORY_RAG_EMBEDDING_BASE_URL": "http://127.0.0.1:11434/private?token=hidden",
+                "MEMORY_RAG_EMBEDDING_MODEL": "bge-http",
+                "MEMORY_RAG_EMBEDDING_TIMEOUT_SECONDS": "13",
+                "ENABLE_MAIN_AGENT": "true",
+                "MAIN_AGENT_USE_LLM": "true",
+                "ENABLE_MEMORY_RAG": "true",
+                "ENABLE_PROJECT_DOC_RAG": "true",
+                "MEMORY_RAG_INJECT_IN_CHAT": "false",
+                "ENABLE_AGENT_WEB": "false",
+                "ENABLE_AGENT_SHELL": "false",
+            },
+            clear=True,
+        ):
+            access_response = self.client.get(
+                "/api/v1/owner-console/access-control?item_limit=50"
+            )
+            settings_response = self.client.get("/api/v1/owner-console/settings")
+
+        self.assertEqual(access_response.status_code, 200)
+        access_payload = access_response.json()
+        self.assertEqual(access_payload["resource"], "access-control")
+        self.assertTrue(access_payload["read_only"])
+        self.assertTrue(access_payload["http_api_enabled"])
+        self.assertFalse(access_payload["web_write_enabled"])
+        self.assertIsNone(access_payload["error"])
+        access_data = access_payload["data"]
+        self.assertTrue(access_data["owner_configured"])
+        self.assertFalse(access_data["private_chat_enabled"])
+        self.assertTrue(access_data["group_chat_enabled"])
+        self.assertEqual(access_data["unknown_private_policy"], "allow_trial")
+        self.assertTrue(
+            {"10001", "20002"}.issubset(
+                set(access_data["private_whitelist"]["items"])
+            )
+        )
+        self.assertIn("90001", access_data["group_whitelist"]["items"])
+        self.assertIn("30003", access_data["user_blacklist"]["items"])
+        self.assertFalse(
+            access_data["boundary"]["ordinary_chat_can_trigger_main_agent"]
+        )
+
+        self.assertEqual(settings_response.status_code, 200)
+        settings_payload = settings_response.json()
+        self.assertEqual(settings_payload["resource"], "settings")
+        self.assertTrue(settings_payload["read_only"])
+        self.assertTrue(settings_payload["http_api_enabled"])
+        self.assertFalse(settings_payload["web_write_enabled"])
+        self.assertIsNone(settings_payload["error"])
+        settings_data = settings_payload["data"]
+        self.assertEqual(settings_data["chat_model"]["model_name"], "chat-http-model")
+        self.assertEqual(
+            settings_data["chat_model"]["base_url_redacted"],
+            "https://example.com/v1",
+        )
+        self.assertTrue(settings_data["chat_model"]["api_key_configured"])
+        self.assertEqual(settings_data["chat_model"]["timeout_seconds"], 23)
+        self.assertEqual(
+            settings_data["main_agent_model"]["base_url_redacted"],
+            "https://main.example.com/v1",
+        )
+        self.assertTrue(settings_data["main_agent_model"]["api_key_configured"])
+        self.assertEqual(
+            settings_data["embedding"]["base_url_redacted"],
+            "http://127.0.0.1:11434/private",
+        )
+        self.assertFalse(settings_data["embedding"]["api_key_configured"])
+        self.assertTrue(settings_data["feature_flags"]["enable_main_agent"])
+        self.assertTrue(settings_data["feature_flags"]["main_agent_use_llm"])
+        self.assertTrue(settings_data["feature_flags"]["enable_memory_rag"])
+        self.assertFalse(settings_data["feature_flags"]["memory_rag_inject_in_chat"])
+        self.assertFalse(settings_data["feature_flags"]["enable_agent_web"])
+        self.assertFalse(settings_data["feature_flags"]["enable_agent_shell"])
+        self.assertIsInstance(settings_data["role_cards"], list)
+
+        rendered = json.dumps(settings_payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("sk-http-secret", rendered)
+        self.assertNotIn("main-http-secret", rendered)
+        self.assertNotIn("hidden", rendered)
+
+    def test_access_control_endpoint_validates_item_limit_without_owner_context(self):
+        with patch.dict(os.environ, {}, clear=True):
+            access_response = self.client.get("/api/v1/owner-console/access-control")
+            settings_response = self.client.get("/api/v1/owner-console/settings")
+            invalid_limit = self.client.get(
+                "/api/v1/owner-console/access-control?item_limit=0"
+            )
+
+        self.assertEqual(access_response.status_code, 200)
+        self.assertFalse(access_response.json()["data"]["owner_configured"])
+        self.assertEqual(settings_response.status_code, 200)
+        self.assertEqual(invalid_limit.status_code, 400)
+        invalid_payload = invalid_limit.json()
+        self.assertEqual(invalid_payload["resource"], "access-control")
+        self.assertEqual(invalid_payload["error"]["code"], "bad_request")
+        self.assertEqual(
+            invalid_payload["error"]["details"]["field"],
+            "item_limit",
+        )
+
+    def test_memory_endpoint_reports_counts_flags_and_never_exposes_content(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "ENABLE_MEMORY_COMPRESSION": "false",
+                "ENABLE_GAP_SCENE_SUMMARIES": "true",
+                "ENABLE_LONG_TERM_MEMORY_CONTEXT": "true",
+                "MAX_CONTEXT_MESSAGES": "42",
+                "MAX_STORED_MESSAGES_PER_SESSION": "121",
+                "SUMMARY_KEEP_RECENT_MESSAGES": "43",
+                "SUMMARY_BATCH_MESSAGES": "83",
+                "SUMMARY_MIN_SOURCE_MESSAGES": "44",
+                "MAX_SESSION_SUMMARIES_IN_CONTEXT": "4",
+                "MAX_GAP_SCENE_SUMMARIES_IN_CONTEXT": "3",
+                "MAX_LONG_TERM_MEMORIES_IN_CONTEXT": "9",
+                "ENABLE_MEMORY_RAG": "true",
+                "MEMORY_RAG_INJECT_IN_CHAT": "false",
+                "MEMORY_RAG_OWNER_ONLY_DEBUG": "false",
+                "MEMORY_RAG_TOP_K": "6",
+                "MEMORY_RAG_MIN_SCORE": "0.61",
+                "MEMORY_RAG_MAX_CONTEXT_CHARS": "1666",
+                "MEMORY_RAG_INCLUDE_MANUAL_FACTS": "true",
+                "MEMORY_RAG_INCLUDE_MANUAL_PREFERENCES": "false",
+                "MEMORY_RAG_INCLUDE_SESSION_SUMMARIES": "true",
+                "MEMORY_RAG_INCLUDE_SHORT_MESSAGES": "true",
+                "MEMORY_RAG_INCLUDE_GAP_SCENE_SUMMARIES": "true",
+                "ENABLE_PROJECT_DOC_RAG": "true",
+                "PROJECT_DOC_RAG_TOP_K": "3",
+                "PROJECT_DOC_RAG_MIN_SCORE": "0.49",
+                "PROJECT_DOC_RAG_MAX_CONTEXT_CHARS": "1234",
+            },
+            clear=True,
+        ):
+            self.memory.append_message(
+                "private:10001",
+                "user",
+                "secret owner message",
+                "private",
+                "10001",
+            )
+            self.memory.append_message(
+                "private:20002",
+                "assistant",
+                "secret assistant message",
+                "private",
+                "20002",
+            )
+
+            response = self.client.get("/api/v1/owner-console/memory")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resource"], "memory")
+        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["http_api_enabled"])
+        self.assertFalse(payload["web_write_enabled"])
+        self.assertIsNone(payload["error"])
+
+        data = payload["data"]
+        self.assertEqual(data["counts"]["message_count"], 2)
+        self.assertEqual(data["counts"]["session_count"], 2)
+        self.assertFalse(data["context_policy"]["memory_compression_enabled"])
+        self.assertTrue(data["context_policy"]["gap_scene_summaries_enabled"])
+        self.assertTrue(data["context_policy"]["long_term_memory_context_enabled"])
+        self.assertEqual(data["context_policy"]["max_context_messages"], 42)
+        self.assertEqual(
+            data["context_policy"]["max_stored_messages_per_session"],
+            121,
+        )
+        self.assertEqual(data["context_policy"]["summary_keep_recent_messages"], 43)
+        self.assertEqual(data["context_policy"]["summary_batch_messages"], 83)
+        self.assertEqual(data["context_policy"]["summary_min_source_messages"], 44)
+        self.assertEqual(data["context_policy"]["max_session_summaries_in_context"], 4)
+        self.assertEqual(data["context_policy"]["max_gap_scene_summaries_in_context"], 3)
+        self.assertEqual(data["context_policy"]["max_long_term_memories_in_context"], 9)
+        self.assertTrue(data["memory_rag"]["enabled"])
+        self.assertFalse(data["memory_rag"]["inject_in_chat"])
+        self.assertFalse(data["memory_rag"]["owner_only_debug"])
+        self.assertEqual(data["memory_rag"]["top_k"], 6)
+        self.assertAlmostEqual(data["memory_rag"]["min_score"], 0.61)
+        self.assertEqual(data["memory_rag"]["max_context_chars"], 1666)
+        self.assertTrue(data["memory_rag"]["include_manual_facts"])
+        self.assertFalse(data["memory_rag"]["include_manual_preferences"])
+        self.assertTrue(data["memory_rag"]["include_session_summaries"])
+        self.assertTrue(data["memory_rag"]["include_short_messages"])
+        self.assertTrue(data["memory_rag"]["include_gap_scene_summaries"])
+        self.assertTrue(data["project_doc_rag"]["enabled"])
+        self.assertTrue(data["project_doc_rag"]["explicit_agent_dev_context_only"])
+        self.assertFalse(data["project_doc_rag"]["ordinary_chat_injection_allowed"])
+        self.assertEqual(data["project_doc_rag"]["top_k"], 3)
+        self.assertAlmostEqual(data["project_doc_rag"]["min_score"], 0.49)
+        self.assertEqual(data["project_doc_rag"]["max_context_chars"], 1234)
+        self.assertFalse(data["memory_content_exposed"])
+        self.assertFalse(data["project_doc_content_exposed"])
+        self.assertFalse(data["retrieval_executed"])
+        self.assertFalse(data["index_rebuild_executed"])
+        self.assertFalse(data["boundary"]["project_doc_rag_in_ordinary_chat"])
+
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("secret owner message", rendered)
+        self.assertNotIn("secret assistant message", rendered)
+
+    def test_diagnostics_endpoint_is_read_only_and_skips_external_probes(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_PRIVATE_CHAT": "true",
+                "ENABLE_GROUP_CHAT": "true",
+                "ENABLE_MAIN_AGENT": "true",
+                "MAIN_AGENT_USE_LLM": "false",
+                "ENABLE_CHAT_GRAPH_RUNTIME": "true",
+                "ENABLE_VISION": "true",
+                "VISION_MODEL": "qwen2.5vl:3b",
+                "VISION_NUM_CTX": "16384",
+                "VISION_MAX_IMAGES": "1",
+                "VISION_IMAGE_CACHE_TTL_SECONDS": "120",
+                "VISION_PRIVATE_IMAGE_WAIT_SECONDS": "5",
+                "ENABLE_TTS": "false",
+                "TTS_AUTO_START": "false",
+            },
+            clear=True,
+        ):
+            self.memory.append_message(
+                "private:10001",
+                "user",
+                "diagnostics secret message",
+                "private",
+                "10001",
+            )
+
+            response = self.client.get("/api/v1/owner-console/diagnostics")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resource"], "diagnostics")
+        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["http_api_enabled"])
+        self.assertFalse(payload["web_write_enabled"])
+        self.assertIsNone(payload["error"])
+
+        data = payload["data"]
+        self.assertEqual(
+            data["bot_status"]["display_lines"],
+            [
+                "Owner Console HTTP API: ok",
+                "transport=http",
+                "mode=read_only",
+                "web_write_enabled=false",
+            ],
+        )
+        self.assertIn(
+            "external_probes_executed=false",
+            data["diagnostics"]["display_lines"],
+        )
+        self.assertIn(
+            "qq_adapter_imported=false",
+            data["diagnostics"]["display_lines"],
+        )
+        self.assertIn(
+            "diagnostics_module_imported=false",
+            data["diagnostics"]["display_lines"],
+        )
+        self.assertIn("enable_main_agent=true", data["config"]["display_lines"])
+        self.assertIn("main_agent_use_llm=false", data["config"]["display_lines"])
+        self.assertIn("vision_model=qwen2.5vl:3b", data["vision"]["display_lines"])
+        self.assertIn("ollama_probe_executed=false", data["vision"]["display_lines"])
+        self.assertIn(
+            "vision_inference_executed=false",
+            data["vision"]["display_lines"],
+        )
+        self.assertIn(
+            "image_cache_stats_collected=false",
+            data["image_cache"]["display_lines"],
+        )
+        self.assertIn("message_count=1", data["memory"]["display_lines"])
+        self.assertIn(
+            "memory_content_exposed=false",
+            data["memory"]["display_lines"],
+        )
+        self.assertIn(
+            "retrieval_executed=false",
+            data["memory"]["display_lines"],
+        )
+        self.assertIn(
+            "index_rebuild_executed=false",
+            data["memory"]["display_lines"],
+        )
+        self.assertIn("tts_probe_executed=false", data["tts"]["display_lines"])
+        self.assertIn(
+            "recent_error_log_read=false",
+            data["recent_errors"]["display_lines"],
+        )
+        self.assertEqual(data["observations"]["main_agent"], [])
+        self.assertEqual(data["observations"]["root_graph"], [])
+        self.assertFalse(
+            data["boundary"]["ordinary_chat_can_trigger_main_agent"]
+        )
+
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("diagnostics secret message", rendered)
 
     def test_overview_endpoint_requires_owner_config_and_valid_limits(self):
         with patch.dict(os.environ, {}, clear=True):
