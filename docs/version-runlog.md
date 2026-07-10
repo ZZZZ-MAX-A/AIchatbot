@@ -4257,6 +4257,77 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Development context current-state anchor foundation
+
+状态：已完成 P2.45a。目标是在不接入 QQ 正式任务、不修改语义排序的前提下，先建立固定当前状态快照、ProjectDocRAG 精确锚点读取和 anchor/semantic 结果模型分离。
+
+本次完成：
+
+```text
+新增 docs/current-development-status.md：
+  目标保持单 chunk，记录当前阶段、完成项、未完成项、明确延后、安全边界、下一步和证据限制。
+  当前准确声明 P2.45a 已完成基础、P2.45b-c 尚未实现、P2.40b 未批准。
+
+src/plugins/ai_chat/rag/project_docs.py：
+  固定注册 CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md。
+
+src/plugins/ai_chat/rag/documents.py：
+  list_rag_documents 增加内部 source_id 精确过滤，不暴露为 QQ/Web 参数。
+
+src/plugins/ai_chat/rag/project_index.py：
+  新增 retrieve_current_development_status(is_owner, max_context_chars)。
+  函数不接受 source_id/path；只读取固定锚点，校验 owner 可见性、软删除、chunk 顺序和 1200 字符预算。
+
+src/plugins/ai_chat/rag/combined.py：
+  CombinedRagResults 新增默认空 current_status_docs。
+  anchor 使用 RagDocument，不伪造 similarity score；只有非空时才由 debug formatter 显示。
+  现有 retrieve_combined_rag 未调用锚点函数，普通格式化输出不变。
+```
+
+边界：
+
+```text
+尚未修改 DevContextGraph、MainAgent、owner work runtime 或 QQ adapter。
+development_context_report 当前仍使用旧纯语义 project_docs + memories。
+新增快照可能被普通语义检索机会性命中，但尚无固定锚点保证，也没有来源去重或分区预算。
+普通聊天、普通 /agent dev_context、/agent-debug 和 Web 行为不变。
+不新增任意路径读取、shell、Git 工具、文件写入、数据库 schema 或 Web endpoint。
+P2.40b 继续未启用。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_rag_units -v
+Ran 19 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_rag_units tests.test_graph_runners tests.test_development_context_report tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary -q
+Ran 134 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_rag_units tests.test_graph_runners tests.test_development_context_report tests.test_owner_agent_work_runtime tests.test_main_agent_llm tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -q
+Ran 210 tests OK
+
+覆盖固定 source id、无路径参数、owner scope、chunk 顺序、字符预算、软删除、单 chunk 快照、默认空 anchor 和现有格式输出不变。
+
+docs/current-development-status.md 本地检查：
+  773 characters
+  1 个 Markdown heading
+  重建后 1 个 ProjectDocRAG chunk
+
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs
+扫描文件 59，扫描片段 1266，错误：无。
+
+真实索引固定读取验证：
+  owner_anchor_count=1
+  source_id=docs/current-development-status.md
+  chunk_index=0
+  content_chars=772
+  non_owner_anchor_count=0
+
+原始查询“恢复 Owner Console 当前开发状态和下一步计划”仍只召回 P2.34 与 P2.39b 历史片段。
+这证明 P2.45a 尚未改变生产检索；P2.45b-c 的来源多样性和固定接入仍然必要。
+```
+
 ## v1.6 Development context current-state retrieval design
 
 状态：已完成 P2.45 设计，尚未修改运行时。主人私聊 live 结果证明 P2.44 能安全生成结构化报告，但同一问题只召回 P2.34 任务详情和 P2.39b 本地启动脚本；索引包含最新文档，缺口位于纯语义排序、单来源历史片段霸榜和上下文顺序截断。

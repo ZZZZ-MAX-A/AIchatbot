@@ -1,8 +1,8 @@
 # 研发上下文当前状态锚点与来源多样性设计
 
-本文记录 P2.45 的设计结论。目标是修复显式研发上下文任务在回答“当前开发状态和下一步”时，被历史 `version-runlog` 片段占满召回结果的问题。
+本文记录 P2.45 的设计结论与实现进度。目标是修复显式研发上下文任务在回答“当前开发状态和下一步”时，被历史 `version-runlog` 片段占满召回结果的问题。
 
-P2.45 当前只完成设计，不修改 ProjectDocRAG、CombinedRAG、DevContextGraph、MainAgent 或 QQ 运行时代码。后续实现必须拆成独立小步并重新获得确认。
+P2.45 已完成设计。P2.45a 已新增当前状态快照、固定 source-id 的 ProjectDocRAG 只读锚点读取基础，以及 anchor/semantic 分离的 CombinedRAG 结果字段；尚未修改 DevContextGraph、MainAgent 或 QQ 生产检索路径。后续实现继续拆成独立小步。
 
 ## 1. 已复现的问题
 
@@ -131,7 +131,7 @@ P2.45 不做：
 
 ## 5. 权威当前状态快照
 
-P2.45a 计划新增固定项目文档：
+P2.45a 已新增固定项目文档：
 
 ```text
 docs/current-development-status.md
@@ -165,7 +165,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID = "docs/current-development-status.md"
 示例语义：
 
 ```text
-当前阶段：P2.44 已完成，P2.45 已完成设计、尚未实现。
+当前阶段：P2.44 已完成，P2.45 已完成设计，P2.45a 锚点基础已实现但尚未接生产检索。
 最近完成：显式研发上下文任务返回受限结构化报告。
 未完成：当前状态锚点与来源多样性尚未接入运行时。
 明确延后：P2.40b 未批准，业务页面保持手动刷新。
@@ -251,6 +251,8 @@ development_context_report：由生产 factory 固定传 true。
 布尔值只选择已注册策略，不能携带路径或用户输入。
 
 所有检索仍发生在 DevContextGraph 的 `retrieve_combined_context` 节点内。work runtime、QQ adapter 和 LLM summarizer 不直接查询数据库或文件。
+
+P2.45a 新增的快照属于正常 ProjectDocRAG 文档，因此在未接锚点前也可能凭相似度机会性进入 `project_docs`。这不等于锚点已启用：当前没有固定槽位、来源去重或独立预算，不能把一次语义命中当作完成验收。
 
 ## 8. 语义候选来源多样性
 
@@ -467,13 +469,14 @@ P2.39b 启动脚本尚未补齐。
 建议按以下顺序继续：
 
 ```text
-P2.45：当前状态锚点与来源多样性设计。已完成设计，尚未实现。
+P2.45：当前状态锚点与来源多样性。设计已完成，P2.45a 基础已实现，整体尚未完成。
 
 P2.45a：权威当前状态快照和固定锚点读取基础。
-  新增 docs/current-development-status.md。
-  新增固定 source id 与只读 RAG document 读取。
-  结果模型区分 anchor 与 semantic result。
-  暂不接 QQ 正式命令。
+  已完成。
+  已新增 docs/current-development-status.md。
+  已新增固定 source id 与只读 RAG document 读取。
+  CombinedRagResults 已用默认空 current_status_docs 区分 anchor 与 semantic result。
+  未接 QQ 正式命令，现有 retrieve_combined_rag 仍返回空 anchor。
 
 P2.45b：语义候选扩展、单来源去重和分区预算。
   只新增纯选择逻辑和单元测试。

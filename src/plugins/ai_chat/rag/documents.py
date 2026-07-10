@@ -203,6 +203,7 @@ def list_rag_documents(
     *,
     namespace: str | None = None,
     source_type: str | None = None,
+    source_id: str | None = None,
     include_deleted: bool = False,
     limit: int | None = 100,
 ) -> list[RagDocument]:
@@ -215,6 +216,9 @@ def list_rag_documents(
     if source_type:
         clauses.append("source_type = ?")
         params.append(source_type)
+    if source_id:
+        clauses.append("source_id = ?")
+        params.append(source_id)
     if not include_deleted:
         clauses.append("deleted_at IS NULL")
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""

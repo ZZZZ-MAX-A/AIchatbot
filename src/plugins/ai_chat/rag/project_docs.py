@@ -31,6 +31,7 @@ PROJECT_DOC_EXCLUDED_SUFFIXES: tuple[str, ...] = (
     ".sqlite3",
     ".log",
 )
+CURRENT_DEVELOPMENT_STATUS_SOURCE_ID = "docs/current-development-status.md"
 
 
 @dataclass(frozen=True)

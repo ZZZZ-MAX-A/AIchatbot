@@ -11,7 +11,11 @@ from .documents import (
     upsert_rag_document,
 )
 from .embeddings import get_rag_embedding, upsert_rag_embedding
-from .project_docs import chunk_markdown_document, iter_project_document_files
+from .project_docs import (
+    CURRENT_DEVELOPMENT_STATUS_SOURCE_ID,
+    chunk_markdown_document,
+    iter_project_document_files,
+)
 from .providers import EmbeddingProvider
 from .schema import (
     NAMESPACE_PROJECT_DOCS,
@@ -23,6 +27,9 @@ from .schema import (
     RagSearchResult,
 )
 from .search import search_rag_documents
+
+
+CURRENT_STATUS_ANCHOR_MAX_CHARS = 1200
 
 
 @dataclass
@@ -137,6 +144,31 @@ def retrieve_project_docs(
     return trim_results_to_context_chars(visible, max_context_chars)
 
 
+def retrieve_current_development_status(
+    *,
+    is_owner: bool,
+    max_context_chars: int = CURRENT_STATUS_ANCHOR_MAX_CHARS,
+) -> list[RagDocument]:
+    """Read the one registered current-state anchor from ProjectDocRAG."""
+
+    if not is_owner or max_context_chars <= 0:
+        return []
+    documents = list_rag_documents(
+        namespace=NAMESPACE_PROJECT_DOCS,
+        source_type=SOURCE_PROJECT_DOC,
+        source_id=CURRENT_DEVELOPMENT_STATUS_SOURCE_ID,
+        include_deleted=False,
+        limit=None,
+    )
+    visible = [
+        document
+        for document in documents
+        if project_doc_visible(document, is_owner=is_owner)
+    ]
+    ordered = sorted(visible, key=lambda document: document.chunk_index)
+    return trim_project_documents_to_context_chars(ordered, max_context_chars)
+
+
 def project_doc_visible(document: RagDocument, *, is_owner: bool) -> bool:
     if document.visibility == VISIBILITY_PUBLIC:
         return True
@@ -164,6 +196,28 @@ def trim_results_to_context_chars(
             trimmed.append(RagSearchResult(document=document, score=result.score))
             break
         trimmed.append(result)
+        used += len(content)
+    return trimmed
+
+
+def trim_project_documents_to_context_chars(
+    documents: list[RagDocument],
+    max_context_chars: int,
+) -> list[RagDocument]:
+    if max_context_chars <= 0:
+        return []
+
+    trimmed: list[RagDocument] = []
+    used = 0
+    for document in documents:
+        remaining = max_context_chars - used
+        if remaining <= 0:
+            break
+        content = document.content
+        if len(content) > remaining:
+            trimmed.append(replace(document, content=content[:remaining].rstrip()))
+            break
+        trimmed.append(document)
         used += len(content)
     return trimmed
 
