@@ -4,7 +4,7 @@
 
 设计日期：2026-07-11。
 
-P2.43 只做设计，不实现执行器，不引入后台 worker，不开放新的写能力。
+P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界：`running`、原子 claim、work 事件和受限结果保存；尚未实现执行器、work registry、factory 注入或新的 QQ 命令，不引入后台 worker，也不开放新的写能力。
 
 ## 1. 设计结论
 
@@ -88,6 +88,19 @@ work_started / work_finished / work_failed 事件。
 一个通过 factory 注入依赖的 work runtime。
 ```
 
+P2.43a 已落地其中的持久化边界：
+
+```text
+新增 AGENT_TASK_RUNNING，并纳入既有任务状态筛选和只读状态展示。
+claim_agent_task_for_work 只允许 scoped pending task 原子变为 running；已有 pending approval 的任务不能被 claim。
+同一事务内记录 work_claimed 和 work_started，重复 claim 不会再次执行或追加事件。
+complete_agent_task_work / fail_agent_task_work 只接受 running task，并分别记录 work_finished / work_failed。
+query_summary 限制 480 characters；task.result 限制 1600 characters；event output/error summary 限制 240 characters。
+cancel_agent_task 同样使用 status=pending 的条件更新，避免与 claim 竞争时覆盖 running 状态。
+```
+
+P2.43b 才会提供 work registry、executor 和 factory 注入；P2.43a 的 helper 不自行注册或执行任何 work type。
+
 ## 4. 入口和总流程
 
 首个工作任务的流程应是确定性的，不由 LLM 自由编排：
@@ -112,7 +125,7 @@ work_started / work_finished / work_failed 事件。
 
 ## 5. 状态机、领取和重复保护
 
-P2.43 实现时应新增任务状态 `running`。
+P2.43a 已新增任务状态 `running`。
 
 首个只读工作任务只允许以下迁移：
 
@@ -356,15 +369,15 @@ npm run typecheck
 npm run build
 ```
 
-P2.43 设计阶段本身不修改运行时代码，因此本次不执行新增测试。
+P2.43a 已新增持久化单测，覆盖 scoped claim、重复 claim、approval pending 兼容、running 不可取消、成功/失败终态和结果摘要上限。P2.43b/c 仍需要补 registry、executor 和 QQ 入口回归。
 
 ## 13. 实现拆分和后续路线
 
 ```text
-P2.43：首个正式只读工作任务模型设计。当前完成。
+P2.43：首个正式只读工作任务模型设计。已完成。
 
-P2.43a：任务状态和持久化边界。
-  增加 running、原子 claim、work 事件和受限结果保存。
+P2.43a：任务状态和持久化边界。已完成。
+  已增加 running、原子 claim、work 事件、受限结果保存和取消竞态保护。
 
 P2.43b：OwnerAgentWorkRuntime 和 factory 注入。
   只注册 development_context_report，不接 QQ 命令。
