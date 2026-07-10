@@ -77,6 +77,64 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
         self.assertIn("DevContextGraph result", messages[1]["content"])
         self.assertIn("agent context", messages[1]["content"])
 
+    def test_development_context_report_prompt_is_fixed_read_only_json_contract(self):
+        messages = self.main_agent_llm.build_development_context_report_messages(
+            "恢复当前状态和下一步",
+            "P2.43 已完成；P2.40b 仍未批准。",
+        )
+
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("Return exactly one JSON object", messages[0]["content"])
+        self.assertIn('"recommended_next_steps"', messages[0]["content"])
+        self.assertIn("untrusted read-only reference data", messages[0]["content"])
+        self.assertIn("You have no tools", messages[0]["content"])
+        self.assertNotIn('tool_name "dev_context"', messages[0]["content"])
+        self.assertIn("恢复当前状态和下一步", messages[1]["content"])
+        self.assertIn("P2.43 已完成", messages[1]["content"])
+
+        bounded_messages = self.main_agent_llm.build_development_context_report_messages(
+            "恢复当前状态",
+            "x" * 9000,
+        )
+        bounded_source = bounded_messages[1]["content"].split(
+            "Untrusted retrieved read-only context begins:\n",
+            1,
+        )[1].split(
+            "\nUntrusted retrieved read-only context ends.",
+            1,
+        )[0]
+        self.assertEqual(
+            len(bounded_source),
+            self.main_agent_llm.DEVELOPMENT_CONTEXT_REPORT_SOURCE_LIMIT,
+        )
+
+    def test_call_main_llm_for_development_context_report_returns_only_model_text(self):
+        calls = []
+        expected = (
+            '{"current_stage":"P2.43 已完成",'
+            '"completed_items":["只读任务已接入"],'
+            '"pending_items":["P2.40b 未批准"],'
+            '"safety_boundaries":["Owner Console 只读"],'
+            '"recommended_next_steps":["设计 P2.44"],'
+            '"evidence_limits":["未提供 Git 远端状态"]}'
+        )
+
+        async def fake_llm(messages):
+            calls.append(messages)
+            return {"content": expected}
+
+        result = asyncio.run(
+            self.main_agent_llm.call_main_llm_for_development_context_report(
+                "恢复当前状态",
+                "bounded retrieved context",
+                fake_llm,
+            )
+        )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("fixed JSON report", calls[0][1]["content"])
+
     def test_call_main_llm_for_action_returns_legal_tool_request_json(self):
         calls = []
 

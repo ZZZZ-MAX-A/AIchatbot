@@ -470,6 +470,7 @@ P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
 P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
 P2.40a：受控自动刷新基础设施、AppShell health 检查和生命周期测试。已完成。
 P2.43：首个正式 MainAgent 只读工作任务模型与 Owner Console `running` 只读展示。已完成，见 docs/main-agent-first-readonly-work-task-design.md。
+P2.44：显式研发上下文任务已返回受限结构化详细回复；Owner Console 仍只显示不含详细回复的安全持久化摘要，见 docs/main-agent-useful-development-context-report-design.md。
 P2.40b：仍保持人工评估；只有实际工作负载需要时才接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
 P2.40c：guard、runbook 和浏览器 smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。

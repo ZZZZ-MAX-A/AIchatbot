@@ -15,6 +15,11 @@ from .agent_tasks import (
     create_agent_task,
     fail_agent_task_work,
 )
+from .development_context_report import (
+    DEVELOPMENT_CONTEXT_REPORT_RESPONSE_LIMIT,
+    DevelopmentContextReportPayload,
+    redact_development_context_sensitive_text,
+)
 
 
 DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE = "development_context_report"
@@ -22,8 +27,16 @@ DEVELOPMENT_CONTEXT_REPORT_DISPLAY_NAME = "研发上下文报告"
 DEVELOPMENT_CONTEXT_REPORT_RISK_LEVEL = "read_local"
 DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX = "执行研发上下文任务"
 
-WorkExecutor = Callable[[str], str | Awaitable[str]]
-WorkResultSanitizer = Callable[[str], str]
+WorkExecutor = Callable[[str], object | Awaitable[object]]
+
+
+@dataclass(frozen=True)
+class SanitizedAgentWorkResult:
+    persisted_summary: str
+    response_text: str
+
+
+WorkResultSanitizer = Callable[[object], SanitizedAgentWorkResult]
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,7 @@ class OwnerAgentWorkExecution:
     task: AgentTask | None
     outcome: str
     result_summary: str
+    response_text: str = ""
 
 
 def parse_development_context_report_command(query: str) -> str | None:
@@ -80,7 +94,7 @@ def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str
             headline,
             f"状态：{agent_task_status_label(task.status)}",
             "结果：",
-            execution.result_summary,
+            execution.response_text or execution.result_summary,
             f"查看：/agent 任务详情 {task.id}",
             "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。",
         ]
@@ -107,12 +121,29 @@ def _first_count(text: str, labels: tuple[str, ...]) -> int | None:
     return None
 
 
-def _sanitize_development_context_report(raw_result: str) -> str:
-    if not isinstance(raw_result, str) or not raw_result.strip():
-        raise ValueError("development context report executor returned no text")
+def _sanitize_development_context_response(text: str) -> str:
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("development context report response must be non-empty")
+    normalized_lines: list[str] = []
+    for line in text.splitlines():
+        without_controls = "".join(
+            " " if ord(character) < 32 else character for character in line
+        )
+        normalized_lines.append(without_controls.rstrip())
+    normalized = redact_development_context_sensitive_text(
+        "\n".join(normalized_lines).strip()
+    )
+    if not normalized:
+        raise ValueError("development context report response became empty")
+    return normalized[:DEVELOPMENT_CONTEXT_REPORT_RESPONSE_LIMIT].rstrip()
 
-    project_count = _first_count(raw_result, ("project docs:", "项目文档命中："))
-    memory_count = _first_count(raw_result, ("memories:", "记忆命中："))
+
+def _persisted_development_context_summary(
+    *,
+    project_count: int | None,
+    memory_count: int | None,
+    summary_mode: str = "legacy_count_only",
+) -> str:
     lines = ["研发上下文报告已完成。"]
     if project_count is not None:
         lines.append(f"项目文档命中：{project_count}。")
@@ -120,8 +151,44 @@ def _sanitize_development_context_report(raw_result: str) -> str:
         lines.append(f"开发侧记忆命中：{memory_count}。")
     if project_count is None and memory_count is None:
         lines.append("执行器未返回可持久化的命中计数。")
-    lines.append("任务记录未保存原始 RAG 片段、路径或异常文本。")
+    if summary_mode == "bounded_llm":
+        lines.append("详细回复：受限主模型结构化总结，仅在本次主人私聊返回。")
+    elif summary_mode == "deterministic_fallback":
+        lines.append("详细回复：确定性回退摘要，仅在本次主人私聊返回。")
+    lines.append("任务记录未保存原始 RAG 片段、路径、详细回复或异常文本。")
     return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
+
+
+def _sanitize_development_context_report(raw_result: object) -> SanitizedAgentWorkResult:
+    if isinstance(raw_result, DevelopmentContextReportPayload):
+        if raw_result.project_result_count < 0 or raw_result.memory_result_count < 0:
+            raise ValueError("development context report counts must be non-negative")
+        if raw_result.summary_mode not in {"bounded_llm", "deterministic_fallback"}:
+            raise ValueError("development context report summary mode is invalid")
+        persisted_summary = _persisted_development_context_summary(
+            project_count=raw_result.project_result_count,
+            memory_count=raw_result.memory_result_count,
+            summary_mode=raw_result.summary_mode,
+        )
+        response_text = _sanitize_development_context_response(raw_result.report_text)
+        return SanitizedAgentWorkResult(
+            persisted_summary=persisted_summary,
+            response_text=response_text,
+        )
+
+    if not isinstance(raw_result, str) or not raw_result.strip():
+        raise ValueError("development context report executor returned no text")
+
+    project_count = _first_count(raw_result, ("project docs:", "项目文档命中："))
+    memory_count = _first_count(raw_result, ("memories:", "记忆命中："))
+    persisted_summary = _persisted_development_context_summary(
+        project_count=project_count,
+        memory_count=memory_count,
+    )
+    return SanitizedAgentWorkResult(
+        persisted_summary=persisted_summary,
+        response_text=persisted_summary,
+    )
 
 
 def _development_context_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
@@ -183,12 +250,13 @@ class OwnerAgentWorkRuntime:
                 task=task,
                 outcome="not_claimed",
                 result_summary="注册的只读工作任务未能领取，未执行执行器。",
+                response_text="注册的只读工作任务未能领取，未执行执行器。",
             )
 
         try:
             value = spec.executor(normalized_query)
             raw_result = await value if inspect.isawaitable(value) else value
-            result_summary = spec.result_sanitizer(raw_result)
+            sanitized_result = spec.result_sanitizer(raw_result)
         except Exception as exc:
             safe_error = f"{type(exc).__name__}: {spec.name} execution failed."
             failed_task, _ = fail_agent_task_work(
@@ -203,8 +271,10 @@ class OwnerAgentWorkRuntime:
                 task=failed_task,
                 outcome="failed",
                 result_summary=safe_error,
+                response_text=safe_error,
             )
 
+        result_summary = sanitized_result.persisted_summary
         completed_task, completed = complete_agent_task_work(
             task_id=task_id,
             session_key=self.context.session_key,
@@ -217,4 +287,5 @@ class OwnerAgentWorkRuntime:
             task=completed_task,
             outcome="completed" if completed else "not_completed",
             result_summary=result_summary,
+            response_text=sanitized_result.response_text,
         )
