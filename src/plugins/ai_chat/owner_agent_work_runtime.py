@@ -9,6 +9,7 @@ from .agent_tasks import (
     AGENT_TASK_RESULT_LIMIT,
     AGENT_TASK_WORK_QUERY_SUMMARY_LIMIT,
     AgentTask,
+    agent_task_status_label,
     claim_agent_task_for_work,
     complete_agent_task_work,
     create_agent_task,
@@ -19,6 +20,7 @@ from .agent_tasks import (
 DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE = "development_context_report"
 DEVELOPMENT_CONTEXT_REPORT_DISPLAY_NAME = "研发上下文报告"
 DEVELOPMENT_CONTEXT_REPORT_RISK_LEVEL = "read_local"
+DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX = "执行研发上下文任务"
 
 WorkExecutor = Callable[[str], str | Awaitable[str]]
 WorkResultSanitizer = Callable[[str], str]
@@ -48,6 +50,41 @@ class OwnerAgentWorkExecution:
     task: AgentTask | None
     outcome: str
     result_summary: str
+
+
+def parse_development_context_report_command(query: str) -> str | None:
+    stripped = query.strip()
+    if stripped == DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX:
+        return ""
+    for separator in ("：", ":"):
+        prefix = f"{DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX}{separator}"
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return None
+
+
+def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str:
+    task = execution.task
+    if task is None:
+        return "研发上下文任务未创建；未执行任何执行器。"
+
+    if execution.outcome == "completed":
+        headline = f"研发上下文任务 #{task.id} 已完成。"
+    elif execution.outcome == "failed":
+        headline = f"研发上下文任务 #{task.id} 执行失败。"
+    else:
+        headline = f"研发上下文任务 #{task.id} 未进入执行。"
+
+    return "\n".join(
+        [
+            headline,
+            f"状态：{agent_task_status_label(task.status)}",
+            "结果：",
+            execution.result_summary,
+            f"查看：/agent 任务详情 {task.id}",
+            "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。",
+        ]
+    )
 
 
 def _normalize_query(query: str) -> str:

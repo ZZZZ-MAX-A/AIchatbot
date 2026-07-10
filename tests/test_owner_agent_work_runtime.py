@@ -53,6 +53,21 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported owner agent work type"):
             runtime.work_spec("shell")
 
+    def test_explicit_command_parser_is_strict_and_never_matches_todo_commands(self):
+        parse = self.work_runtime.parse_development_context_report_command
+
+        self.assertEqual(
+            parse("执行研发上下文任务：恢复 Owner Console 当前开发状态"),
+            "恢复 Owner Console 当前开发状态",
+        )
+        self.assertEqual(
+            parse("执行研发上下文任务: 总结审批恢复边界"),
+            "总结审批恢复边界",
+        )
+        self.assertEqual(parse("执行研发上下文任务"), "")
+        self.assertIsNone(parse("任务 恢复 Owner Console 当前开发状态"))
+        self.assertIsNone(parse("查 执行研发上下文任务：恢复当前状态"))
+
     def test_successful_work_persists_only_safe_context_report_summary(self):
         temp_dir, patcher = self.temp_database()
         calls: list[str] = []
@@ -77,6 +92,7 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             )
             assert execution.task is not None
             events = self.agent_tasks.list_agent_task_events(execution.task.id)
+            reply = self.work_runtime.format_owner_agent_work_execution(execution)
 
         self.assertEqual(calls, ["恢复 Owner Console 当前开发状态"])
         self.assertEqual(execution.outcome, "completed")
@@ -91,6 +107,10 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertNotIn("raw RAG chunk", events[-1].output_summary)
         self.assertNotIn("D:\\private", events[-1].output_summary)
+        self.assertIn(f"研发上下文任务 #{execution.task.id} 已完成", reply)
+        self.assertIn(f"/agent 任务详情 {execution.task.id}", reply)
+        self.assertNotIn("raw RAG chunk", reply)
+        self.assertNotIn("D:\\private", reply)
 
     def test_invalid_or_unregistered_work_never_creates_a_task(self):
         temp_dir, patcher = self.temp_database()

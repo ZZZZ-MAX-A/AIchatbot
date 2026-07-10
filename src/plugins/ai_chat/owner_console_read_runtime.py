@@ -11,6 +11,7 @@ from .agent_tasks import (
     AGENT_TASK_DONE,
     AGENT_TASK_FAILED,
     AGENT_TASK_PENDING,
+    AGENT_TASK_RUNNING,
     AgentApproval,
     AgentTask,
     AgentTaskEvent,
@@ -913,6 +914,8 @@ def _next_action_for_task(task: AgentTask, approvals: list[AgentApproval]) -> st
         return "inspect_failure"
     if task.status == AGENT_TASK_PENDING:
         return "review_task_goal"
+    if task.status == AGENT_TASK_RUNNING:
+        return "monitor_running_task"
     if task.status == AGENT_TASK_DONE:
         return "completed"
     if task.status == AGENT_TASK_CANCELLED:

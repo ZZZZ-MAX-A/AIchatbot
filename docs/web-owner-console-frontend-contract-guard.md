@@ -144,7 +144,7 @@ P2.39-P2.39b：本地部署设计、静态模式和启停脚本。已完成。
 P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
 P2.40a：已扩展 guard，限制 timer 和 visibility API 只能出现在受控 hook。
 P2.43：首个正式 MainAgent 只读工作任务模型，见 docs/main-agent-first-readonly-work-task-design.md。
-P2.40b-P2.40c：在 P2.43c 后页面接入时，继续约束手动页面不能注册业务 timer，并补浏览器 smoke。
+P2.40b-P2.40c：P2.43 已完成；仅在实际工作负载批准页面接入时，继续约束手动页面不能注册业务 timer，并补浏览器 smoke。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：单独设计 Web 审批操作。
 ```

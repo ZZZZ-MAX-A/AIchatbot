@@ -85,6 +85,50 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(actionability.blocked_reason, "")
         self.assertTrue(actionability.future_operation_only)
 
+    def test_running_work_task_is_visible_through_read_only_task_models(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                title="研发上下文报告",
+                goal="研发上下文报告：恢复当前开发状态",
+            )
+            task, claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="恢复当前开发状态",
+            )
+            context = self.owner_console.OwnerConsoleContext(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            task_list = self.owner_console.build_owner_console_task_list(
+                context,
+                status="running",
+            )
+            task_detail = self.owner_console.build_owner_console_task_detail(
+                context,
+                task_id,
+            )
+
+        self.assertTrue(claimed)
+        self.assertIsNotNone(task)
+        self.assertEqual(task_list.status_filter, "running")
+        self.assertEqual([row.task_id for row in task_list.rows], [task_id])
+        self.assertEqual(task_list.rows[0].status, self.agent_tasks.AGENT_TASK_RUNNING)
+        self.assertEqual(task_list.rows[0].status_label, "运行中")
+        self.assertEqual(task_list.rows[0].next_action, "monitor_running_task")
+        self.assertIsNotNone(task_detail)
+        assert task_detail is not None
+        self.assertEqual(task_detail.task.status, self.agent_tasks.AGENT_TASK_RUNNING)
+        self.assertEqual(
+            [event.kind for event in task_detail.events],
+            ["created", "work_claimed", "work_started"],
+        )
+
     def test_task_and_approval_details_include_redacted_previews(self):
         temp_dir, patcher = self.temp_database()
         with temp_dir, patcher:

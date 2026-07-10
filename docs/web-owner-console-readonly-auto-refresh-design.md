@@ -4,7 +4,7 @@
 
 设计日期：2026-07-11。
 
-本文最初只做设计和文档收口。P2.40a 已实现受控 hook、AppShell 内存态开关、页面可见性、失败暂停、health 低频检查和生命周期测试；Dashboard、Tasks、Approvals 与两个 Detail 页面仍未接周期刷新，等待 P2.43c 形成真实 running 任务生命周期后再评估 P2.40b。
+本文最初只做设计和文档收口。P2.40a 已实现受控 hook、AppShell 内存态开关、页面可见性、失败暂停、health 低频检查和生命周期测试；P2.43c 已形成真实 running 任务生命周期，但 Dashboard、Tasks、Approvals 与两个 Detail 页面仍未接周期刷新，等待根据实际工作负载单独批准 P2.40b。
 
 ## 1. 设计结论
 
@@ -30,11 +30,11 @@ Web Owner Console 适合使用低频、可关闭、页面可见时才运行的 H
 
 ```text
 AppShell health：60 秒，仅在自动刷新开启时检查。
-Dashboard overview：60-120 秒（仅在 P2.43c 后有真实 running 任务时再评估接入）。
-Tasks：60-120 秒（仅在 P2.43c 后有真实 running 任务时再评估接入）。
-Task Detail：60-120 秒（仅在 P2.43c 后有真实 running 任务时再评估接入）。
-Approvals：60-120 秒（仅在 P2.43c 后有真实 running 任务时再评估接入）。
-Approval Detail：60-120 秒（仅在 P2.43c 后有真实 running 任务时再评估接入）。
+Dashboard overview：60-120 秒（P2.40b 单独批准后才接入）。
+Tasks：60-120 秒（P2.40b 单独批准后才接入）。
+Task Detail：60-120 秒（P2.40b 单独批准后才接入）。
+Approvals：60-120 秒（P2.40b 单独批准后才接入）。
+Approval Detail：60-120 秒（P2.40b 单独批准后才接入）。
 ```
 
 以下资源保持手动刷新：
@@ -138,11 +138,11 @@ WebSocket / SSE 会额外引入：
 | 页面或资源 | 自动刷新 | 周期 | 自动刷新内容 | 保持手动的内容 |
 | --- | --- | --- | --- | --- |
 | AppShell | 可选 | 60 秒 | `GET /healthz` | `GET /routes` |
-| Dashboard | P2.43c 后再评估 | 60-120 秒 | `GET /overview` | `GET /diagnostics` |
-| Tasks | P2.43c 后再评估 | 60-120 秒 | 当前筛选条件下的 `GET /tasks` | 无 |
-| Task Detail | P2.43c 后再评估 | 60-120 秒 | 当前 ID 的 `GET /tasks/{task_id}` | 无 |
-| Approvals | P2.43c 后再评估 | 60-120 秒 | 当前筛选条件下的 `GET /approvals` | 无 |
-| Approval Detail | P2.43c 后再评估 | 60-120 秒 | 当前 ID 的 `GET /approvals/{approval_id}` | 无 |
+| Dashboard | P2.40b 单独批准后 | 60-120 秒 | `GET /overview` | `GET /diagnostics` |
+| Tasks | P2.40b 单独批准后 | 60-120 秒 | 当前筛选条件下的 `GET /tasks` | 无 |
+| Task Detail | P2.40b 单独批准后 | 60-120 秒 | 当前 ID 的 `GET /tasks/{task_id}` | 无 |
+| Approvals | P2.40b 单独批准后 | 60-120 秒 | 当前筛选条件下的 `GET /approvals` | 无 |
+| Approval Detail | P2.40b 单独批准后 | 60-120 秒 | 当前 ID 的 `GET /approvals/{approval_id}` | 无 |
 | Diagnostics | 否 | 手动 | 无 | `GET /diagnostics` |
 | Memory | 否 | 手动 | 无 | `GET /memory` |
 | Access Control | 否 | 手动 | 无 | `GET /access-control` |
@@ -337,7 +337,7 @@ health 和当前页面资源应各自维护失败状态。health 失败不应自
 
 ## 11. 请求预算
 
-任意时刻只会挂载一个业务页面。P2.43c 后如确认接入，按推荐周期，自动刷新开启时的稳定请求上限是：
+任意时刻只会挂载一个业务页面。P2.40b 如经实际工作负载确认接入，按推荐周期，自动刷新开启时的稳定请求上限是：
 
 ```text
 可轮询业务页面：每分钟 0.5-1 次 GET。
@@ -513,7 +513,7 @@ Web Owner Console 继续只读。
 P2.40a：受控 hook、内存态开关、可见性和失败状态。已完成。
   AppShell 只接 health 60 秒低频检查，不扩大业务页面请求面。
 
-P2.40b：在 P2.43c 出现真实 running 任务后，再接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
+P2.40b：在确认实际工作负载需要后，再接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
   Dashboard 自动刷新只读 overview。
   Diagnostics、Memory、Access Control、Settings 保持手动。
 
@@ -530,8 +530,8 @@ P2.40 设计阶段本身不执行以上实现。
 ```text
 P2.40：只读自动刷新策略设计。已完成。
 P2.40a：受控自动刷新基础设施与测试。已完成。
-P2.43：先设计并落地首个正式 MainAgent 只读工作任务模型。
-P2.40b：在存在真实 running 任务后，再评估接入允许轮询的页面。
+P2.43：首个正式 MainAgent 只读工作任务模型及只读展示回归。已完成。
+P2.40b：仍保持人工评估；只有实际工作负载需要时才接入允许轮询的页面。
 P2.40c：guard、runbook 和浏览器 smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：单独设计 Web 审批操作。
