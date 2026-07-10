@@ -4255,6 +4255,50 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 MainAgent read-only work runtime registration
+
+状态：已落地 P2.43b。目标是在 P2.43a 的状态机和持久化边界之上，提供唯一已注册的只读 work type 及 factory 注入，但不开放 QQ 或 Web 执行入口。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/owner_agent_work_runtime.py：
+  OwnerAgentWorkContext、AgentWorkSpec、OwnerAgentWorkRuntime 和 OwnerAgentWorkExecution。
+  registry 固定只包含 development_context_report：read_local、query 参数、无需审批、结果上限 1600。
+  execute 先验证 work type 与 query，再创建 pending task、claim 为 running、调用注入执行器、写入 done / failed。
+  无效 query 或未注册 work type 不创建任务。
+  DevContextGraph 原始输出只解析项目文档/开发侧记忆命中计数；task.result 和事件不持久化 RAG 片段、路径或异常原文。
+
+src/plugins/ai_chat/owner_runtime_factory.py：
+  新增 work_runtime(event)，只将 OwnerAgentContext 和 event-bound development_context_report executor 注入 runtime。
+
+src/plugins/ai_chat/__init__.py：
+  新增受 factory 注入的 run_development_context_report_for_event callback。
+  callback 只调用现有 DevContextGraph 并返回命中计数，不返回原始 RAG 内容。
+  未新增 /agent 命令、普通聊天入口或 Web endpoint。
+
+tests/test_owner_agent_work_runtime.py：
+  覆盖唯一 registry、成功持久化安全摘要、无效/未注册输入不建任务、失败不泄漏异常文本。
+```
+
+边界：
+
+```text
+不新增 QQ 命令，不从普通聊天调用 runtime，不让 MainAgent LLM 选择或指定 work type。
+不新增后台 worker、队列、timer、自动 retry、shell、任意文件写入、未注册数据库写入、额外 QQ 发送或 Web 写操作。
+不改变审批创建、确认、拒绝、approval_resume_enabled 或 owner_write_runtime。
+Web Owner Console 仍只有 GET read model；P2.40b 仍等待 P2.43c 的真实 running 任务生命周期。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'
+$env:PYTHONDONTWRITEBYTECODE='1'
+.\.venv\Scripts\python.exe -m unittest tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_persistence_units -v
+Ran 78 tests OK
+```
+
 ## v1.6 MainAgent read-only work task persistence foundation
 
 状态：已落地 P2.43a。目标是把 P2.43 的第一个正式只读工作任务状态机落实到持久化边界，但不接执行器、factory、QQ 命令或 Web 写操作。

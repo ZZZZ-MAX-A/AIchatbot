@@ -86,6 +86,9 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             owner_user_id_default="10001",
             fact_memory_type="fact_summary",
             preference_memory_type="preference_summary",
+            development_context_report_for_event=lambda _event, _query: (
+                "project docs: 0\nmemories: 0"
+            ),
         )
         context = self.tool_registry.ToolContext(
             metadata={
@@ -98,6 +101,15 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         owner_context = factory.agent_context(event)
         self.assertEqual(owner_context.session_key, "private:10001")
         self.assertEqual(owner_context.user_id, "10001")
+        work_runtime = factory.work_runtime(event)
+        self.assertEqual(
+            work_runtime.registered_work_types,
+            ("development_context_report",),
+        )
+        self.assertEqual(
+            work_runtime.work_spec("development_context_report").executor("factory query"),
+            "project docs: 0\nmemories: 0",
+        )
         self.assertEqual(
             asyncio.run(factory.run_read_command(event, "bot_status", context)),
             "Bot 状态\nOK",

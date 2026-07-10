@@ -4,7 +4,7 @@
 
 设计日期：2026-07-11。
 
-P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界：`running`、原子 claim、work 事件和受限结果保存；尚未实现执行器、work registry、factory 注入或新的 QQ 命令，不引入后台 worker，也不开放新的写能力。
+P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界；P2.43b 已实现受限 work registry、`OwnerAgentWorkRuntime` 和 factory 注入。当前仍没有新的 QQ 命令或 Web 执行入口，不引入后台 worker，也不开放新的写能力。
 
 ## 1. 设计结论
 
@@ -99,7 +99,7 @@ query_summary 限制 480 characters；task.result 限制 1600 characters；event
 cancel_agent_task 同样使用 status=pending 的条件更新，避免与 claim 竞争时覆盖 running 状态。
 ```
 
-P2.43b 才会提供 work registry、executor 和 factory 注入；P2.43a 的 helper 不自行注册或执行任何 work type。
+P2.43b 已提供 work registry、executor 和 factory 注入：它只注册 `development_context_report`，执行器结果只会转换为受限命中计数摘要再持久化，不能把原始 RAG 片段、路径或异常文本写入任务记录。P2.43c 才会添加 QQ 显式命令绑定。
 
 ## 4. 入口和总流程
 
@@ -319,20 +319,20 @@ created_at
 
 ## 11. 推荐模块边界
 
-后续实现建议新增：
+P2.43b 已新增：
 
 ```text
 src/plugins/ai_chat/owner_agent_work_runtime.py
-  OwnerAgentWorkContext / AgentWorkSpec / task claim / task execute / result persist。
+  OwnerAgentWorkContext / AgentWorkSpec / 固定 work registry / task claim / task execute / result persist。
 
 src/plugins/ai_chat/owner_runtime_factory.py
-  注入 development_context_report executor。
+  通过 event-bound callback 注入 development_context_report executor。
 
 src/plugins/ai_chat/agent_tasks.py
   新增 running 常量、原子 claim、work event helper、受限 result 更新。
 ```
 
-QQ adapter 只增加显式命令绑定和现有 factory 调用，不能把执行细节放回 `__init__.py`。
+QQ adapter 仍未增加命令绑定。`__init__.py` 只提供 event-bound DevContextGraph callback 给 factory；work runtime 不反向 import QQ adapter 或 `__init__.py`，也不直接处理 MessageEvent。
 
 不建议新建独立进程、Redis、Celery、RabbitMQ、通用后台队列、Web runtime 直连或 ChatGraph work executor。
 
@@ -369,7 +369,7 @@ npm run typecheck
 npm run build
 ```
 
-P2.43a 已新增持久化单测，覆盖 scoped claim、重复 claim、approval pending 兼容、running 不可取消、成功/失败终态和结果摘要上限。P2.43b/c 仍需要补 registry、executor 和 QQ 入口回归。
+P2.43a 已新增持久化单测，覆盖 scoped claim、重复 claim、approval pending 兼容、running 不可取消、成功/失败终态和结果摘要上限。P2.43b 已新增 work runtime 单测，覆盖唯一注册类型、无效输入不建任务、安全结果摘要、无原始 RAG/路径/异常持久化和 factory 注入；P2.43c 仍需要 QQ 入口回归。
 
 ## 13. 实现拆分和后续路线
 
@@ -379,8 +379,8 @@ P2.43：首个正式只读工作任务模型设计。已完成。
 P2.43a：任务状态和持久化边界。已完成。
   已增加 running、原子 claim、work 事件、受限结果保存和取消竞态保护。
 
-P2.43b：OwnerAgentWorkRuntime 和 factory 注入。
-  只注册 development_context_report，不接 QQ 命令。
+P2.43b：OwnerAgentWorkRuntime 和 factory 注入。已完成。
+  只注册 development_context_report，不接 QQ 命令；任务记录只保存受限报告摘要。
 
 P2.43c：主人私聊显式 /agent 命令。
   同步执行、结果渲染、QQ live 回归。
