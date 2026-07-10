@@ -1,8 +1,8 @@
 # Web Owner Console read-model 设计
 
-本文记录 P2.6 Web Owner Console read-model 设计。当前阶段只做设计，不写前端、不接 HTTP、不做登录鉴权、不改数据库 schema、不改变 `/agent`、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
+本文记录 P2.6 Web Owner Console read-model 设计。P2.6 当时只做设计，不写前端、不接 HTTP、不做登录鉴权、不改数据库 schema，也不改变 `/agent`、普通聊天、审批恢复、MemoryRAG、Diagnostics 或 QQ 命令行为。
 
-后续实现状态：P2.16-P2.24 已经基于本文的 read model 落地本地只读 FastAPI adapter。P2.6 的“不接 HTTP”描述指当时的设计阶段边界；当前 HTTP surface 审计见 `docs/owner-console-http-surface-audit.md`。P2.28 已补充未来只读前端壳的页面到 API 映射，见 `docs/web-owner-console-read-only-shell-design.md`。截至该设计，Owner Console 仍不做真实前端、不做登录鉴权、不开放 Web 写操作。
+当前完成状态：P2.16-P2.24 已基于本文落地本地只读 FastAPI adapter；P2.28-P2.37 已完成只读前端壳、真实只读页面和 contract guard；P2.39a-b 已完成可选本地静态模式和启停脚本；P2.40a 已完成受控刷新基础；P2.43-P2.45 已完成正式只读任务、研发报告和当前状态锚点。P2.6 的“不接 HTTP/前端”只表示当时设计边界。当前运行方式见 `docs/web-owner-console-v0-runbook.md`，HTTP 审计见 `docs/owner-console-http-surface-audit.md`。登录鉴权、Web 写操作和 P2.40b 业务页面轮询仍未批准。
 
 ## 1. Web Owner Console v0 定位
 
@@ -975,7 +975,7 @@ P2.6 完成标准：
 8. 不修改运行时代码行为。
 ```
 
-当前建议下一步：
+P2.6 当时建议的下一步（历史）：
 
 ```text
 先审阅本文档字段边界。
@@ -983,3 +983,5 @@ P2.6 完成标准：
 第一批实现优先选择 Tasks / Approvals / Dashboard。
 Diagnostics、Memory、Settings 保持文本摘要过渡，后续逐步结构化。
 ```
+
+上述 builder、HTTP adapter 和主要只读页面均已在后续阶段落地；该列表保留为 P2.6 设计到实现的历史路径，不是当前待办。

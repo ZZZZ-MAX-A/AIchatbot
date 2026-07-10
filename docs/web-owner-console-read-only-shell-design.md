@@ -1,8 +1,8 @@
 # Web Owner Console read-only shell design
 
-本文记录 P2.28 Web Owner Console 只读前端壳设计。当前阶段仍不实现真实前端，只定义未来第一版页面壳如何消费现有 Owner Console HTTP GET endpoints，以及如何保持只读、安全和命名一致。
+本文记录 P2.28 Web Owner Console 只读前端壳设计。P2.28 当时不实现真实前端，只定义第一版页面壳如何消费 Owner Console HTTP GET endpoints，以及如何保持只读、安全和命名一致。
 
-后续实现状态：P2.29 已补充前端技术栈和目录边界设计，见 `docs/web-owner-console-frontend-stack-design.md`。P2.30 已补充简约 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。截至该设计，仍不创建真实前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
+当前完成状态：P2.29-P2.30 已完成技术栈和 UI 设计；P2.31-P2.37 已创建真实只读前端、接入全部主导航页面并完成只读审计和 guard；P2.39a-b 已完成可选静态模式和本地启停脚本。P2.28 的“不创建前端工程”只表示当时设计边界，不代表当前状态。当前运行方式见 `docs/web-owner-console-v0-runbook.md`；Owner Console 仍只读，不开放登录鉴权或 Web 写操作。
 
 ## 1. 定位
 
@@ -700,7 +700,7 @@ Server-Sent Events。
 11. 不修改 FastAPI 后端行为。
 ```
 
-## 10. 后续路线
+## 10. P2.28 当时的后续路线（历史）
 
 建议后续路线：
 
@@ -724,3 +724,5 @@ P2.34：再讨论审批操作设计。
 ```
 
 这些能力都需要单独设计和审计，不能混在只读壳里。
+
+其中只读前端壳、页面数据接入、审计、guard 和本地部署均已完成；登录鉴权、审批按钮、写 API 和公网部署仍未进入当前实现范围。
