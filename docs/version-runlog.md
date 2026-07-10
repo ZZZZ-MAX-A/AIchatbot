@@ -4257,6 +4257,60 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Development context diverse evidence policy
+
+状态：已完成 P2.45b。目标是在不查询数据库、不调用 embedding、不接 QQ 生产路径的前提下，把研发报告所需的候选扩展、固定锚点排除、单来源去重和分区预算实现为独立纯策略。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/rag/development_report.py：
+  development_report_candidate_top_k：requested<=0 返回 0；正常至少 12；requested*4；最大 32。
+  select_development_report_project_results：固定排除 current-development-status source；空 source 跳过；每 source 最多 1 条；最多 3 条；保持候选原 score 顺序。
+  build_development_report_evidence：分别裁剪 current_status_docs、project candidates 和 memories，返回 CombinedRagResults。
+  固定预算：anchor 1200、project 1800、memory 800、format reserve 400；与 P2.44 4200 source limit 启动时严格校验一致。
+  输入使用不可变 RagDocument 替换裁剪，不修改原候选对象。
+
+tests/test_development_report_retrieval.py：
+  覆盖候选池边界、单来源霸榜、锚点语义重复、空 source、缺失锚点、三个分区精确限长、总证据 3800 和输入不变。
+```
+
+边界：
+
+```text
+纯策略模块没有数据库、embedding、QQ、Web、MainAgent 或 work runtime 依赖。
+retrieve_combined_rag、DevContextGraph 和 development_context_report 尚未调用该策略。
+当前 Agent 仍使用旧纯语义召回；不需要主人 QQ 测试。
+不新增 shell、任意文件读写、数据库 schema、外部 reranker 或 Web 写操作。
+P2.40b 继续未启用。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_development_report_retrieval tests.test_rag_units -v
+Ran 23 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_development_report_retrieval tests.test_rag_units tests.test_graph_runners tests.test_development_context_report tests.test_owner_agent_work_runtime tests.test_main_agent_llm tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -q
+Ran 214 tests OK
+
+源码调用审计：除策略定义、RAG export 和测试外，没有生产模块调用 build_development_report_evidence 或 development_report_candidate_top_k。
+
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs
+扫描文件 59，扫描片段 1269，错误：无。
+
+使用原问题“恢复 Owner Console 当前开发状态和下一步计划”执行真实本地 embedding + 前 12 候选纯策略演练：
+  candidate_count=12
+  前 12 候选实际只有 3 个不同 source，多条历史片段重复占位。
+  selected_sources=web-owner-console-read-model-design、owner-console-http-surface-audit、version-runlog
+  anchor_count=1
+  evidence_anchor_count=1
+  evidence_project_count=3
+  evidence_content_chars=2721
+
+该演练仅手动调用纯策略，没有修改 DevContextGraph/Agent 生产链，也没有发送 QQ。
+```
+
 ## v1.6 Development context current-state anchor foundation
 
 状态：已完成 P2.45a。目标是在不接入 QQ 正式任务、不修改语义排序的前提下，先建立固定当前状态快照、ProjectDocRAG 精确锚点读取和 anchor/semantic 结果模型分离。

@@ -463,7 +463,7 @@ DevContextGraph 开发侧上下文
 .\scripts\rebuild-rag-index.ps1 -QueryDevContext "P2.44 研发上下文报告 当前状态 下一步 安全边界" -TopK 3 -MaxContextChars 1400
 ```
 
-不要把 `top_k` 或上下文上限无限增大，也不要仅按整个文件的修改时间判断章节新旧。P2.45 已完成固定当前状态锚点、单来源去重和分区预算设计；P2.45a 已加入快照和固定锚点读取基础，但尚未接入 DevContextGraph / QQ 的保证锚点路径。快照可能被普通语义检索机会性召回，检索算法仍未改变。见 `docs/development-context-current-state-retrieval-design.md`。
+不要把 `top_k` 或上下文上限无限增大，也不要仅按整个文件的修改时间判断章节新旧。P2.45a 已加入快照和固定锚点读取基础，P2.45b 已实现候选扩展、单来源去重和分区预算纯策略，但两者尚未接入 DevContextGraph / QQ 的保证锚点路径。快照可能被普通语义检索机会性召回，生产检索算法仍未改变。见 `docs/development-context-current-state-retrieval-design.md`。
 
 ### 新 Codex 会自动使用 RAG 吗
 

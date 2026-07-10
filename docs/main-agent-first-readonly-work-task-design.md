@@ -395,12 +395,15 @@ P2.44：有用研发上下文报告。已完成。
   MAIN_AGENT_USE_LLM=true 且有召回时只执行无工具的固定 JSON 总结；关闭、无召回或总结失败时确定性回退。
   设计与实现边界见 docs/main-agent-useful-development-context-report-design.md。
 
-P2.45：当前状态锚点与来源多样性。设计已完成，P2.45a 基础已实现，整体尚未完成。
+P2.45：当前状态锚点与来源多样性。设计、P2.45a 基础和 P2.45b 纯策略已完成，整体尚未完成。
   解决历史 version-runlog 片段占满“当前状态/下一步”召回的问题；计划引入固定当前状态快照、每 source 限额和分区预算。
   设计见 docs/development-context-current-state-retrieval-design.md。
 
 P2.45a：当前状态快照和固定锚点读取基础。已完成。
   已新增固定快照、owner-only 精确索引读取和默认空的 current_status_docs 结果字段；尚未接 DevContextGraph / QQ 正式任务，线上检索算法仍是纯语义且没有保证锚点。快照可能作为普通语义结果被机会性召回。
+
+P2.45b：候选扩展、单来源去重和分区预算。已完成。
+  已新增独立纯策略模块，固定候选池 12-32、每 source 最多 1 条、最多 3 条语义项目证据，并将 4200 字符拆为 anchor 1200、project 1800、memory 800、格式余量 400；尚未接生产 Agent。
 ```
 
 P2.43c 已提供真实 active task 生命周期，但 P2.40b 仍需要根据实际工作负载单独批准，不会自动接入业务页面轮询。届时如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。
