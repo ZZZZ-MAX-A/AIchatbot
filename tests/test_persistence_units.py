@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -381,6 +382,189 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(again_changed)
         self.assertEqual([event.kind for event in events], ["created", "cancelled"])
         self.assertIn("已取消 Agent 任务", formatted)
+
+    def test_agent_task_work_claim_is_atomic_scoped_and_keeps_approval_tasks_pending(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="生成研发上下文报告",
+            )
+            missing_task, missing_claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:20002",
+                user_id="20002",
+                work_type="development_context_report",
+                query_summary="恢复当前开发状态",
+            )
+            task, claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="q" * 600,
+            )
+            again_task, again_claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="duplicate claim must not run",
+            )
+            cancelled_task, cancelled = self.agent_tasks.cancel_agent_task(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            running_tasks = self.agent_tasks.list_agent_tasks(
+                session_key="private:10001",
+                user_id="10001",
+                status=self.agent_tasks.AGENT_TASK_RUNNING,
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+            approval_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="保留现有审批任务",
+            )
+            self.agent_tasks.create_agent_approval(
+                task_id=approval_task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="已有审批任务不可被 work claim 接管",
+            )
+            approval_task, approval_claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=approval_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="must stay pending",
+            )
+
+        self.assertIsNone(missing_task)
+        self.assertFalse(missing_claimed)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertTrue(claimed)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_RUNNING)
+        self.assertEqual([item.id for item in running_tasks], [task_id])
+        self.assertIsNotNone(again_task)
+        self.assertFalse(again_claimed)
+        self.assertIsNotNone(cancelled_task)
+        self.assertFalse(cancelled)
+        self.assertEqual([event.kind for event in events], ["created", "work_claimed", "work_started"])
+        self.assertTrue(all(event.status == self.agent_tasks.AGENT_TASK_RUNNING for event in events[1:]))
+        payload = json.loads(events[1].input_json)
+        self.assertEqual(payload["work_type"], "development_context_report")
+        self.assertEqual(
+            payload["query_summary"],
+            "q" * self.agent_tasks.AGENT_TASK_WORK_QUERY_SUMMARY_LIMIT,
+        )
+        self.assertEqual(set(payload), {"work_type", "query_summary"})
+        self.assertEqual(events[1].input_json, events[2].input_json)
+        self.assertIsNotNone(approval_task)
+        assert approval_task is not None
+        self.assertFalse(approval_claimed)
+        self.assertEqual(approval_task.status, self.agent_tasks.AGENT_TASK_PENDING)
+
+    def test_agent_task_work_completion_and_failure_persist_only_bounded_summaries(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="成功的研发上下文报告",
+            )
+            _, claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="总结当前状态",
+            )
+            task, completed = self.agent_tasks.complete_agent_task_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                result="r" * 2000,
+            )
+            again_task, again_completed = self.agent_tasks.complete_agent_task_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                result="must not overwrite the finished result",
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+            failed_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="失败的研发上下文报告",
+            )
+            self.agent_tasks.claim_agent_task_for_work(
+                task_id=failed_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="模拟失败路径",
+            )
+            failed_task, failed = self.agent_tasks.fail_agent_task_work(
+                task_id=failed_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                error_summary="e" * 400,
+            )
+            again_failed_task, again_failed = self.agent_tasks.fail_agent_task_work(
+                task_id=failed_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                error_summary="must not overwrite the failed result",
+            )
+            failed_events = self.agent_tasks.list_agent_task_events(failed_task_id)
+
+        self.assertTrue(claimed)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertTrue(completed)
+        self.assertEqual(task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertEqual(len(task.result), self.agent_tasks.AGENT_TASK_RESULT_LIMIT)
+        self.assertIsNotNone(again_task)
+        self.assertFalse(again_completed)
+        self.assertEqual([event.kind for event in events], ["created", "work_claimed", "work_started", "work_finished"])
+        self.assertEqual(
+            len(events[-1].output_summary),
+            self.agent_tasks.AGENT_TASK_EVENT_SUMMARY_LIMIT,
+        )
+        self.assertEqual(events[-1].error, "")
+        self.assertIsNotNone(failed_task)
+        assert failed_task is not None
+        self.assertTrue(failed)
+        self.assertEqual(failed_task.status, self.agent_tasks.AGENT_TASK_FAILED)
+        self.assertIsNotNone(again_failed_task)
+        self.assertFalse(again_failed)
+        self.assertEqual(
+            len(failed_task.result),
+            self.agent_tasks.AGENT_TASK_ERROR_SUMMARY_LIMIT,
+        )
+        self.assertEqual(
+            [event.kind for event in failed_events],
+            ["created", "work_claimed", "work_started", "work_failed"],
+        )
+        self.assertEqual(
+            len(failed_events[-1].error),
+            self.agent_tasks.AGENT_TASK_ERROR_SUMMARY_LIMIT,
+        )
+        self.assertEqual(
+            failed_events[-1].output_summary,
+            "Registered read-only work task failed.",
+        )
 
     def test_agent_approvals_are_scoped_and_read_only_formatted(self):
         temp_dir, patcher = self.temp_database()

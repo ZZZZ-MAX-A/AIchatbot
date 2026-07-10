@@ -16,15 +16,22 @@ from .graph.tool_registry import (
 
 
 AGENT_TASK_PENDING = "pending"
+AGENT_TASK_RUNNING = "running"
 AGENT_TASK_DONE = "done"
 AGENT_TASK_FAILED = "failed"
 AGENT_TASK_CANCELLED = "cancelled"
 AGENT_TASK_STATUSES = {
     AGENT_TASK_PENDING,
+    AGENT_TASK_RUNNING,
     AGENT_TASK_DONE,
     AGENT_TASK_FAILED,
     AGENT_TASK_CANCELLED,
 }
+AGENT_TASK_WORK_TYPE_LIMIT = 64
+AGENT_TASK_WORK_QUERY_SUMMARY_LIMIT = 480
+AGENT_TASK_RESULT_LIMIT = 1600
+AGENT_TASK_EVENT_SUMMARY_LIMIT = 240
+AGENT_TASK_ERROR_SUMMARY_LIMIT = 240
 AGENT_TASK_COMMAND_CREATE = "create"
 AGENT_TASK_COMMAND_STATUS = "status"
 AGENT_TASK_COMMAND_DETAIL = "detail"
@@ -1192,6 +1199,264 @@ def _has_agent_task_event(
     return False
 
 
+def _bounded_agent_task_work_text(
+    value: str,
+    *,
+    field_name: str,
+    limit: int,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be text")
+    without_controls = "".join(
+        " " if ord(character) < 32 else character for character in value
+    )
+    compact = " ".join(without_controls.split())
+    if not compact:
+        raise ValueError(f"{field_name} must be non-empty")
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip()
+
+
+def _agent_task_work_input_json(*, work_type: str, query_summary: str) -> str:
+    return json.dumps(
+        {
+            "work_type": work_type,
+            "query_summary": query_summary,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def claim_agent_task_for_work(
+    *,
+    task_id: int,
+    session_key: str,
+    user_id: str,
+    work_type: str,
+    query_summary: str,
+) -> tuple[AgentTask | None, bool]:
+    """Atomically move a newly-created registered work task into running."""
+
+    normalized_work_type = _bounded_agent_task_work_text(
+        work_type,
+        field_name="work_type",
+        limit=AGENT_TASK_WORK_TYPE_LIMIT,
+    )
+    normalized_query_summary = _bounded_agent_task_work_text(
+        query_summary,
+        field_name="query_summary",
+        limit=AGENT_TASK_WORK_QUERY_SUMMARY_LIMIT,
+    )
+    input_json = _agent_task_work_input_json(
+        work_type=normalized_work_type,
+        query_summary=normalized_query_summary,
+    )
+
+    ensure_database()
+    now = utc_now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE agent_tasks
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+              AND session_key = ?
+              AND user_id = ?
+              AND status = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM agent_approvals
+                  WHERE agent_approvals.task_id = agent_tasks.id
+                    AND agent_approvals.status = ?
+              )
+            """,
+            (
+                AGENT_TASK_RUNNING,
+                now,
+                task_id,
+                session_key,
+                user_id,
+                AGENT_TASK_PENDING,
+                AGENT_APPROVAL_PENDING,
+            ),
+        )
+        if cursor.rowcount != 1:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
+
+        claimed_step = _next_agent_task_step(connection, task_id)
+        _insert_agent_task_event(
+            connection,
+            task_id=task_id,
+            step_index=claimed_step,
+            kind="work_claimed",
+            tool_name=normalized_work_type,
+            input_json=input_json,
+            output_summary="Registered read-only work task claimed.",
+            status=AGENT_TASK_RUNNING,
+            error=None,
+            created_at=now,
+        )
+        started_step = _next_agent_task_step(connection, task_id)
+        _insert_agent_task_event(
+            connection,
+            task_id=task_id,
+            step_index=started_step,
+            kind="work_started",
+            tool_name=normalized_work_type,
+            input_json=input_json,
+            output_summary="Registered read-only work task started.",
+            status=AGENT_TASK_RUNNING,
+            error=None,
+            created_at=now,
+        )
+
+    return get_agent_task(task_id, session_key=session_key, user_id=user_id), True
+
+
+def complete_agent_task_work(
+    *,
+    task_id: int,
+    session_key: str,
+    user_id: str,
+    work_type: str,
+    result: str,
+) -> tuple[AgentTask | None, bool]:
+    """Persist one bounded result for a running registered work task."""
+
+    normalized_work_type = _bounded_agent_task_work_text(
+        work_type,
+        field_name="work_type",
+        limit=AGENT_TASK_WORK_TYPE_LIMIT,
+    )
+    normalized_result = _bounded_agent_task_work_text(
+        result,
+        field_name="result",
+        limit=AGENT_TASK_RESULT_LIMIT,
+    )
+
+    ensure_database()
+    now = utc_now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE agent_tasks
+            SET status = ?, result = ?, updated_at = ?
+            WHERE id = ? AND session_key = ? AND user_id = ? AND status = ?
+            """,
+            (
+                AGENT_TASK_DONE,
+                normalized_result,
+                now,
+                task_id,
+                session_key,
+                user_id,
+                AGENT_TASK_RUNNING,
+            ),
+        )
+        if cursor.rowcount != 1:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
+
+        _insert_agent_task_event(
+            connection,
+            task_id=task_id,
+            step_index=_next_agent_task_step(connection, task_id),
+            kind="work_finished",
+            tool_name=normalized_work_type,
+            input_json=None,
+            output_summary=normalized_result[:AGENT_TASK_EVENT_SUMMARY_LIMIT],
+            status=AGENT_TASK_DONE,
+            error=None,
+            created_at=now,
+        )
+
+    return get_agent_task(task_id, session_key=session_key, user_id=user_id), True
+
+
+def fail_agent_task_work(
+    *,
+    task_id: int,
+    session_key: str,
+    user_id: str,
+    work_type: str,
+    error_summary: str,
+) -> tuple[AgentTask | None, bool]:
+    """Persist one safe failure summary for a running registered work task."""
+
+    normalized_work_type = _bounded_agent_task_work_text(
+        work_type,
+        field_name="work_type",
+        limit=AGENT_TASK_WORK_TYPE_LIMIT,
+    )
+    normalized_error = _bounded_agent_task_work_text(
+        error_summary,
+        field_name="error_summary",
+        limit=AGENT_TASK_ERROR_SUMMARY_LIMIT,
+    )
+
+    ensure_database()
+    now = utc_now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE agent_tasks
+            SET status = ?, result = ?, updated_at = ?
+            WHERE id = ? AND session_key = ? AND user_id = ? AND status = ?
+            """,
+            (
+                AGENT_TASK_FAILED,
+                normalized_error,
+                now,
+                task_id,
+                session_key,
+                user_id,
+                AGENT_TASK_RUNNING,
+            ),
+        )
+        if cursor.rowcount != 1:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
+
+        _insert_agent_task_event(
+            connection,
+            task_id=task_id,
+            step_index=_next_agent_task_step(connection, task_id),
+            kind="work_failed",
+            tool_name=normalized_work_type,
+            input_json=None,
+            output_summary="Registered read-only work task failed.",
+            status=AGENT_TASK_FAILED,
+            error=normalized_error,
+            created_at=now,
+        )
+
+    return get_agent_task(task_id, session_key=session_key, user_id=user_id), True
+
+
 def cancel_agent_task(
     *,
     task_id: int,
@@ -1201,64 +1466,43 @@ def cancel_agent_task(
     ensure_database()
     now = utc_now()
     with connect() as connection:
-        row = connection.execute(
-            """
-            SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
-            FROM agent_tasks
-            WHERE id = ? AND session_key = ? AND user_id = ?
-            """,
-            (task_id, session_key, user_id),
-        ).fetchone()
-        if row is None:
-            return None, False
-
-        task = _task_from_row(row)
-        if task.status != AGENT_TASK_PENDING:
-            return task, False
-
-        connection.execute(
+        cursor = connection.execute(
             """
             UPDATE agent_tasks
             SET status = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (AGENT_TASK_CANCELLED, now, task_id),
-        )
-        step_row = connection.execute(
-            """
-            SELECT COALESCE(MAX(step_index), -1) + 1 AS next_step
-            FROM agent_task_events
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        ).fetchone()
-        next_step = int(step_row["next_step"])
-        connection.execute(
-            """
-            INSERT INTO agent_task_events (
-                task_id,
-                step_index,
-                kind,
-                tool_name,
-                input_json,
-                output_summary,
-                status,
-                error,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            WHERE id = ? AND session_key = ? AND user_id = ? AND status = ?
             """,
             (
-                task_id,
-                next_step,
-                "cancelled",
-                None,
-                None,
-                "主人取消任务；未执行任何工具。",
                 AGENT_TASK_CANCELLED,
-                None,
                 now,
+                task_id,
+                session_key,
+                user_id,
+                AGENT_TASK_PENDING,
             ),
+        )
+        if cursor.rowcount != 1:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
+
+        _insert_agent_task_event(
+            connection,
+            task_id=task_id,
+            step_index=_next_agent_task_step(connection, task_id),
+            kind="cancelled",
+            tool_name=None,
+            input_json=None,
+            output_summary="主人取消任务；未执行任何工具。",
+            status=AGENT_TASK_CANCELLED,
+            error=None,
+            created_at=now,
         )
 
     task = get_agent_task(task_id, session_key=session_key, user_id=user_id)
@@ -1268,6 +1512,7 @@ def cancel_agent_task(
 def agent_task_status_label(status: str) -> str:
     labels = {
         AGENT_TASK_PENDING: "待处理",
+        AGENT_TASK_RUNNING: "运行中",
         AGENT_TASK_DONE: "已完成",
         AGENT_TASK_FAILED: "失败",
         AGENT_TASK_CANCELLED: "已取消",
@@ -1365,6 +1610,8 @@ def _task_next_action(task: AgentTask, approvals: list[AgentApproval]) -> str:
         return "下一步：查看事件末尾的失败原因；当前版本不会自动重试失败任务。"
     if task.status == AGENT_TASK_PENDING:
         return "下一步：核对目标；如果需要写操作，必须由已注册工具创建审批后再确认。"
+    if task.status == AGENT_TASK_RUNNING:
+        return "下一步：任务正在执行；当前同步单步任务不支持取消或自动重试。"
     if task.status == AGENT_TASK_DONE:
         return "下一步：任务已完成，可用 /agent 下一步 查看是否还有其他待处理事项。"
     if task.status == AGENT_TASK_CANCELLED:

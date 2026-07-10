@@ -4255,6 +4255,50 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 MainAgent read-only work task persistence foundation
+
+状态：已落地 P2.43a。目标是把 P2.43 的第一个正式只读工作任务状态机落实到持久化边界，但不接执行器、factory、QQ 命令或 Web 写操作。
+
+本次完成：
+
+```text
+src/plugins/ai_chat/agent_tasks.py：
+  新增 AGENT_TASK_RUNNING 并纳入任务状态筛选与状态标签。
+  新增 claim_agent_task_for_work：scoped pending -> running 条件更新；已有 pending approval 的任务不能被 claim。
+  claim 成功后在同一持久化事务写入 work_claimed 和 work_started；重复 claim 不再追加事件。
+  新增 complete_agent_task_work / fail_agent_task_work：只允许 running -> done / failed，写入 work_finished / work_failed。
+  task.result 限制 1600 characters；query_summary 限制 480 characters；event output/error summary 限制 240 characters。
+  cancel_agent_task 改为 scoped status=pending 条件更新，避免取消与 claim 竞争时覆盖 running。
+
+tests/test_persistence_units.py：
+  覆盖 scoped claim、重复 claim、已有审批任务兼容、running 不可取消、成功/失败终态和摘要长度限制。
+```
+
+边界：
+
+```text
+尚未新增 OwnerAgentWorkRuntime、work registry、DevContextGraph executor、factory 注入或 /agent 执行研发上下文任务命令。
+没有新 QQ 发送副作用、后台 worker、队列、定时器、自动 retry、shell、任意文件写入、未注册数据库写入或 Web 写操作。
+现有审批创建、确认、拒绝和 approval_resume_enabled 恢复链路保持不变。
+Web Owner Console 仍然只读；其现有 GET status filter 现在可以安全识别 running，但不新增任何 Web 操作。
+P2.40b 仍等待 P2.43c 出现真实 running 任务生命周期后再评估。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'
+$env:PYTHONDONTWRITEBYTECODE='1'
+.\.venv\Scripts\python.exe -m unittest tests.test_persistence_units -v
+Ran 24 tests OK
+
+.\.venv\Scripts\python.exe -m unittest tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 35 tests OK
+
+.\.venv\Scripts\python.exe -m unittest tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary -v
+Ran 60 tests OK
+```
+
 ## v1.6 MainAgent first read-only work task design
 
 状态：已落地 P2.43 设计。目标是不再把 `agent_tasks` 只当待办记录，而是先定义一个已注册、单步、只读、可审计的正式工作任务闭环；本步只做设计，不实现任务执行。
