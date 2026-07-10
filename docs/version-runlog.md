@@ -4259,7 +4259,7 @@ Ran 20 tests OK
 
 ## v1.6 Development context current-state production connection
 
-状态：已完成 P2.45c 实现、回归及 P2.45d 本地索引验收，尚待主人 QQ live 验收。目标是只为主人私聊正式 `development_context_report` 接入固定当前状态锚点和多来源语义证据，不改变普通 `/agent`、`/agent-debug`、本地通用 DevContext 或普通聊天。
+状态：已完成 P2.45c 实现、回归及 P2.45d 本地索引和主人 QQ live 验收。目标是只为主人私聊正式 `development_context_report` 接入固定当前状态锚点和多来源语义证据，不改变普通 `/agent`、`/agent-debug`、本地通用 DevContext 或普通聊天。
 
 本次完成：
 
@@ -4323,12 +4323,35 @@ Ran 222 tests OK
   evidence_chars=2720
 ```
 
+主人 QQ live 验收：
+
+```text
+任务 #27 仍返回 P2.34 任务详情和 P2.39b 本地启动脚本等旧阶段材料，没有加载当前状态锚点策略。
+重启 Bot 后再次执行固定命令，任务 #28 正确返回：
+  当前处于 P2.45c，P2.45a-c 已完成。
+  P2.45d 本地索引和固定问题检索已完成，live 是当时剩余验收项。
+  P2.40b 未批准，业务页面继续初次加载加手动刷新。
+  Owner Console 保持只读 GET，不开放 shell、Git、任意文件读写、Web 写操作或登录鉴权。
+  证据与限制明确“当前状态锚点已加载”，并把旧 P2.34 材料降为历史参考。
+
+任务 #28 详情持久化摘要：
+  状态=已完成
+  项目文档命中=2
+  开发侧记忆命中=0
+  当前状态锚点=已加载
+  检索警告=0
+  summary_mode=受限主模型结构化总结
+
+任务详情和 work_finished 事件均未保存详细六字段报告、原始 RAG 片段、路径、source id、分数或异常原文。
+项目文档最终命中 2 少于选择上限 3 属正常结果：来源多样性选择之后仍受 1800 字符项目证据预算约束。
+```
+
 边界：
 
 ```text
 P2.45c 没有新增 work type、QQ 命令、Web endpoint、Web 写操作、登录鉴权、shell、Git、任意文件读写、未注册数据库写入或多步写自动化。
 Owner Console 继续只读 GET；P2.40b 继续未启用；/docs、/redoc、/openapi.json 继续关闭。
-本地干跑没有发送 QQ。完成提交后，再通知主人重启 Bot 并手动执行固定 live 命令。
+本地干跑没有发送 QQ；live 命令由主人手动发送。P2.45 已完成，不新增任何自动 QQ 发送。
 ```
 
 ## v1.6 Development context diverse evidence policy

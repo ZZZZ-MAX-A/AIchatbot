@@ -434,6 +434,8 @@ ProjectDocRAG 不进入 QQ 普通聊天上下文。
 CombinedRAG 不进入 QQ 普通聊天上下文。
 DevContextGraph 不进入 QQ 普通聊天上下文。
 主人私聊显式“/agent 执行研发上下文任务：<问题>”是唯一固定例外：只读 development_context_report 可在 DevContextGraph 内使用当前状态锚点和多来源项目证据。
+
+修改正式报告检索代码后必须重启 Bot；否则已运行进程仍可能继续使用旧模块。P2.45 live 验收中，重启前任务 #27 返回旧阶段，重启后任务 #28 才正确加载当前状态锚点。
 ```
 
 可以进入 QQ 普通聊天上下文的是：
