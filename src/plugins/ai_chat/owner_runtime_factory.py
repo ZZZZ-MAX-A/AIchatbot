@@ -14,12 +14,14 @@ from .owner_agent_runtime import (
 )
 from .owner_agent_work_runtime import (
     DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+    SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
     OwnerAgentWorkContext,
     OwnerAgentWorkExecution,
     OwnerAgentWorkRuntime,
 )
 from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
 from .owner_write_runtime import OwnerWriteRuntime, run_owner_write_command
+from .system_diagnostics_report import SystemDiagnosticsPayload
 
 
 EventValue: TypeAlias = Callable[[Any], str]
@@ -39,6 +41,10 @@ DeleteSessionSummary: TypeAlias = Callable[[str, int], bool]
 DevelopmentContextReportForEvent: TypeAlias = Callable[
     [Any, str],
     str | DevelopmentContextReportPayload | Awaitable[str | DevelopmentContextReportPayload],
+]
+SystemDiagnosticsReportForEvent: TypeAlias = Callable[
+    [Any, str],
+    SystemDiagnosticsPayload | Awaitable[SystemDiagnosticsPayload],
 ]
 
 
@@ -76,6 +82,7 @@ class OwnerRuntimeFactory:
     fact_memory_type: str = "fact_summary"
     preference_memory_type: str = "preference_summary"
     development_context_report_for_event: DevelopmentContextReportForEvent | None = None
+    system_diagnostics_report_for_event: SystemDiagnosticsReportForEvent | None = None
 
     def agent_context(self, event: Any) -> OwnerAgentContext:
         return OwnerAgentContext(
@@ -144,16 +151,26 @@ class OwnerRuntimeFactory:
         )
 
     def work_runtime(self, event: Any) -> OwnerAgentWorkRuntime:
-        executor = self.development_context_report_for_event
-        if executor is None:
+        development_executor = self.development_context_report_for_event
+        if development_executor is None:
             raise RuntimeError("development_context_report executor was not injected")
+        diagnostics_executor = self.system_diagnostics_report_for_event
+        if diagnostics_executor is None:
+            raise RuntimeError("system_diagnostics_report executor was not injected")
         context = self.agent_context(event)
         return OwnerAgentWorkRuntime(
             context=OwnerAgentWorkContext(
                 session_key=context.session_key,
                 user_id=context.user_id,
             ),
-            development_context_report_executor=lambda query: executor(event, query),
+            development_context_report_executor=lambda query: development_executor(
+                event,
+                query,
+            ),
+            system_diagnostics_report_executor=lambda scope: diagnostics_executor(
+                event,
+                scope,
+            ),
         )
 
     async def execute_development_context_report(
@@ -164,6 +181,16 @@ class OwnerRuntimeFactory:
         return await self.work_runtime(event).execute(
             work_type=DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
             query=query,
+        )
+
+    async def execute_system_diagnostics_report(
+        self,
+        event: Any,
+        scope: str,
+    ) -> OwnerAgentWorkExecution:
+        return await self.work_runtime(event).execute(
+            work_type=SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
+            query=scope,
         )
 
     def run_task_command(

@@ -687,6 +687,10 @@ P2.3 起，`owner_write_command` 的已审批主人管理写执行器已从 QQ a
 
 P2.4 起，`owner_runtime_factory.py` 作为 MainAgent owner runtime 总装层，集中组装 task/read/write 三块 runtime。QQ adapter 只保留 `owner_runtime_factory()` 依赖绑定点，并在 `/agent` 入口委托 factory 的 `run_task_command`、`run_read_command`、`format_task_read`、`execute_task_command`、`create_approval_request` 和 `run_write_command`。这是为后续 Runtime service / Web Owner Console 铺路的代码层整理，不改变任何主人命令行为。
 
+P2.46b 起，`OwnerAgentWorkRuntime` 注册第二个正式只读工作类型 `system_diagnostics_report`。主人私聊严格命令 `/agent 执行系统诊断任务` 执行 `overview`：把核心运行、聊天、MainAgent、记忆与RAG、视觉和语音压缩为大区状态，正常/按设计关闭区域合并，问题区域单独突出。它不调用 MainAgent LLM、聊天 completion、视觉推理、embedding/RAG 召回或 ProjectDocRAG 正文；不执行自动下钻或修复。
+
+P2.46c 起，主人私聊严格命令 `/agent 执行系统诊断任务：视觉` 执行 `scope=vision`。视觉详情只沿功能配置、loopback Ollama 服务、模型可用性和最近视觉调用/质量证据检查到第一故障层；上游失败后不继续展开下游。它不使用测试图片、不执行真实视觉推理、不拉取模型、不重启服务，也不自动创建 `vision_invocation` 或 `vision_inference` 深度任务。其他区域详情仍未注册，发送对应区域命令不会创建任务。
+
 当前边界：
 
 ```text
@@ -703,6 +707,7 @@ MainAgent/LLM 不直接写数据库；任务、审批和已审批主人管理工
 不发送额外 QQ 消息。
 不接 Agent API。
 不跑多步 agent loop。
+系统诊断 overview/vision 只允许 loopback Ollama/TTS 廉价检查；远程地址不主动探测。vision-only 不运行数据库、MemoryRAG、MainAgent、TTS 或聊天概览探针。
 ```
 
 P1 起，MainAgent 允许“多步只读诊断”，但仍不是多步写执行。当前第一条聚合诊断命令是：
@@ -747,6 +752,8 @@ QQ 测试：
 /agent 任务详情 最新
 /agent 完整排查图片识别问题
 /agent 完整排查记忆检索问题
+/agent 执行系统诊断任务
+/agent 执行系统诊断任务：视觉
 /agent 下一步
 /agent 现在卡在哪
 /agent 有什么待我确认
@@ -788,6 +795,8 @@ QQ 测试顺序：
 /agent 任务详情 最新
 /agent 完整排查图片识别问题
 /agent 完整排查记忆检索问题
+/agent 执行系统诊断任务
+/agent 执行系统诊断任务：视觉
 /agent-debug MainAgentGraph 当前状态
 /agent 查 MainAgentGraph 当前状态
 /agent 帮我执行 dir

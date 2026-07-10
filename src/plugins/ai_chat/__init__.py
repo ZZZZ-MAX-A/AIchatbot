@@ -48,6 +48,7 @@ from .compressor import CompressionResult, compress_session
 from .config import load_config
 from .database import DATABASE_PATH, connect, ensure_database
 from .diagnostics import (
+    check_ollama,
     clear_error_log,
     format_config_status,
     format_diagnostics,
@@ -155,8 +156,12 @@ from .owner_notify import (
     validate_owner_notification_content,
 )
 from .owner_agent_work_runtime import (
+    DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+    SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
     format_owner_agent_work_execution,
     parse_development_context_report_command,
+    parse_system_diagnostics_report_command,
+    SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE,
 )
 from .owner_runtime_factory import OwnerRuntimeFactory
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
@@ -178,6 +183,21 @@ from .summaries import (
     delete_session_summary,
     recent_summaries,
     summary_stats,
+)
+from .system_diagnostics_report import (
+    SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+    SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    ChatZoneEvidence,
+    CoreZoneEvidence,
+    MainAgentZoneEvidence,
+    MemoryRagZoneEvidence,
+    SystemDiagnosticsOverviewEvidence,
+    SystemDiagnosticsPayload,
+    VisionZoneEvidence,
+    VoiceZoneEvidence,
+    build_system_diagnostics_overview,
+    build_vision_diagnostics_report,
+    is_loopback_service_url,
 )
 from .trials import can_use_private_trial, increment_private_trial, trial_stats
 from .vision import (
@@ -903,8 +923,9 @@ def memory_rag_embedding_check_snapshot() -> dict[str, object]:
     }
 
 
-def memory_rag_storage_stats() -> dict[str, object]:
-    ensure_database()
+def memory_rag_storage_stats(*, ensure_schema: bool = True) -> dict[str, object]:
+    if ensure_schema:
+        ensure_database()
     with connect() as connection:
         manual_rows = connection.execute(
             """
@@ -4469,6 +4490,8 @@ def main_agent_help_reply() -> str:
             "/agent 边界",
             "/agent 任务 <目标>",
             "/agent 执行研发上下文任务：<问题>",
+            "/agent 执行系统诊断任务",
+            "/agent 执行系统诊断任务：视觉",
             "/agent 新增任务：<目标>",
             "/agent 把“目标”加入任务",
             "/agent 任务状态",
@@ -4504,6 +4527,8 @@ def main_agent_tool_status_reply() -> str:
     return "\n".join(
         [
             "MainAgent 当前开放能力：",
+            "",
+            "正式只读工作：development_context_report、system_diagnostics_report/overview、vision（主人私聊显式命令，不属于 LLM 工具选择）。",
             "",
             "1. dev_context",
             "风险：read_local",
@@ -4597,7 +4622,7 @@ def main_agent_status_reply() -> str:
             f"入口：{'开启' if config.enable_main_agent else '关闭'}",
             "模式：只读优先 + 审批门控写工具",
             "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
-            "任务：支持 pending / running / done / failed 事件记录；研发上下文报告只能由主人私聊显式命令执行，详细回复与持久化摘要分离。",
+            "任务：支持 pending / running / done / failed 事件记录；development_context_report 和 system_diagnostics_report 只能由主人私聊显式命令执行，详细回复与持久化摘要分离。",
             "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
             "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（清空图片缓存/错误日志、选择角色卡、添加长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单）",
             "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
@@ -4617,7 +4642,9 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、多步只读图片/记忆排查、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
             "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
             "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
-            "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行唯一已注册的 development_context_report；不由 LLM 选择工具，召回后只允许固定 JSON 契约的受限总结。",
+            "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行已注册的 development_context_report；不由 LLM 选择工具，召回后只允许固定 JSON 契约的受限总结。",
+            "允许：主人私聊显式 /agent 执行系统诊断任务，同步执行已注册的 system_diagnostics_report/overview；只返回确定性大区概览，不由 LLM 选择或总结。",
+            "允许：主人私聊显式 /agent 执行系统诊断任务：视觉，同步执行已注册的 system_diagnostics_report/vision；按首故障层返回确定性视觉区详情，不做真实视觉推理。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
@@ -4700,6 +4727,212 @@ async def run_development_context_report_for_event(
     )
 
 
+def _system_database_read_probe() -> bool:
+    try:
+        with connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def _non_negative_observation_int(value: object) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _system_recent_observation_evidence() -> dict[str, object]:
+    observation = _last_root_graph_chat_observation
+    if not isinstance(observation, dict):
+        return {
+            "chat_present": False,
+            "chat_error": False,
+            "memory_present": False,
+            "memory_error": False,
+            "vision_used": False,
+            "vision_errors": 0,
+            "vision_low_quality": 0,
+        }
+
+    error_artifact = observation.get("error_artifact")
+    if not isinstance(error_artifact, dict):
+        error_artifact = {}
+    context = observation.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    chat_commit = observation.get("chat_commit")
+    if not isinstance(chat_commit, dict):
+        chat_commit = {}
+
+    vision_errors = _non_negative_observation_int(
+        chat_commit.get("vision_error_count")
+    )
+    vision_low_quality = _non_negative_observation_int(
+        chat_commit.get("vision_low_quality_count")
+    )
+    vision_descriptions = _non_negative_observation_int(
+        chat_commit.get("vision_description_count")
+    )
+    return {
+        "chat_present": True,
+        "chat_error": bool(observation.get("error")) or bool(error_artifact),
+        "memory_present": "memory_rag_enabled" in chat_commit,
+        "memory_error": bool(str(chat_commit.get("memory_rag_error") or "").strip()),
+        "vision_used": bool(context.get("vision_used"))
+        or bool(vision_descriptions or vision_errors or vision_low_quality),
+        "vision_errors": vision_errors,
+        "vision_low_quality": vision_low_quality,
+    }
+
+
+async def _collect_system_vision_evidence(
+    observation: dict[str, object],
+) -> tuple[VisionZoneEvidence, int]:
+    service_ok: bool | None = None
+    model_exists: bool | None = None
+    local_probe_count = 0
+    if config.enable_vision and is_loopback_service_url(
+        config.vision_ollama_base_url
+    ):
+        local_probe_count = 1
+        vision_status = await asyncio.to_thread(check_ollama, config)
+        service_ok = bool(vision_status.service.ok)
+        model_exists = vision_status.model_exists
+
+    return (
+        VisionZoneEvidence(
+            enabled=config.enable_vision,
+            service_ok=service_ok,
+            model_exists=model_exists,
+            recent_usage_present=bool(observation["vision_used"]),
+            recent_error_count=int(observation["vision_errors"]),
+            recent_low_quality_count=int(observation["vision_low_quality"]),
+        ),
+        local_probe_count,
+    )
+
+
+async def run_system_diagnostics_report_for_event(
+    event: MessageEvent,
+    scope: str,
+) -> SystemDiagnosticsPayload:
+    if scope not in {
+        SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+        SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    }:
+        raise ValueError("system diagnostics scope is not registered")
+
+    observation = _system_recent_observation_evidence()
+    vision_evidence, vision_probe_count = await _collect_system_vision_evidence(
+        observation
+    )
+    if scope == SYSTEM_DIAGNOSTICS_VISION_SCOPE:
+        return build_vision_diagnostics_report(
+            vision_evidence,
+            local_probe_count=vision_probe_count,
+        )
+
+    local_probe_count = 1 + vision_probe_count
+    database_ok = _system_database_read_probe()
+
+    memory_storage_ok: bool | None = None
+    memory_document_count = 0
+    memory_embedding_count = 0
+    memory_pending_count = 0
+    if config.enable_memory_rag:
+        local_probe_count += 1
+        try:
+            storage = memory_rag_storage_stats(ensure_schema=False)
+            memory_storage_ok = True
+            memory_document_count = int(storage.get("document_count", 0) or 0)
+            memory_embedding_count = int(storage.get("embedding_count", 0) or 0)
+            memory_pending_count = int(storage.get("pending_count", 0) or 0)
+        except Exception:
+            memory_storage_ok = False
+
+    voice_service_ok: bool | None = None
+    voice_model_loaded: bool | None = None
+    if config.enable_tts and is_loopback_service_url(config.tts_service_url):
+        local_probe_count += 1
+        voice_status = await tts_health_snapshot()
+        voice_service_ok = bool(voice_status.get("ok"))
+        loaded = voice_status.get("loaded")
+        voice_model_loaded = loaded if isinstance(loaded, bool) else None
+
+    registered_work_types = set(
+        owner_runtime_factory().work_runtime(event).registered_work_types
+    )
+    approval_resume_registry = create_main_agent_approval_resume_tool_registry()
+    owner_write_spec = approval_resume_registry.get("owner_write_command")
+    enabled_high_risk_capabilities = tuple(
+        label
+        for enabled, label in (
+            (config.enable_agent_web, "Agent Web 配置开关"),
+            (config.enable_agent_shell, "Shell 配置开关"),
+            (config.enable_agent_local_write, "通用本地写配置开关"),
+            (config.enable_agent_external_write, "外部写配置开关"),
+        )
+        if enabled
+    )
+
+    evidence = SystemDiagnosticsOverviewEvidence(
+        core=CoreZoneEvidence(database_ok=database_ok),
+        chat=ChatZoneEvidence(
+            enabled=config.enable_private_chat or config.enable_group_chat,
+            model_configured=bool(
+                config.chat_llm_api_key
+                and config.chat_llm_base_url
+                and config.chat_llm_model
+            ),
+            recent_observation_present=bool(observation["chat_present"]),
+            recent_error=bool(observation["chat_error"]),
+        ),
+        main_agent=MainAgentZoneEvidence(
+            enabled=config.enable_main_agent,
+            owner_only=config.main_agent_owner_only,
+            group_allowed=config.main_agent_allow_group,
+            development_report_registered=(
+                DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE in registered_work_types
+            ),
+            system_report_registered=(
+                SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE in registered_work_types
+            ),
+            owner_write_registered=bool(
+                owner_write_spec is not None and owner_write_spec.enabled
+            ),
+            owner_write_requires_approval=bool(
+                owner_write_spec is not None and owner_write_spec.requires_approval
+            ),
+            owner_write_resume_enabled=bool(
+                owner_write_spec is not None
+                and owner_write_spec.approval_resume_enabled
+            ),
+            enabled_high_risk_capabilities=enabled_high_risk_capabilities,
+        ),
+        memory_rag=MemoryRagZoneEvidence(
+            memory_rag_enabled=config.enable_memory_rag,
+            memory_rag_inject_in_chat=config.memory_rag_inject_in_chat,
+            project_doc_rag_enabled=config.enable_project_doc_rag,
+            storage_ok=memory_storage_ok,
+            document_count=memory_document_count,
+            embedding_count=memory_embedding_count,
+            pending_count=memory_pending_count,
+            recent_observation_present=bool(observation["memory_present"]),
+            recent_error=bool(observation["memory_error"]),
+        ),
+        vision=vision_evidence,
+        voice=VoiceZoneEvidence(
+            enabled=config.enable_tts,
+            service_ok=voice_service_ok,
+            model_loaded=voice_model_loaded,
+        ),
+        local_probe_count=local_probe_count,
+    )
+    return build_system_diagnostics_overview(evidence)
+
+
 def owner_runtime_factory() -> OwnerRuntimeFactory:
     return OwnerRuntimeFactory(
         session_key_from_event=session_key,
@@ -4734,6 +4967,7 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         fact_memory_type=MANUAL_FACT_TYPE,
         preference_memory_type=MANUAL_PREFERENCE_TYPE,
         development_context_report_for_event=run_development_context_report_for_event,
+        system_diagnostics_report_for_event=run_system_diagnostics_report_for_event,
     )
 
 
@@ -4765,18 +4999,44 @@ async def run_main_agent_explicit_work_command(
     query: str,
 ) -> str | None:
     work_query = parse_development_context_report_command(query)
-    if work_query is None:
+    if work_query is not None:
+        if not isinstance(event, PrivateMessageEvent):
+            return "研发上下文任务只允许主人私聊通过 /agent 显式执行。"
+        if not is_owner(config, event):
+            return "研发上下文任务被拒绝：需要主人权限。"
+        if not work_query:
+            return "请提供研发上下文任务问题：/agent 执行研发上下文任务：<问题>"
+
+        execution = await owner_runtime_factory().execute_development_context_report(
+            event,
+            work_query,
+        )
+        return format_owner_agent_work_execution(execution)
+
+    diagnostics_scope = parse_system_diagnostics_report_command(query)
+    if diagnostics_scope is None:
         return None
     if not isinstance(event, PrivateMessageEvent):
-        return "研发上下文任务只允许主人私聊通过 /agent 显式执行。"
+        return "系统诊断任务只允许主人私聊通过 /agent 显式执行。"
     if not is_owner(config, event):
-        return "研发上下文任务被拒绝：需要主人权限。"
-    if not work_query:
-        return "请提供研发上下文任务问题：/agent 执行研发上下文任务：<问题>"
+        return "系统诊断任务被拒绝：需要主人权限。"
+    if diagnostics_scope == SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE:
+        return (
+            "系统诊断范围不受支持；当前只允许：/agent 执行系统诊断任务，或 "
+            "/agent 执行系统诊断任务：视觉"
+        )
+    if diagnostics_scope not in {
+        SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+        SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    }:
+        return (
+            "当前只开放系统诊断概览和视觉区详情，所请求区域尚未注册；"
+            "未创建任务，也未执行深度探针。"
+        )
 
-    execution = await owner_runtime_factory().execute_development_context_report(
+    execution = await owner_runtime_factory().execute_system_diagnostics_report(
         event,
-        work_query,
+        diagnostics_scope,
     )
     return format_owner_agent_work_execution(execution)
 

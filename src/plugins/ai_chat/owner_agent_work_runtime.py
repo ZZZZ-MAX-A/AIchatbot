@@ -20,12 +20,59 @@ from .development_context_report import (
     DevelopmentContextReportPayload,
     redact_development_context_sensitive_text,
 )
+from .system_diagnostics_report import (
+    STATUS_LABELS,
+    STATUS_ORDER,
+    SYSTEM_DIAGNOSTICS_OVERVIEW_RESPONSE_LIMIT,
+    SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+    SYSTEM_DIAGNOSTICS_VISION_RESPONSE_LIMIT,
+    SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    VISION_INFERENCE_SCOPE,
+    VISION_INVOCATION_SCOPE,
+    VISION_LAYER_INVOCATION,
+    VISION_LAYER_LABELS,
+    VISION_LAYER_QUALITY,
+    ZONE_LABELS,
+    ZONE_ORDER,
+    ZONE_VISION,
+    SystemDiagnosticsReportPayload,
+    VisionDiagnosticsReportPayload,
+)
 
 
 DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE = "development_context_report"
 DEVELOPMENT_CONTEXT_REPORT_DISPLAY_NAME = "研发上下文报告"
 DEVELOPMENT_CONTEXT_REPORT_RISK_LEVEL = "read_local"
 DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX = "执行研发上下文任务"
+SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE = "system_diagnostics_report"
+SYSTEM_DIAGNOSTICS_REPORT_DISPLAY_NAME = "系统诊断报告"
+SYSTEM_DIAGNOSTICS_REPORT_RISK_LEVEL = "read_local"
+SYSTEM_DIAGNOSTICS_REPORT_COMMAND_PREFIX = "执行系统诊断任务"
+SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE = "unsupported"
+
+SYSTEM_DIAGNOSTICS_SCOPE_ALIASES = {
+    "overview": SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+    "概览": SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+    "core": "core",
+    "核心": "core",
+    "核心运行": "core",
+    "chat": "chat",
+    "聊天": "chat",
+    "main_agent": "main_agent",
+    "mainagent": "main_agent",
+    "agent": "main_agent",
+    "memory_rag": "memory_rag",
+    "memoryrag": "memory_rag",
+    "记忆与rag": "memory_rag",
+    "记忆与rag区": "memory_rag",
+    "vision": "vision",
+    "视觉": "vision",
+    "voice": "voice",
+    "语音": "voice",
+    "owner_console": "owner_console",
+    "ownerconsole": "owner_console",
+    "owner console": "owner_console",
+}
 
 WorkExecutor = Callable[[str], object | Awaitable[object]]
 
@@ -77,17 +124,43 @@ def parse_development_context_report_command(query: str) -> str | None:
     return None
 
 
+def parse_system_diagnostics_report_command(query: str) -> str | None:
+    stripped = query.strip()
+    if stripped == SYSTEM_DIAGNOSTICS_REPORT_COMMAND_PREFIX:
+        return SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE
+    for separator in ("：", ":"):
+        prefix = f"{SYSTEM_DIAGNOSTICS_REPORT_COMMAND_PREFIX}{separator}"
+        if stripped.startswith(prefix):
+            requested_scope = stripped[len(prefix):].strip().lower()
+            if not requested_scope:
+                return SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE
+            return SYSTEM_DIAGNOSTICS_SCOPE_ALIASES.get(
+                requested_scope,
+                SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE,
+            )
+    return None
+
+
 def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str:
     task = execution.task
+    is_system_diagnostics = execution.work_type == SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE
+    task_label = "系统诊断任务" if is_system_diagnostics else "研发上下文任务"
     if task is None:
-        return "研发上下文任务未创建；未执行任何执行器。"
+        return f"{task_label}未创建；未执行任何执行器。"
 
     if execution.outcome == "completed":
-        headline = f"研发上下文任务 #{task.id} 已完成。"
+        headline = f"{task_label} #{task.id} 已完成。"
     elif execution.outcome == "failed":
-        headline = f"研发上下文任务 #{task.id} 执行失败。"
+        headline = f"{task_label} #{task.id} 执行失败。"
     else:
-        headline = f"研发上下文任务 #{task.id} 未进入执行。"
+        headline = f"{task_label} #{task.id} 未进入执行。"
+
+    boundary = (
+        "边界：只执行已注册的确定性系统概览或主人显式选择的视觉区详情；"
+        "未开放深度探针、外部请求、自动重试或修复。"
+        if is_system_diagnostics
+        else "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。"
+    )
 
     return "\n".join(
         [
@@ -96,7 +169,7 @@ def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str
             "结果：",
             execution.response_text or execution.result_summary,
             f"查看：/agent 任务详情 {task.id}",
-            "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。",
+            boundary,
         ]
     )
 
@@ -210,6 +283,170 @@ def _sanitize_development_context_report(raw_result: object) -> SanitizedAgentWo
     )
 
 
+def _sanitize_system_diagnostics_response(text: str, *, limit: int) -> str:
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("system diagnostics report response must be non-empty")
+    normalized_lines: list[str] = []
+    for line in text.splitlines():
+        without_controls = "".join(
+            " " if ord(character) < 32 else character for character in line
+        )
+        normalized_lines.append(without_controls.rstrip())
+    normalized = redact_development_context_sensitive_text(
+        "\n".join(normalized_lines).strip()
+    )
+    if not normalized:
+        raise ValueError("system diagnostics report response became empty")
+    return normalized[:limit].rstrip()
+
+
+def _persisted_system_diagnostics_summary(
+    payload: SystemDiagnosticsReportPayload,
+) -> str:
+    counts = payload.status_counts
+    count_text = "，".join(
+        f"{STATUS_LABELS[status]} {counts[status]}"
+        for status in STATUS_ORDER
+    )
+    primary_label = (
+        ZONE_LABELS[payload.primary_recommended_scope]
+        if payload.primary_recommended_scope
+        else "无"
+    )
+    lines = [
+        "系统诊断概览已完成。",
+        f"总体状态：{STATUS_LABELS[payload.overall_status]}。",
+        f"大区：{count_text}。",
+        f"优先排查区域：{primary_label}。",
+        f"本地检查：{payload.local_probe_count}。",
+        f"深度探针：{payload.deep_probe_count}。",
+        f"外部请求：{payload.external_request_count}。",
+        f"修复操作：{payload.repair_action_count}。",
+        "详细回复：确定性大区概览，仅在本次主人私聊返回。",
+        "任务记录未保存完整诊断证据、配置值、错误原文、路径或观测明细。",
+    ]
+    return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
+
+
+def _persisted_vision_diagnostics_summary(
+    payload: VisionDiagnosticsReportPayload,
+) -> str:
+    recommended_scope = payload.recommended_scope or "无"
+    lines = [
+        "视觉区详情诊断已完成。",
+        f"区域状态：{STATUS_LABELS[payload.zone_status.status]}。",
+        f"定位层级：{VISION_LAYER_LABELS[payload.fault_layer]}。",
+        f"推荐下一范围：{recommended_scope}。",
+        f"本地检查：{payload.local_probe_count}。",
+        f"深度探针：{payload.deep_probe_count}。",
+        f"外部请求：{payload.external_request_count}。",
+        f"修复操作：{payload.repair_action_count}。",
+        "详细回复：确定性视觉状态链，仅在本次主人私聊返回。",
+        "任务记录未保存日志、图片、路径、配置值、完整观测或详细报告。",
+    ]
+    return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
+
+
+def _validate_system_diagnostics_counts(
+    *,
+    local_probe_count: int,
+    external_request_count: int,
+    deep_probe_count: int,
+    repair_action_count: int,
+) -> None:
+    for count in (
+        local_probe_count,
+        external_request_count,
+        deep_probe_count,
+        repair_action_count,
+    ):
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("system diagnostics count is invalid")
+    if external_request_count or deep_probe_count or repair_action_count:
+        raise ValueError("system diagnostics exceeded read-only scope")
+
+
+def _sanitize_system_diagnostics_report(
+    raw_result: object,
+) -> SanitizedAgentWorkResult:
+    if isinstance(raw_result, SystemDiagnosticsReportPayload):
+        if raw_result.scope != SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE:
+            raise ValueError("system diagnostics scope is invalid")
+        if raw_result.overall_status not in STATUS_ORDER:
+            raise ValueError("system diagnostics overall status is invalid")
+        if tuple(zone.zone for zone in raw_result.zones) != ZONE_ORDER:
+            raise ValueError("system diagnostics zones are invalid")
+        for zone in raw_result.zones:
+            if zone.status not in STATUS_ORDER:
+                raise ValueError("system diagnostics zone status is invalid")
+            if not isinstance(zone.headline, str) or not zone.headline.strip():
+                raise ValueError("system diagnostics zone headline is invalid")
+            if zone.recommended_scope not in {"", zone.zone}:
+                raise ValueError("system diagnostics recommended scope is invalid")
+        if raw_result.primary_recommended_scope not in {"", *ZONE_ORDER}:
+            raise ValueError("system diagnostics primary scope is invalid")
+        _validate_system_diagnostics_counts(
+            local_probe_count=raw_result.local_probe_count,
+            external_request_count=raw_result.external_request_count,
+            deep_probe_count=raw_result.deep_probe_count,
+            repair_action_count=raw_result.repair_action_count,
+        )
+        response_text = _sanitize_system_diagnostics_response(
+            raw_result.report_text,
+            limit=SYSTEM_DIAGNOSTICS_OVERVIEW_RESPONSE_LIMIT,
+        )
+        return SanitizedAgentWorkResult(
+            persisted_summary=_persisted_system_diagnostics_summary(raw_result),
+            response_text=response_text,
+        )
+
+    if isinstance(raw_result, VisionDiagnosticsReportPayload):
+        if raw_result.scope != SYSTEM_DIAGNOSTICS_VISION_SCOPE:
+            raise ValueError("vision diagnostics scope is invalid")
+        zone = raw_result.zone_status
+        if zone.zone != ZONE_VISION or zone.status not in STATUS_ORDER:
+            raise ValueError("vision diagnostics zone status is invalid")
+        if not isinstance(zone.headline, str) or not zone.headline.strip():
+            raise ValueError("vision diagnostics zone headline is invalid")
+        if zone.recommended_scope not in {"", ZONE_VISION}:
+            raise ValueError("vision diagnostics zone recommendation is invalid")
+        if raw_result.fault_layer not in VISION_LAYER_LABELS:
+            raise ValueError("vision diagnostics fault layer is invalid")
+        expected_statuses = {
+            "configuration": {"off_by_design"},
+            "service": {"unknown", "degraded"},
+            "model": {"unknown", "degraded"},
+            "invocation": {"attention"},
+            "quality": {"attention"},
+            "observation": {"normal"},
+            "none": {"normal"},
+        }
+        if zone.status not in expected_statuses[raw_result.fault_layer]:
+            raise ValueError("vision diagnostics layer status is invalid")
+        expected_scope = {
+            VISION_LAYER_INVOCATION: VISION_INVOCATION_SCOPE,
+            VISION_LAYER_QUALITY: VISION_INFERENCE_SCOPE,
+        }.get(raw_result.fault_layer, "")
+        if raw_result.recommended_scope != expected_scope:
+            raise ValueError("vision diagnostics recommended scope is invalid")
+        _validate_system_diagnostics_counts(
+            local_probe_count=raw_result.local_probe_count,
+            external_request_count=raw_result.external_request_count,
+            deep_probe_count=raw_result.deep_probe_count,
+            repair_action_count=raw_result.repair_action_count,
+        )
+        response_text = _sanitize_system_diagnostics_response(
+            raw_result.report_text,
+            limit=SYSTEM_DIAGNOSTICS_VISION_RESPONSE_LIMIT,
+        )
+        return SanitizedAgentWorkResult(
+            persisted_summary=_persisted_vision_diagnostics_summary(raw_result),
+            response_text=response_text,
+        )
+
+    raise ValueError("system diagnostics executor returned invalid payload")
+
+
 def _development_context_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
     return AgentWorkSpec(
         name=DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
@@ -223,18 +460,35 @@ def _development_context_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
     )
 
 
+def _system_diagnostics_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
+    return AgentWorkSpec(
+        name=SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
+        display_name=SYSTEM_DIAGNOSTICS_REPORT_DISPLAY_NAME,
+        risk_level=SYSTEM_DIAGNOSTICS_REPORT_RISK_LEVEL,
+        required_arguments=("scope",),
+        executor=executor,
+        result_sanitizer=_sanitize_system_diagnostics_report,
+        requires_approval=False,
+        result_limit=AGENT_TASK_RESULT_LIMIT,
+    )
+
+
 class OwnerAgentWorkRuntime:
-    """Runs the one registered read-only work type without any QQ dependency."""
+    """Runs registered read-only work types without any QQ dependency."""
 
     def __init__(
         self,
         *,
         context: OwnerAgentWorkContext,
         development_context_report_executor: WorkExecutor,
+        system_diagnostics_report_executor: WorkExecutor,
     ) -> None:
         self.context = context
-        spec = _development_context_report_spec(development_context_report_executor)
-        self._work_specs = {spec.name: spec}
+        specs = (
+            _development_context_report_spec(development_context_report_executor),
+            _system_diagnostics_report_spec(system_diagnostics_report_executor),
+        )
+        self._work_specs = {spec.name: spec for spec in specs}
 
     @property
     def registered_work_types(self) -> tuple[str, ...]:
