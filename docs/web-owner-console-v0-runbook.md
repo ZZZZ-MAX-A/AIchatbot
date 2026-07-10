@@ -248,7 +248,7 @@ cd D:\AIchatbot
 Dashboard、Tasks、Approvals 和 Detail 业务数据当前仍然只支持首次加载和手动刷新。
 ```
 
-P2.40b 才会把 30 秒低频刷新接入允许的业务页面。Diagnostics、Memory、Access Control 和 Settings 继续保持手动刷新。
+业务页面不会在 P2.40a 自动接入轮询；等待 P2.43c 形成真实 running 任务生命周期后，才会重新评估是否以 60-120 秒低频刷新接入。Diagnostics、Memory、Access Control 和 Settings 继续保持手动刷新。
 
 建议按这个顺序看页面：
 
@@ -469,7 +469,8 @@ P2.39a：按设计实现可选本地静态模式。已完成。
 P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
 P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
 P2.40a：受控自动刷新基础设施、AppShell health 检查和生命周期测试。已完成。
-P2.40b：接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
+P2.43：先设计并落地首个正式 MainAgent 只读工作任务模型，见 docs/main-agent-first-readonly-work-task-design.md。
+P2.40b：在存在真实 running 任务后，再评估接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
 P2.40c：guard、runbook 和浏览器 smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：单独设计 Web 审批操作，不能直接在 v0 只读页面上加按钮。

@@ -27,13 +27,7 @@ GET /api/v1/owner-console/settings
 不读取 Python 文件、数据库、.env 或日志。
 ```
 
-P2.40 已完成只读自动刷新策略设计。P2.40a 已实现顶部内存态开关、受控 timer、页面可见性、失败暂停和每 60 秒一次的 health 检查；业务页面仍只有首次加载和手动刷新，等待 P2.40b。设计见：
-
-```text
-docs/web-owner-console-readonly-auto-refresh-design.md
-```
-
-P2.40 已完成只读自动刷新策略设计，但当前前端仍只有首次加载和手动刷新，尚未实现周期轮询。设计见：
+P2.40 已完成只读自动刷新策略设计。P2.40a 已实现顶部内存态开关、受控 timer、页面可见性、失败暂停和每 60 秒一次的 health 检查；业务页面仍只有首次加载和手动刷新，等待 P2.43 形成真实 running 任务生命周期后再评估 P2.40b。设计见：
 
 ```text
 docs/web-owner-console-readonly-auto-refresh-design.md
