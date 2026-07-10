@@ -116,6 +116,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 
 - [main-agent-first-readonly-work-task-design.md](main-agent-first-readonly-work-task-design.md)
 - [main-agent-useful-development-context-report-design.md](main-agent-useful-development-context-report-design.md)
+- [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：P2.46 分区分层系统诊断；P2.46b 短概览与 P2.46c 视觉区详情已本地实现，P2.46d 主人 QQ live 待验收。
 - [development-context-current-state-retrieval-design.md](development-context-current-state-retrieval-design.md)
 - [project-rag-document-state-consistency-audit.md](project-rag-document-state-consistency-audit.md)：稳定设计中的当前/历史状态一致性审计。
 

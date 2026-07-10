@@ -96,8 +96,9 @@ Ran 24 tests OK
   /agent 任务 <目标> 可创建 pending 任务记录。
   /agent 新增任务：<目标> 等明确本地别名可创建 pending 任务记录。
   /agent 把“目标”加入任务 等明确本地别名可创建 pending 任务记录。
-  /agent 执行研发上下文任务：<问题> 仅允许主人私聊显式执行唯一已注册的只读 work type，并形成 running -> done / failed 生命周期。
+  /agent 执行研发上下文任务：<问题> 仅允许主人私聊显式执行 development_context_report，并形成 running -> done / failed 生命周期。
   研发上下文任务在有召回且 MainAgent LLM 开启时返回固定六字段受限报告；不可用时确定性回退，任务记录只保存命中计数和总结方式。
+  /agent 执行系统诊断任务 与 /agent 执行系统诊断任务：视觉 仅允许主人私聊显式执行 system_diagnostics_report/overview 或 vision；分别使用确定性六区分诊和首故障视觉状态链，任务记录只保存安全状态/层级/计数。
   /agent 任务状态 可查看当前会话任务。
   /agent 任务详情 <任务ID> 可查看任务和事件。
   /agent 取消任务 <任务ID> 可取消当前会话 pending 任务。
@@ -4255,6 +4256,181 @@ found 0 vulnerabilities
 
 $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
 Ran 20 tests OK
+```
+
+## v1.6 MainAgent zoned system diagnostics overview
+
+状态：已完成 P2.46a 设计、P2.46b 系统概览和 P2.46c 视觉区详情的本地实现/回归；P2.46d 主人 QQ live 尚未完成。设计见 `docs/main-agent-system-diagnostics-report-design.md`。
+
+本次完成：
+
+```text
+将 system_diagnostics_report 定位为第二个候选正式只读工作类型。
+默认任务只做系统大区概览分诊，不复制现有诊断系统的完整输出。
+采用“系统概览 -> 区域详情 -> 针对性深度探针”三级模型。
+正常和按设计关闭的大区合并输出，只单独突出异常、降级、需要关注和影响判断的未知区域。
+概览最多推荐一个优先排查区域，并返回严格的主人确认命令；不自动创建详情任务。
+首批核心大区定义为核心运行、聊天、MainAgent、记忆与RAG、视觉和语音；Owner Console 为可选区。
+区域详情沿固定依赖链查找第一故障层，上游失败后不继续堆叠无关下游证据。
+视觉区作为首个候选详情试点，明确区分服务在线、模型已安装、模型驻留和最近使用状态。
+概览不调用 LLM、外部聊天 API、视觉推理、embedding、RAG 召回或 ProjectDocRAG 正文。
+定义了自适应短输出、安全持久化摘要、部分失败、任务 done/failed 和显式下钻合同。
+```
+
+拟定拆分：
+
+```text
+P2.46b：只实现结构化大区快照、确定性 evaluator、overview 和第二个正式只读 work type。
+P2.46c：实现 vision 区域详情试点，不执行真实推理。
+P2.46d：重启 Bot 后完成主人 QQ live，验证短输出、显式下钻和安全持久化。
+其他区域详情和深度探针根据实际使用结果另行批准。
+```
+
+P2.46b 实现：
+
+```text
+新增 src/plugins/ai_chat/system_diagnostics_report.py：
+  六个固定大区的结构化 evidence 和 status。
+  normal / attention / degraded / error / off_by_design / unknown 确定性判断。
+  严重度和核心依赖优先级选择一个 primary scope。
+  正常/按设计关闭区域合并，异常区域单行突出，概览最多 1200 字符。
+  只允许 loopback 服务 URL 进入廉价本地探针判断。
+
+OwnerAgentWorkRuntime：
+  注册第二个 system_diagnostics_report/read_local work type。
+  新增严格“执行系统诊断任务”解析；overview 可执行，已知区域和未知 scope 均在任务前停止。
+  系统概览 sanitizer 强制 external_request_count、deep_probe_count、repair_action_count 全为 0。
+  QQ 详细报告只在本次主人私聊返回；task.result 和 work_finished 只保存总体状态、六区计数、优先区域和安全计数。
+
+OwnerRuntimeFactory / QQ 入口：
+  注入 event-bound system_diagnostics_report executor。
+  /agent 执行系统诊断任务 只允许主人私聊且先于普通语义/LLM 路径执行。
+  /agent-debug、普通聊天、群聊、非主人私聊和 Web 不能触发。
+  区域详情未注册时不创建任务，不执行探针，不 fallback 到 dev_context。
+
+overview 证据：
+  核心运行：当前入口和数据库 SELECT 1。
+  聊天：开关、模型配置完整性和最近 RootGraph 安全错误布尔值；不发 completion。
+  MainAgent：两个正式 work type、主人私聊策略和 owner_write_command 审批/受控恢复标记。
+  记忆与RAG：MemoryRAG 非正文索引/向量/待索引计数和最近安全观测；不做 embedding/召回。
+  视觉：只对 loopback Ollama 查询服务和模型列表，结合最近视觉计数；不做推理。
+  语音：关闭时跳过；开启且 loopback 时只读 health；不生成音频。
+```
+
+P2.46c 实现：
+
+```text
+system_diagnostics_report.py：
+  新增 VisionDiagnosticsReportPayload、vision scope、1800 字符上限和固定定位层级。
+  按 configuration -> service -> model -> invocation/quality/observation 首故障短路。
+  视觉关闭为 off_by_design；非 loopback/未验证服务为 unknown；服务或模型不可用为 degraded。
+  最近调用错误只建议 vision_invocation，低质量只建议 vision_inference；两个深度 scope 均未注册且不会自动执行。
+  无近期使用保持 normal/neutral，并明确不等于端到端验证。
+
+OwnerAgentWorkRuntime：
+  system_diagnostics_report sanitizer 同时接受 overview 与 vision 两种结构化 payload。
+  vision task.result/work_finished 只保存区域状态、定位层级、推荐 scope 和本地/深度/外部/修复计数。
+  external_request_count、deep_probe_count、repair_action_count 任一非 0 都拒绝完成任务。
+  不持久化详细状态链、日志、图片、路径、配置值或完整观测。
+
+OwnerRuntimeFactory / QQ 入口：
+  /agent 执行系统诊断任务：视觉 仅允许主人私聊显式执行并创建 scope=vision 正式任务。
+  overview 与 vision 共用视觉 evidence collector，避免两个输出漂移。
+  vision-only 在数据库、MemoryRAG、MainAgent 注册表、TTS 和聊天概览探针之前返回。
+  只允许 loopback Ollama /api/tags；非 loopback 地址不主动访问。
+  不执行 describe_images、真实视觉推理、测试图片、模型拉取、服务重启、自动子任务、重试或修复。
+  其他已知区域和未知 scope 仍在任务创建前停止，不 fallback 到语义 MainAgent、LLM 或 dev_context。
+```
+
+P2.46c 验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_system_diagnostics_report tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract tests.test_diagnostics_units tests.test_config_loading -q
+Ran 166 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -q
+Ran 375 tests OK
+
+既有非失败提示：FastAPI TestClient 依赖产生 StarletteDeprecationWarning。
+```
+
+P2.46c 文档与检索验证：
+
+```text
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs：
+  scanned_files=62
+  chunks_seen=1320
+  created_documents=1
+  updated_documents=221
+  embeddings_created=1
+  embeddings_updated=75
+  errors=0
+
+固定查询“P2.46c system_diagnostics_report vision 视觉区详情 当前实现 P2.46d QQ live 待验收”：
+  project_results=5
+  第 1 条为 current-development-status P2.46c 当前状态锚点
+  第 2 条为 main-agent-system-diagnostics-report-design 的 P2.46c 实现清单
+  第 4、5 条为设计总状态和 version-runlog 当前阶段
+  召回结论一致：P2.46c 本地完成，P2.46d Bot 重启和主人 QQ live 待完成
+  历史 P2.46a/b 片段只作为后排阶段记录，没有覆盖当前状态锚点
+```
+
+边界：
+
+```text
+P2.46a-c 已完成本地设计/实现/回归，但尚未重启 Bot 或进行 P2.46d live 验收。
+普通聊天仍不能触发 MainAgent；ProjectDocRAG 正文仍只进入显式 /agent dev_context。
+不新增 shell、Git、任意文件读写、未注册数据库写入、外部请求、自动诊断、自动下钻、自动修复或额外 QQ 发送。
+Owner Console 继续只读 GET；P2.40b、登录鉴权和 Web 审批操作继续未批准。
+```
+
+P2.46b 验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_system_diagnostics_report tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract tests.test_diagnostics_units tests.test_config_loading -v
+Ran 155 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Ran 364 tests OK
+
+既有非失败提示：FastAPI TestClient 依赖产生 StarletteDeprecationWarning。
+```
+
+P2.46b 文档与检索验证：
+
+```text
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs：
+  scanned_files=62
+  chunks_seen=1318
+  new_documents=1
+  new_embeddings=1
+  errors=0
+
+固定查询“P2.46b system_diagnostics_report overview 当前实现 视觉区域待完成 QQ live”：
+  project_results=4
+  memory_results=0
+  第 1 条为 current-development-status P2.46b 快照
+  其余命中来自 main-agent-system-diagnostics-report-design 和 version-runlog
+  全部一致声明 P2.46b 本地完成、P2.46c 视觉详情和 P2.46d QQ live 未完成
+```
+
+文档与检索验证：
+
+```text
+Markdown 相对链接检查：没有缺失目标。
+git diff --check：通过。
+第一次 ProjectDocRAG 重建因执行工具 64 秒上限被中断，未将其记为成功。
+使用更长命令超时重新执行 .\scripts\rebuild-rag-index.ps1 -ProjectDocs：
+  scanned_files=62
+  chunks_seen=1317
+  errors=0
+
+P2.46a 设计阶段固定查询“P2.46a system_diagnostics_report 分区分层诊断 默认短概览 视觉区域 尚未实现”：
+  project_results=5
+  memory_results=0
+  5 条均来自 main-agent-system-diagnostics-report-design 或 version-runlog 的 P2.46a 记录
+  当时结果明确区分 P2.46a 设计完成与 P2.46b-d 尚未实现
+  该记录是 P2.46a 历史检索验证，不覆盖本节前面的 P2.46b 当前实现状态
 ```
 
 ## v1.6 Development context current-state production connection

@@ -89,6 +89,9 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             development_context_report_for_event=lambda _event, _query: (
                 "project docs: 0\nmemories: 0"
             ),
+            system_diagnostics_report_for_event=lambda _event, _scope: (
+                "system diagnostics overview"
+            ),
         )
         context = self.tool_registry.ToolContext(
             metadata={
@@ -104,11 +107,15 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         work_runtime = factory.work_runtime(event)
         self.assertEqual(
             work_runtime.registered_work_types,
-            ("development_context_report",),
+            ("development_context_report", "system_diagnostics_report"),
         )
         self.assertEqual(
             work_runtime.work_spec("development_context_report").executor("factory query"),
             "project docs: 0\nmemories: 0",
+        )
+        self.assertEqual(
+            work_runtime.work_spec("system_diagnostics_report").executor("overview"),
+            "system diagnostics overview",
         )
         self.assertEqual(
             asyncio.run(factory.run_read_command(event, "bot_status", context)),
