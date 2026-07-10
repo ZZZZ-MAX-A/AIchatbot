@@ -11,7 +11,12 @@ from .owner_agent_runtime import (
     format_owner_agent_task_read,
     run_owner_agent_task_command,
 )
-from .owner_agent_work_runtime import OwnerAgentWorkContext, OwnerAgentWorkRuntime
+from .owner_agent_work_runtime import (
+    DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+    OwnerAgentWorkContext,
+    OwnerAgentWorkExecution,
+    OwnerAgentWorkRuntime,
+)
 from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
 from .owner_write_runtime import OwnerWriteRuntime, run_owner_write_command
 
@@ -145,6 +150,16 @@ class OwnerRuntimeFactory:
                 user_id=context.user_id,
             ),
             development_context_report_executor=lambda query: executor(event, query),
+        )
+
+    async def execute_development_context_report(
+        self,
+        event: Any,
+        query: str,
+    ) -> OwnerAgentWorkExecution:
+        return await self.work_runtime(event).execute(
+            work_type=DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+            query=query,
         )
 
     def run_task_command(

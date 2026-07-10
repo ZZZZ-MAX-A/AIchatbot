@@ -7,6 +7,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ENTRY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "__init__.py"
 OWNER_RUNTIME_FACTORY = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_runtime_factory.py"
+OWNER_AGENT_WORK_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_agent_work_runtime.py"
 OWNER_READ_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_read_runtime.py"
 OWNER_WRITE_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_write_runtime.py"
 
@@ -47,12 +48,17 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("owner_write_command", source)
         self.assertIn("approval_resume_enabled=true", source)
         self.assertIn("run_main_agent_task_command", source)
+        self.assertIn("run_main_agent_explicit_work_command", source)
+        self.assertIn("parse_development_context_report_command", source)
+        self.assertIn("if not isinstance(event, PrivateMessageEvent):", source)
+        self.assertIn("if not is_owner(config, event):", source)
         self.assertIn("OwnerRuntimeFactory", source)
         self.assertIn("owner_runtime_factory", source)
         self.assertIn("run_read_command", source)
         self.assertIn("run_write_command", source)
         self.assertIn("OwnerAgentContext", factory_source)
         self.assertIn("run_owner_agent_task_command", factory_source)
+        self.assertIn("execute_development_context_report", factory_source)
         self.assertIn("format_owner_agent_task_read", factory_source)
         self.assertIn("execute_owner_agent_task_command", factory_source)
         self.assertIn("create_owner_agent_approval_request", factory_source)
@@ -72,6 +78,12 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn('if command == "select_persona":', write_runtime_source)
         self.assertIn('if command in {"add_fact_memory", "add_preference_memory"}:', write_runtime_source)
         self.assertIn("delete_session_summary requires numeric summary_id", write_runtime_source)
+        work_runtime_source = OWNER_AGENT_WORK_RUNTIME.read_text(encoding="utf-8")
+        self.assertIn("DEVELOPMENT_CONTEXT_REPORT_COMMAND_PREFIX", work_runtime_source)
+        self.assertIn("parse_development_context_report_command", work_runtime_source)
+        self.assertIn("format_owner_agent_work_execution", work_runtime_source)
+        self.assertNotIn("nonebot", work_runtime_source)
+        self.assertNotIn("owner_write_runtime", work_runtime_source)
 
     def test_memory_rag_runner_uses_configured_owner_check(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

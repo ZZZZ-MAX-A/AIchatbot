@@ -337,6 +337,11 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 user_id="10001",
                 goal="owner failed task",
             )
+            running_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="owner running work task",
+            )
             other_task_id = self.agent_tasks.create_agent_task(
                 session_key="private:20002",
                 user_id="20002",
@@ -356,6 +361,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 risk_level="write_local",
                 reason="other approval",
             )
+            self.agent_tasks.claim_agent_task_for_work(
+                task_id=running_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="development_context_report",
+                query_summary="verify read-only running task contract",
+            )
             with self.database.connect() as connection:
                 connection.execute(
                     """
@@ -372,6 +384,9 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
 
             tasks_response = self.client.get(
                 "/api/v1/owner-console/tasks?status=pending&limit=20"
+            )
+            running_response = self.client.get(
+                "/api/v1/owner-console/tasks?status=running&limit=20"
             )
             approvals_response = self.client.get(
                 "/api/v1/owner-console/approvals?status=pending&limit=20"
@@ -394,6 +409,18 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(
             task_data["boundary"]["ordinary_chat_can_trigger_main_agent"]
         )
+
+        self.assertEqual(running_response.status_code, 200)
+        running_payload = running_response.json()
+        self.assertEqual(running_payload["resource"], "tasks")
+        self.assertTrue(running_payload["read_only"])
+        self.assertFalse(running_payload["web_write_enabled"])
+        self.assertIsNone(running_payload["error"])
+        running_data = running_payload["data"]
+        self.assertEqual(running_data["status_filter"], "running")
+        self.assertEqual([row["task_id"] for row in running_data["rows"]], [running_task_id])
+        self.assertEqual(running_data["rows"][0]["status_label"], "运行中")
+        self.assertEqual(running_data["rows"][0]["next_action"], "monitor_running_task")
 
         self.assertEqual(approvals_response.status_code, 200)
         approvals_payload = approvals_response.json()

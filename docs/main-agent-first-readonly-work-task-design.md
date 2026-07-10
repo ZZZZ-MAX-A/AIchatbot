@@ -4,7 +4,7 @@
 
 设计日期：2026-07-11。
 
-P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界；P2.43b 已实现受限 work registry、`OwnerAgentWorkRuntime` 和 factory 注入。当前仍没有新的 QQ 命令或 Web 执行入口，不引入后台 worker，也不开放新的写能力。
+P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界；P2.43b 已实现受限 work registry、`OwnerAgentWorkRuntime` 和 factory 注入；P2.43c 已开放唯一的主人私聊显式命令；P2.43d 已完成 Owner Console `running` 只读展示回归。仍不引入后台 worker，也不开放新的写能力。
 
 ## 1. 设计结论
 
@@ -99,7 +99,7 @@ query_summary 限制 480 characters；task.result 限制 1600 characters；event
 cancel_agent_task 同样使用 status=pending 的条件更新，避免与 claim 竞争时覆盖 running 状态。
 ```
 
-P2.43b 已提供 work registry、executor 和 factory 注入：它只注册 `development_context_report`，执行器结果只会转换为受限命中计数摘要再持久化，不能把原始 RAG 片段、路径或异常文本写入任务记录。P2.43c 才会添加 QQ 显式命令绑定。
+P2.43b 已提供 work registry、executor 和 factory 注入：它只注册 `development_context_report`，执行器结果只会转换为受限命中计数摘要再持久化，不能把原始 RAG 片段、路径或异常文本写入任务记录。P2.43c 已将严格的 `执行研发上下文任务：<query>` 形式绑定到既有 `/agent` 入口；只有主人私聊可同步执行，`/agent-debug`、普通 `/agent` 查询和旧 `/agent 任务 <目标>` 都不匹配这个执行路径。
 
 ## 4. 入口和总流程
 
@@ -266,7 +266,7 @@ P2.43 read-only task 没有 approval resume。重启期间未完成 running task
 
 | 入口或表面 | P2.43 行为 |
 | --- | --- |
-| 主人私聊 `/agent 执行研发上下文任务` | 允许创建并同步执行已注册只读工作 |
+| 主人私聊 `/agent 执行研发上下文任务：<query>` | 允许创建并同步执行已注册只读工作 |
 | 主人私聊普通聊天 | 不触发任务创建或执行 |
 | 非主人私聊 | 拒绝，不创建任务 |
 | 群聊 | 拒绝，不创建任务 |
@@ -369,7 +369,7 @@ npm run typecheck
 npm run build
 ```
 
-P2.43a 已新增持久化单测，覆盖 scoped claim、重复 claim、approval pending 兼容、running 不可取消、成功/失败终态和结果摘要上限。P2.43b 已新增 work runtime 单测，覆盖唯一注册类型、无效输入不建任务、安全结果摘要、无原始 RAG/路径/异常持久化和 factory 注入；P2.43c 仍需要 QQ 入口回归。
+P2.43a 已新增持久化单测，覆盖 scoped claim、重复 claim、approval pending 兼容、running 不可取消、成功/失败终态和结果摘要上限。P2.43b 已新增 work runtime 单测，覆盖唯一注册类型、无效输入不建任务、安全结果摘要、无原始 RAG/路径/异常持久化和 factory 注入。P2.43c 已补严格命令解析、主人私聊边界和安全结果渲染回归；P2.43d 已补 Owner Console read model 与 HTTP `status=running` 回归。未向真实 QQ 会话发送测试消息，避免产生额外外部副作用。
 
 ## 13. 实现拆分和后续路线
 
@@ -382,14 +382,14 @@ P2.43a：任务状态和持久化边界。已完成。
 P2.43b：OwnerAgentWorkRuntime 和 factory 注入。已完成。
   只注册 development_context_report，不接 QQ 命令；任务记录只保存受限报告摘要。
 
-P2.43c：主人私聊显式 /agent 命令。
-  同步执行、结果渲染、QQ live 回归。
+P2.43c：主人私聊显式 /agent 命令。已完成。
+  只接受 `/agent 执行研发上下文任务：<问题>`；同步执行、结果渲染和 adapter 边界回归已完成。
 
-P2.43d：Owner Console 只读展示回归和文档收口。
-  不新增 Web 写操作。
+P2.43d：Owner Console 只读展示回归和文档收口。已完成。
+  `running` 可通过既有 GET read model 展示和筛选，只提供监看提示，不新增 Web 写操作。
 ```
 
-P2.40b 应在 P2.43c 有真实 active task 生命周期后再重新评估。届时业务页面如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。
+P2.43c 已提供真实 active task 生命周期，但 P2.40b 仍需要根据实际工作负载单独批准，不会自动接入业务页面轮询。届时如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。
 
 ## 14. 保持的底线
 

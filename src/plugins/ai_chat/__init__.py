@@ -144,6 +144,10 @@ from .owner_notify import (
     format_owner_notification,
     validate_owner_notification_content,
 )
+from .owner_agent_work_runtime import (
+    format_owner_agent_work_execution,
+    parse_development_context_report_command,
+)
 from .owner_runtime_factory import OwnerRuntimeFactory
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
@@ -4407,6 +4411,7 @@ def main_agent_help_reply() -> str:
             "/agent 能力列表",
             "/agent 边界",
             "/agent 任务 <目标>",
+            "/agent 执行研发上下文任务：<问题>",
             "/agent 新增任务：<目标>",
             "/agent 把“目标”加入任务",
             "/agent 任务状态",
@@ -4535,7 +4540,7 @@ def main_agent_status_reply() -> str:
             f"入口：{'开启' if config.enable_main_agent else '关闭'}",
             "模式：只读优先 + 审批门控写工具",
             "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
-            "任务：记录状态和事件；仅已注册且启用审批恢复的工具可受控恢复",
+            "任务：支持 pending / running / done / failed 事件记录；研发上下文报告只能由主人私聊显式命令执行。",
             "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
             "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（清空图片缓存/错误日志、选择角色卡、添加长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单）",
             "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
@@ -4555,6 +4560,7 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、多步只读图片/记忆排查、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
             "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
             "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
+            "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行唯一已注册的 development_context_report；不由 LLM 选择工具。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
@@ -4659,6 +4665,27 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
     )
 
 
+async def run_main_agent_explicit_work_command(
+    event: MessageEvent,
+    query: str,
+) -> str | None:
+    work_query = parse_development_context_report_command(query)
+    if work_query is None:
+        return None
+    if not isinstance(event, PrivateMessageEvent):
+        return "研发上下文任务只允许主人私聊通过 /agent 显式执行。"
+    if not is_owner(config, event):
+        return "研发上下文任务被拒绝：需要主人权限。"
+    if not work_query:
+        return "请提供研发上下文任务问题：/agent 执行研发上下文任务：<问题>"
+
+    execution = await owner_runtime_factory().execute_development_context_report(
+        event,
+        work_query,
+    )
+    return format_owner_agent_work_execution(execution)
+
+
 def normalize_main_agent_query(query: str) -> str:
     stripped = query.strip()
     for prefix in ("查 ", "查询 ", "search "):
@@ -4721,6 +4748,9 @@ async def run_main_agent_qq_command(
         return "MainAgent rejected: the first read-only version is private-only."
 
     if not raw_output:
+        work_reply = await run_main_agent_explicit_work_command(event, query)
+        if work_reply is not None:
+            return work_reply
         static_reply = main_agent_static_reply(query)
         if static_reply is not None:
             return static_reply

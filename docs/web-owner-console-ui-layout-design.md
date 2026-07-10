@@ -632,7 +632,7 @@ P2.39-P2.39b：本地部署设计、静态模式和启停脚本。已完成。
 P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
 P2.40a：受控自动刷新基础设施和顶部开关。已完成。
 P2.43：首个正式 MainAgent 只读工作任务模型，见 docs/main-agent-first-readonly-work-task-design.md。
-P2.40b-P2.40c：在 P2.43c 后接入允许轮询的页面，并完成 guard / smoke 收口。
+P2.40b-P2.40c：P2.43 已完成；仅在实际工作负载批准时接入允许轮询的页面，并完成 guard / smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：设计 Web 审批操作。
 ```

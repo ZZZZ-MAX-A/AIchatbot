@@ -4255,6 +4255,56 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 MainAgent explicit development context task command
+
+状态：已落地 P2.43c + P2.43d。目标是把 P2.43b 中唯一注册的只读 work runtime 接到严格的主人私聊 `/agent` 命令，并确认 Owner Console 只读展示 `running` 任务，不扩展任何写能力。
+
+本次完成：
+
+```text
+src/plugins/ai_chat/owner_agent_work_runtime.py：
+  新增严格命令解析：执行研发上下文任务：<query>（支持中英文冒号）。
+  裸命令返回空 query；旧 /agent 任务 <目标> 和普通 /agent 查询不会匹配。
+  新增安全结果渲染：只展示 task id、状态、受限报告摘要和任务详情入口。
+
+src/plugins/ai_chat/owner_runtime_factory.py：
+  新增 execute_development_context_report(event, query)，固定调用唯一注册的 development_context_report。
+
+src/plugins/ai_chat/__init__.py：
+  既有 /agent handler 在静态回复、旧任务命令和 MainAgent/LLM 路径之前检查显式研发上下文任务命令。
+  强制 PrivateMessageEvent 与 is_owner(config, event)，不受 main_agent_allow_group 放宽影响。
+  /agent-debug 不执行这个任务；一次命令只由既有 matcher 返回一次结果，不发送额外 QQ 消息。
+  更新 /agent 帮助、状态和边界文字。
+
+src/plugins/ai_chat/owner_console_read_runtime.py：
+  running 任务的只读 next_action 为 monitor_running_task。
+  既有 GET task list/detail 和 status=running 筛选可展示 created / work_claimed / work_started。
+  不新增 Web 写 endpoint、执行、取消或重试按钮。
+```
+
+边界：
+
+```text
+只允许主人私聊显式 /agent 执行研发上下文任务：<问题>。
+普通聊天、群聊、非主人私聊、/agent-debug、旧 /agent 任务 <目标> 和 MainAgent LLM 都不能触发该 runtime。
+不新增审批、approval resume、后台 worker、队列、timer、自动 retry、shell、任意文件写入、未注册数据库写入、Web 写操作或额外 QQ 发送。
+P2.40b 不因命令可用而自动开启；业务页面继续手动刷新，等待实际工作负载单独决定。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'
+$env:PYTHONDONTWRITEBYTECODE='1'
+.\.venv\Scripts\python.exe -m unittest tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units -v
+Ran 89 tests OK
+
+.\.venv\Scripts\python.exe -m unittest tests.test_owner_agent_work_runtime tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 125 tests OK
+
+未向真实 QQ 会话发送测试消息，避免额外外部副作用。
+```
+
 ## v1.6 MainAgent read-only work runtime registration
 
 状态：已落地 P2.43b。目标是在 P2.43a 的状态机和持久化边界之上，提供唯一已注册的只读 work type 及 factory 注入，但不开放 QQ 或 Web 执行入口。
