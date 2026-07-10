@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .memory_index import MEMORY_SOURCE_TYPES, memory_document_visible, trim_results_to_context_chars as trim_memory_results
 from .project_index import project_doc_visible, trim_results_to_context_chars as trim_project_results
@@ -9,6 +9,7 @@ from .schema import (
     NAMESPACE_PROJECT_DOCS,
     NAMESPACE_SEMANTIC_MEMORY,
     SOURCE_PROJECT_DOC,
+    RagDocument,
     RagSearchResult,
 )
 from .search import search_rag_documents
@@ -18,10 +19,11 @@ from .search import search_rag_documents
 class CombinedRagResults:
     project_docs: list[RagSearchResult]
     memories: list[RagSearchResult]
+    current_status_docs: list[RagDocument] = field(default_factory=list)
 
     @property
     def has_results(self) -> bool:
-        return bool(self.project_docs or self.memories)
+        return bool(self.current_status_docs or self.project_docs or self.memories)
 
 
 def retrieve_combined_rag(
@@ -81,7 +83,17 @@ def format_combined_rag_results(results: CombinedRagResults) -> str:
         return "CombinedRAG 暂无匹配结果。"
 
     lines: list[str] = ["CombinedRAG 开发侧召回："]
-    lines.append("")
+    if results.current_status_docs:
+        lines.append("")
+        lines.append("当前状态锚点：")
+        for index, document in enumerate(results.current_status_docs, start=1):
+            lines.append(f"{index}. {document.title}")
+            lines.append(f"   路径：{document.source_id}")
+            lines.append(f"   片段：{document.chunk_index}")
+            lines.append(document.content)
+            lines.append("")
+    else:
+        lines.append("")
     lines.append("项目文档召回：")
     if results.project_docs:
         for index, result in enumerate(results.project_docs, start=1):

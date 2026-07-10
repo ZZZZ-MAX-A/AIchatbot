@@ -15,7 +15,14 @@ from .schema import (
     RagDocument,
     RagSearchResult,
 )
-from .project_index import ProjectDocIndexStats, rebuild_project_doc_index, retrieve_project_docs
+from .project_docs import CURRENT_DEVELOPMENT_STATUS_SOURCE_ID
+from .project_index import (
+    CURRENT_STATUS_ANCHOR_MAX_CHARS,
+    ProjectDocIndexStats,
+    rebuild_project_doc_index,
+    retrieve_current_development_status,
+    retrieve_project_docs,
+)
 from .memory_index import MemoryRagIndexStats, rebuild_memory_rag_index, retrieve_memory
 from .combined import CombinedRagResults, format_combined_rag_results, retrieve_combined_rag
 
@@ -33,8 +40,11 @@ __all__ = [
     "VISIBILITY_SUBJECT_ONLY",
     "RagDocument",
     "RagSearchResult",
+    "CURRENT_DEVELOPMENT_STATUS_SOURCE_ID",
+    "CURRENT_STATUS_ANCHOR_MAX_CHARS",
     "ProjectDocIndexStats",
     "rebuild_project_doc_index",
+    "retrieve_current_development_status",
     "retrieve_project_docs",
     "MemoryRagIndexStats",
     "rebuild_memory_rag_index",

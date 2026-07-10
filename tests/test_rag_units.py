@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -389,6 +390,30 @@ class RagProjectDocUnitTests(unittest.TestCase):
             ],
         )
 
+    def test_current_development_status_source_id_is_fixed_and_single_chunk_indexable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = root / self.project_docs.CURRENT_DEVELOPMENT_STATUS_SOURCE_ID
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text(
+                "# AIchatbot 当前开发状态\n\n当前阶段：P2.45a。\n推荐下一步：P2.45b。\n",
+                encoding="utf-8",
+            )
+
+            chunks = self.project_docs.chunk_markdown_document(
+                path=snapshot,
+                text=snapshot.read_text(encoding="utf-8"),
+                root=root,
+            )
+
+        self.assertEqual(
+            self.project_docs.CURRENT_DEVELOPMENT_STATUS_SOURCE_ID,
+            "docs/current-development-status.md",
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].source_id, "docs/current-development-status.md")
+        self.assertEqual(chunks[0].chunk_index, 0)
+
 
 class RagProjectIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
     @classmethod
@@ -470,6 +495,72 @@ class RagProjectIndexUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(non_owner_results, [])
         self.assertIn("README.md#README", formatted)
 
+    def test_current_status_anchor_uses_only_fixed_source_owner_scope_and_budget(self):
+        temp_db_dir, patcher = self.temp_database()
+        anchor_source = self.project_index.CURRENT_DEVELOPMENT_STATUS_SOURCE_ID
+        with temp_db_dir, patcher:
+            second_id = self.documents.upsert_rag_document(
+                namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+                source_type=self.schema.SOURCE_PROJECT_DOC,
+                source_id=anchor_source,
+                title=f"{anchor_source}#Second",
+                content="second anchor chunk",
+                visibility=self.schema.VISIBILITY_PROJECT_OWNER,
+                chunk_index=1,
+            )
+            current_id = self.documents.upsert_rag_document(
+                namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+                source_type=self.schema.SOURCE_PROJECT_DOC,
+                source_id=anchor_source,
+                title=f"{anchor_source}#Current",
+                content="current anchor chunk",
+                visibility=self.schema.VISIBILITY_PROJECT_OWNER,
+                chunk_index=0,
+            )
+            self.documents.upsert_rag_document(
+                namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+                source_type=self.schema.SOURCE_PROJECT_DOC,
+                source_id="docs/current-development-status-copy.md",
+                title="lookalike",
+                content="must not be selected",
+                visibility=self.schema.VISIBILITY_PROJECT_OWNER,
+                chunk_index=0,
+            )
+
+            owner_documents = self.project_index.retrieve_current_development_status(
+                is_owner=True,
+                max_context_chars=25,
+            )
+            non_owner_documents = self.project_index.retrieve_current_development_status(
+                is_owner=False,
+                max_context_chars=200,
+            )
+            self.documents.soft_delete_rag_document(current_id)
+            self.documents.soft_delete_rag_document(second_id)
+            deleted_documents = self.project_index.retrieve_current_development_status(
+                is_owner=True,
+                max_context_chars=200,
+            )
+
+        self.assertEqual(
+            [document.chunk_index for document in owner_documents],
+            [0, 1],
+        )
+        self.assertEqual(
+            {document.source_id for document in owner_documents},
+            {anchor_source},
+        )
+        self.assertLessEqual(
+            sum(len(document.content) for document in owner_documents),
+            25,
+        )
+        self.assertEqual(non_owner_documents, [])
+        self.assertEqual(deleted_documents, [])
+        self.assertEqual(
+            tuple(inspect.signature(self.project_index.retrieve_current_development_status).parameters),
+            ("is_owner", "max_context_chars"),
+        )
+
 
 class RagCombinedRetrievalUnitTests(TempDatabaseMixin, unittest.TestCase):
     @classmethod
@@ -550,15 +641,28 @@ class RagCombinedRetrievalUnitTests(TempDatabaseMixin, unittest.TestCase):
                 is_owner=False,
             )
             formatted = self.combined.format_combined_rag_results(owner_results)
+            anchor_only = self.combined.CombinedRagResults(
+                project_docs=[],
+                memories=[],
+                current_status_docs=[owner_results.project_docs[0].document],
+            )
+            anchor_formatted = self.combined.format_combined_rag_results(anchor_only)
 
         self.assertEqual([result.document.source_id for result in owner_results.project_docs], ["docs/runbook.md"])
         self.assertEqual([result.document.source_id for result in owner_results.memories], ["42"])
         self.assertEqual(non_owner_results.project_docs, [])
         self.assertEqual(non_owner_results.memories, [])
+        self.assertEqual(owner_results.current_status_docs, [])
+        self.assertEqual(non_owner_results.current_status_docs, [])
         self.assertEqual(len(embedder.calls), 1)
         self.assertIn("CombinedRAG 开发侧召回：", formatted)
+        self.assertNotIn("当前状态锚点：", formatted)
         self.assertIn("项目文档召回：", formatted)
         self.assertIn("记忆召回：", formatted)
+        self.assertTrue(anchor_only.has_results)
+        self.assertIn("当前状态锚点：", anchor_formatted)
+        self.assertIn("docs/runbook.md#Deploy", anchor_formatted)
+        self.assertNotIn("相似度：", anchor_formatted)
 
 
 class RagProviderUnitTests(unittest.TestCase):
