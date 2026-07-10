@@ -117,6 +117,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 - [main-agent-first-readonly-work-task-design.md](main-agent-first-readonly-work-task-design.md)
 - [main-agent-useful-development-context-report-design.md](main-agent-useful-development-context-report-design.md)
 - [development-context-current-state-retrieval-design.md](development-context-current-state-retrieval-design.md)
+- [project-rag-document-state-consistency-audit.md](project-rag-document-state-consistency-audit.md)：稳定设计中的当前/历史状态一致性审计。
 
 **Web Owner Console**
 

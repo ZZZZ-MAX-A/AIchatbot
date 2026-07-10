@@ -4,14 +4,14 @@
 
 ## 1. 定位
 
-Owner Console FastAPI app 当前只是 Web Owner Console 的本地只读 HTTP adapter：
+Owner Console FastAPI app 当前仍是本地只读 HTTP adapter，并支持显式开启的可选静态页面模式：
 
 ```text
 本地启动。
 只监听 127.0.0.1。
 只开放 GET。
-只返回 JSON read model。
-不渲染前端页面。
+`OWNER_CONSOLE_STATIC_ENABLED=false` 时只返回 JSON read model，不服务前端页面。
+`OWNER_CONSOLE_STATIC_ENABLED=true` 时额外服务 `/owner-console` 静态页面和 SPA fallback；`/api/v1/owner-console/*` 仍只返回 JSON。
 不做登录/鉴权。
 不开放审批确认/拒绝。
 不恢复工具执行。
@@ -379,7 +379,7 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 TLS。
 CORS。
 登录/鉴权。
-Web 前端页面。
+默认纯 API smoke 模式中的 Web 前端页面；静态页面模式的完整操作见 `docs/web-owner-console-v0-runbook.md`。
 审批确认/拒绝 API。
 写操作 API。
 主动 diagnostics probe API。

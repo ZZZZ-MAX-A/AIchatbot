@@ -1,6 +1,6 @@
 # Web Owner Console UI layout design
 
-本文记录 P2.30 Web Owner Console UI 布局设计。当前阶段只做页面结构和中文化展示设计，不创建前端工程、不写 React 组件、不写 CSS、不修改 FastAPI 行为。
+本文记录 P2.30 Web Owner Console UI 布局设计。P2.30 当时只做页面结构和中文化展示设计，不创建前端工程、不写 React 组件、不写 CSS、不修改 FastAPI 行为。
 
 后续实现状态：P2.31 已创建 `web/owner-console` 最小只读 App Shell，采用本文定义的中文左侧导航和中文顶部状态条，第一刀只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已在概览页接入 `/overview` 和 `/diagnostics` 真实只读数据。P2.33 已接入任务列表 `/tasks`，支持中文状态筛选和只读表格展示。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}`。P2.35 已接入诊断页 `/diagnostics`、记忆页 `/memory`、访问控制页 `/access-control` 和设置页 `/settings`，主导航页面已全部接入真实只读数据。P2.36 已完成前端只读收口审计，见 `docs/web-owner-console-frontend-readonly-audit.md`。P2.37 已新增 `npm run guard:readonly` 前端只读 contract guard，见 `docs/web-owner-console-frontend-contract-guard.md`，仍不开放 Web 写操作。
 

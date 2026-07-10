@@ -8,6 +8,8 @@
 
 P2.44 已完成。它没有增加新的 work type、QQ matcher、Web endpoint、写工具或自动化流程。
 
+后续完成状态：P2.45a-d 已修复 P2.44 live 暴露的历史片段召回缺口。正式研发上下文报告现在优先读取固定当前状态锚点，再补充多来源语义项目证据和开发侧记忆；索引重建和主人 QQ live 验收均已完成。当前实现以 `docs/current-development-status.md` 和 `docs/development-context-current-state-retrieval-design.md` 为准。
+
 ## 1. P2.43 的实际缺口
 
 P2.43 已能完成：
@@ -172,4 +174,4 @@ P2.40b 不自动启用。
 
 主人私聊实测证明结构化报告和证据限制正常，但“恢复 Owner Console 当前开发状态和下一步计划”只召回 P2.34 与 P2.39b 历史片段。ProjectDocRAG 索引已经包含 P2.43/P2.44，缺口是纯语义排序、`version-runlog` 单来源霸榜和上下文顺序截断。
 
-P2.44 不通过扩大 prompt、top-k 或上下文上限修补该问题。后续 P2.45 已完成“权威当前状态锚点 + 来源多样性 + 分区预算”设计；P2.45a 已实现快照与锚点读取基础，P2.45b 已实现纯候选选择和分区预算，但尚未接入生产检索。见 `docs/development-context-current-state-retrieval-design.md`。
+P2.44 没有通过扩大 prompt、top-k 或上下文上限修补该问题。后续 P2.45a-d 已完成“权威当前状态锚点 + 来源多样性 + 分区预算”的设计、生产接线、索引重建和主人 QQ live 验收。P2.44 live 的旧召回结果保留为问题证据，不代表当前检索状态。见 `docs/development-context-current-state-retrieval-design.md`。

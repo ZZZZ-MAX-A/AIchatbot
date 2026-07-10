@@ -6,6 +6,8 @@
 
 P2.43 先完成设计。P2.43a 已实现任务状态与持久化边界；P2.43b 已实现受限 work registry、`OwnerAgentWorkRuntime` 和 factory 注入；P2.43c 已开放唯一的主人私聊显式命令；P2.43d 已完成 Owner Console `running` 只读展示回归。仍不引入后台 worker，也不开放新的写能力。
 
+后续完成状态：P2.44 已把本次主人私聊回复升级为固定六字段受限报告；P2.45a-d 已完成当前状态锚点、来源多样性、分区预算、正式报告接线、索引重建和主人 QQ live 验收。本文后续章节中的“尚未接入”如明确属于 P2.43/P2.45a/P2.45b 拆分，均是当时阶段记录，不代表当前实现状态。
+
 ## 1. 设计结论
 
 第一个正式任务类型固定为：
@@ -395,15 +397,21 @@ P2.44：有用研发上下文报告。已完成。
   MAIN_AGENT_USE_LLM=true 且有召回时只执行无工具的固定 JSON 总结；关闭、无召回或总结失败时确定性回退。
   设计与实现边界见 docs/main-agent-useful-development-context-report-design.md。
 
-P2.45：当前状态锚点与来源多样性。设计、P2.45a 基础和 P2.45b 纯策略已完成，整体尚未完成。
-  解决历史 version-runlog 片段占满“当前状态/下一步”召回的问题；计划引入固定当前状态快照、每 source 限额和分区预算。
+P2.45：当前状态锚点与来源多样性。已完成。
+  已解决历史 version-runlog 片段占满“当前状态/下一步”召回的问题；正式研发报告使用固定当前状态快照、每 source 限额和分区预算。
   设计见 docs/development-context-current-state-retrieval-design.md。
 
 P2.45a：当前状态快照和固定锚点读取基础。已完成。
-  已新增固定快照、owner-only 精确索引读取和默认空的 current_status_docs 结果字段；尚未接 DevContextGraph / QQ 正式任务，线上检索算法仍是纯语义且没有保证锚点。快照可能作为普通语义结果被机会性召回。
+  已新增固定快照、owner-only 精确索引读取和默认空的 current_status_docs 结果字段；本步当时尚未接 DevContextGraph / QQ 正式任务，后续已由 P2.45c 完成生产接线。
 
 P2.45b：候选扩展、单来源去重和分区预算。已完成。
-  已新增独立纯策略模块，固定候选池 12-32、每 source 最多 1 条、最多 3 条语义项目证据，并将 4200 字符拆为 anchor 1200、project 1800、memory 800、格式余量 400；尚未接生产 Agent。
+  已新增独立纯策略模块，固定候选池 12-32、每 source 最多 1 条、最多 3 条语义项目证据，并将 4200 字符拆为 anchor 1200、project 1800、memory 800、格式余量 400；本步当时尚未接生产 Agent，后续已由 P2.45c 完成。
+
+P2.45c：正式 development_context_report 接线。已完成。
+  只有主人私聊正式研发上下文任务启用锚点和多来源证据；普通 /agent、/agent-debug 和普通聊天行为不变。
+
+P2.45d：索引、固定查询和主人 live 验收。已完成。
+  任务详情只保存锚点状态、项目/记忆命中计数和检索警告计数，不保存详细报告、路径、分数或原始片段。
 ```
 
 P2.43c 已提供真实 active task 生命周期，但 P2.40b 仍需要根据实际工作负载单独批准，不会自动接入业务页面轮询。届时如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。
