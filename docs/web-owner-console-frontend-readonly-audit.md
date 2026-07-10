@@ -251,10 +251,13 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 
 ```text
 P2.37：补一层前端 smoke / contract guard，自动校验 ownerConsoleApi 只允许 GET 和 allowlist。已落地，见 docs/web-owner-console-frontend-contract-guard.md。
-P2.38：整理 Web Owner Console v0 使用手册和启动 runbook。
-P2.39：再讨论静态部署方式，例如 Vite build 后由 FastAPI 挂载 dist，或本地反向代理。
-P2.40：单独设计登录/鉴权。
-P2.41：单独设计 Web 审批操作，不复用当前只读 v0。
+P2.38：Web Owner Console v0 使用手册和启动 runbook。已完成。
+P2.39-P2.39b：本地部署设计、静态模式和启停脚本。已完成。
+P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
+P2.40a：受控自动刷新基础设施与 AppShell health 检查。已完成。
+P2.40b-P2.40c：后续接入允许轮询的页面，并完成 guard / smoke 收口。
+P2.41：设计本地访问保护 / 鉴权。
+P2.42：单独设计 Web 审批操作，不复用当前只读 v0。
 ```
 
 当前不建议直接做：
@@ -263,7 +266,7 @@ P2.41：单独设计 Web 审批操作，不复用当前只读 v0。
 审批按钮。
 写操作 API。
 公网部署。
-自动轮询。
+未经 P2.40a 实现和 guard 验证的自动轮询。
 WebSocket / SSE。
 登录页假实现。
 ```

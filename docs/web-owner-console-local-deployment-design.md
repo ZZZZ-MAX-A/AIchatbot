@@ -306,14 +306,14 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 当前仍不做：
 
 ```text
-不新增启动脚本。
+不新增开机自启或 Windows Service。
 不新增登录/鉴权。
 不新增写 endpoint。
 不开放 /docs、/redoc、/openapi.json。
 不做公网部署。
 不做反向代理。
 不做 TLS。
-不做自动轮询。
+不在 P2.39 本地部署层实现自动轮询。
 不做 WebSocket / SSE。
 不提交 dist。
 ```
@@ -407,7 +407,9 @@ POST /owner-console/... 不应被当作页面请求处理。
 ```text
 P2.39a：按本文实现可选本地静态模式。已完成。
 P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
-P2.40：设计只读自动刷新策略。
+P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
+P2.40a：受控自动刷新基础设施与 AppShell health 检查。已完成。
+P2.40b-P2.40c：业务页面接入和 guard / smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：设计 Web 审批操作。
 ```

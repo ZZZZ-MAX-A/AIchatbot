@@ -114,6 +114,14 @@ button {
   min-width: 0;
 }
 
+.top-status-bar__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -173,6 +181,74 @@ button {
 .refresh-button:disabled {
   color: #9ca3af;
   cursor: wait;
+}
+
+.auto-refresh-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  color: #374151;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.auto-refresh-control input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.auto-refresh-control__label {
+  white-space: nowrap;
+}
+
+.auto-refresh-control__track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  border: 1px solid #9ca3af;
+  border-radius: 999px;
+  background: #e5e7eb;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.auto-refresh-control__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 24%);
+  transition: transform 120ms ease;
+}
+
+.auto-refresh-control input:checked + .auto-refresh-control__track {
+  border-color: #2563eb;
+  background: #2563eb;
+}
+
+.auto-refresh-control input:checked + .auto-refresh-control__track .auto-refresh-control__thumb {
+  transform: translateX(16px);
+}
+
+.auto-refresh-control input:focus-visible + .auto-refresh-control__track {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.auto-refresh-control__state {
+  min-width: 52px;
+  color: #6b7280;
+  white-space: nowrap;
 }
 
 .connection-banner {
@@ -905,6 +981,11 @@ button {
   .top-status-bar {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .top-status-bar__actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .summary-grid {

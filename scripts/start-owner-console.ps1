@@ -39,6 +39,19 @@ function Test-OwnerConsoleProcess {
     return $ProcessInfo.CommandLine -like "*src.owner_console_fastapi_launcher:app*"
 }
 
+function Reset-ProcessPathEnvironment {
+    $pathValue = $env:Path
+    if ([string]::IsNullOrWhiteSpace($pathValue)) {
+        return
+    }
+
+    # Some launch environments contain both Path and PATH in the native block.
+    # Re-adding one canonical entry prevents Windows PowerShell Start-Process
+    # from rejecting the inherited environment as a duplicate-key dictionary.
+    Remove-Item Env:Path -ErrorAction SilentlyContinue
+    $env:Path = $pathValue
+}
+
 $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
     Write-Host "Virtual environment not found. Run .\scripts\setup.ps1 first."
@@ -131,6 +144,8 @@ if ($Foreground) {
     exit $LASTEXITCODE
 }
 
+Reset-ProcessPathEnvironment
+
 $process = Start-Process `
     -FilePath $python `
     -ArgumentList $arguments `
@@ -140,9 +155,15 @@ $process = Start-Process `
     -WindowStyle Hidden `
     -PassThru
 
-Start-Sleep -Seconds 2
+$startedListeners = @()
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    Start-Sleep -Seconds 1
+    $startedListeners = @(Get-PortListener -LocalPort $Port | Where-Object { Test-OwnerConsoleProcess $_ })
+    if ($startedListeners.Count -gt 0 -or $process.HasExited) {
+        break
+    }
+}
 
-$startedListeners = @(Get-PortListener -LocalPort $Port | Where-Object { Test-OwnerConsoleProcess $_ })
 if ($startedListeners.Count -eq 0) {
     Write-Host "Owner Console failed to start. Check logs:"
     Write-Host "  $outLog"
