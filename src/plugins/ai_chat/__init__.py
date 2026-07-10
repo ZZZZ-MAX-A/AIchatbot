@@ -61,11 +61,10 @@ from .diagnostics import (
 from .development_context_report import (
     DevelopmentContextReportPayload,
     build_development_context_report_source,
-    combined_results_lists,
     fallback_development_context_report_sections,
     format_development_context_report_sections,
     parse_development_context_report_json,
-    relevant_project_section_titles,
+    with_development_context_retrieval_limits,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
 from .graph import (
@@ -161,6 +160,7 @@ from .owner_agent_work_runtime import (
 )
 from .owner_runtime_factory import OwnerRuntimeFactory
 from .rag.combined import format_combined_rag_results, retrieve_combined_rag
+from .rag.development_report import retrieve_development_report_rag
 from .rag.memory_index import rebuild_memory_rag_index, retrieve_memory
 from .rag.providers import build_embedding_provider, check_embedding_provider
 from .rag.schema import (
@@ -1693,8 +1693,10 @@ async def run_dev_context_graph_for_main_agent(
     *,
     requester_is_owner: bool,
     event: MessageEvent,
+    use_development_report_evidence: bool = False,
 ) -> DevContextGraphExecution:
     state = DevContextState(query=query.strip(), is_owner=requester_is_owner)
+    development_report_results = None
 
     async def validate_context_request(current: DevContextState) -> DevContextState:
         if not current.is_owner:
@@ -1706,8 +1708,43 @@ async def run_dev_context_graph_for_main_agent(
         return current
 
     async def retrieve_combined_context(current: DevContextState) -> DevContextState:
+        nonlocal development_report_results
         try:
             embedder = build_embedding_provider(config)
+            if use_development_report_evidence:
+                rag_execution = await asyncio.to_thread(
+                    retrieve_development_report_rag,
+                    query=current.query,
+                    embedder=embedder,
+                    is_owner=current.is_owner,
+                    project_min_score=config.project_doc_rag_min_score,
+                    memory_top_k=config.memory_rag_top_k,
+                    memory_min_score=config.memory_rag_min_score,
+                    on_error=lambda exc, _category: log_ai_event_error(exc, event),
+                )
+                results = rag_execution.results
+                development_report_results = results
+                current.project_result_count = len(results.project_docs)
+                current.memory_result_count = len(results.memories)
+                current.metadata.update(
+                    {
+                        "current_status_anchor_included": bool(results.current_status_docs),
+                        "current_status_anchor_chunks": len(results.current_status_docs),
+                        "semantic_project_source_count": len(
+                            {result.document.source_id for result in results.project_docs}
+                        ),
+                        "semantic_project_result_count": len(results.project_docs),
+                        "memory_result_count": len(results.memories),
+                        "source_diversity_enabled": True,
+                        "retrieval_warning_categories": rag_execution.warnings,
+                        "retrieval_error_categories": rag_execution.errors,
+                    }
+                )
+                if rag_execution.execution_failed:
+                    current.context_text = "DevContextGraph query failed: retrieval_unavailable"
+                    current.error = "execution_failed"
+                return current
+
             results = await asyncio.to_thread(
                 retrieve_combined_rag,
                 query=current.query,
@@ -1731,6 +1768,15 @@ async def run_dev_context_graph_for_main_agent(
 
     async def render_context_artifact(current: DevContextState) -> DevContextState:
         if current.context_text:
+            return current
+        if use_development_report_evidence:
+            if development_report_results is None:
+                return current
+            current.context_text = build_development_context_report_source(
+                current_status_docs=development_report_results.current_status_docs,
+                project_docs=development_report_results.project_docs,
+                memories=development_report_results.memories,
+            )
             return current
         results = current.metadata.get("combined_results")
         if results is None:
@@ -4605,24 +4651,26 @@ async def run_development_context_report_for_event(
         query,
         requester_is_owner=True,
         event=event,
+        use_development_report_evidence=True,
     )
     if execution.result.error:
         raise RuntimeError("DevContextGraph execution failed")
 
-    project_docs, memories = combined_results_lists(
-        execution.result.metadata.get("combined_results")
+    metadata = execution.result.metadata
+    current_status_anchor_included = bool(
+        metadata.get("current_status_anchor_included", False)
     )
-    relevant_sections = relevant_project_section_titles(project_docs)
+    retrieval_warnings = tuple(metadata.get("retrieval_warning_categories", ()))
+    retrieval_errors = tuple(metadata.get("retrieval_error_categories", ()))
     sections = fallback_development_context_report_sections(
         project_result_count=execution.result.project_result_count,
         memory_result_count=execution.result.memory_result_count,
-        relevant_sections=relevant_sections,
+        current_status_anchor_included=current_status_anchor_included,
+        retrieval_warnings=retrieval_warnings,
+        retrieval_errors=retrieval_errors,
     )
     summary_mode = "deterministic_fallback"
-    report_source = build_development_context_report_source(
-        project_docs=project_docs,
-        memories=memories,
-    )
+    report_source = execution.result.context_text.strip()
 
     if config.main_agent_use_llm and report_source:
         try:
@@ -4632,6 +4680,12 @@ async def run_development_context_report_for_event(
                 create_main_llm_call(config),
             )
             sections = parse_development_context_report_json(raw_report)
+            sections = with_development_context_retrieval_limits(
+                sections,
+                current_status_anchor_included=current_status_anchor_included,
+                retrieval_warnings=retrieval_warnings,
+                retrieval_errors=retrieval_errors,
+            )
             summary_mode = "bounded_llm"
         except Exception as exc:
             log_ai_event_error(exc, event)
@@ -4641,6 +4695,8 @@ async def run_development_context_report_for_event(
         memory_result_count=execution.result.memory_result_count,
         report_text=format_development_context_report_sections(sections),
         summary_mode=summary_mode,
+        current_status_anchor_included=current_status_anchor_included,
+        retrieval_warning_count=len(retrieval_warnings) + len(retrieval_errors),
     )
 
 

@@ -26,6 +26,8 @@ from .project_index import (
 from .memory_index import MemoryRagIndexStats, rebuild_memory_rag_index, retrieve_memory
 from .combined import CombinedRagResults, format_combined_rag_results, retrieve_combined_rag
 from .development_report import (
+    CURRENT_STATUS_ANCHOR_FAILED,
+    CURRENT_STATUS_ANCHOR_MISSING,
     DEVELOPMENT_REPORT_EVIDENCE_MAX_CHARS,
     DEVELOPMENT_REPORT_FORMAT_RESERVE_CHARS,
     DEVELOPMENT_REPORT_MEMORY_MAX_CHARS,
@@ -35,9 +37,14 @@ from .development_report import (
     DEVELOPMENT_REPORT_PROJECT_MAX_CHARS,
     DEVELOPMENT_REPORT_PROJECT_MAX_PER_SOURCE,
     DEVELOPMENT_REPORT_PROJECT_RESULT_LIMIT,
+    MEMORY_RETRIEVAL_FAILED,
+    PROJECT_RETRIEVAL_FAILED,
+    QUERY_EMBEDDING_FAILED,
+    DevelopmentReportRagExecution,
     build_development_report_evidence,
     development_report_candidate_top_k,
     development_report_evidence_content_chars,
+    retrieve_development_report_rag,
     select_development_report_project_results,
 )
 
@@ -67,6 +74,8 @@ __all__ = [
     "CombinedRagResults",
     "format_combined_rag_results",
     "retrieve_combined_rag",
+    "CURRENT_STATUS_ANCHOR_FAILED",
+    "CURRENT_STATUS_ANCHOR_MISSING",
     "DEVELOPMENT_REPORT_EVIDENCE_MAX_CHARS",
     "DEVELOPMENT_REPORT_FORMAT_RESERVE_CHARS",
     "DEVELOPMENT_REPORT_MEMORY_MAX_CHARS",
@@ -76,8 +85,13 @@ __all__ = [
     "DEVELOPMENT_REPORT_PROJECT_MAX_CHARS",
     "DEVELOPMENT_REPORT_PROJECT_MAX_PER_SOURCE",
     "DEVELOPMENT_REPORT_PROJECT_RESULT_LIMIT",
+    "MEMORY_RETRIEVAL_FAILED",
+    "PROJECT_RETRIEVAL_FAILED",
+    "QUERY_EMBEDDING_FAILED",
+    "DevelopmentReportRagExecution",
     "build_development_report_evidence",
     "development_report_candidate_top_k",
     "development_report_evidence_content_chars",
+    "retrieve_development_report_rag",
     "select_development_report_project_results",
 ]

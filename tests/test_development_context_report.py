@@ -64,6 +64,33 @@ class DevelopmentContextReportTests(unittest.TestCase):
             self.report.DEVELOPMENT_CONTEXT_REPORT_SOURCE_LIMIT,
         )
 
+    def test_report_source_places_sanitized_current_status_anchor_first(self):
+        anchor = types.SimpleNamespace(
+            title="docs/current-development-status.md#status",
+            content=(
+                "P2.45c 已接入。\n"
+                "PRIVATE_TOKEN=do-not-send\n"
+                "D:\\AIchatbot\\docs\\current-development-status.md"
+            ),
+            source_id="docs/current-development-status.md",
+        )
+        source = self.report.build_development_context_report_source(
+            current_status_docs=[anchor],
+            project_docs=[
+                self.result(
+                    title="docs/version-runlog.md#historical",
+                    content="P2.34 historical",
+                )
+            ],
+            memories=[],
+        )
+
+        self.assertTrue(source.startswith("当前状态锚点 1：\nP2.45c 已接入。"))
+        self.assertLess(source.index("P2.45c 已接入"), source.index("P2.34 historical"))
+        self.assertNotIn("current-development-status.md", source)
+        self.assertNotIn("do-not-send", source)
+        self.assertNotIn("D:\\AIchatbot", source)
+
     def test_fixed_json_contract_parses_and_formats_structured_report(self):
         raw = json.dumps(
             {
@@ -113,6 +140,50 @@ class DevelopmentContextReportTests(unittest.TestCase):
         self.assertIn("不从原始片段推断具体未完成事项", formatted)
         self.assertIn("相关章节：P2.43、安全边界", formatted)
         self.assertNotIn("a0d945e", formatted)
+
+    def test_fallback_and_llm_sections_distinguish_anchor_state_with_safe_categories(self):
+        loaded = self.report.fallback_development_context_report_sections(
+            project_result_count=0,
+            memory_result_count=0,
+            current_status_anchor_included=True,
+            retrieval_errors=("query_embedding_failed",),
+        )
+        missing = self.report.fallback_development_context_report_sections(
+            project_result_count=2,
+            memory_result_count=0,
+            current_status_anchor_included=False,
+            retrieval_warnings=("current_status_anchor_missing",),
+        )
+
+        self.assertIn("当前状态锚点已加载。", loaded.evidence_limits)
+        self.assertIn(
+            "语义查询向量生成失败，本次仅使用已成功读取的证据。",
+            loaded.evidence_limits,
+        )
+        self.assertIn(
+            "当前状态锚点缺失，不能保证最新阶段。",
+            missing.evidence_limits,
+        )
+        self.assertNotIn("query_embedding_failed", loaded.evidence_limits)
+
+    def test_combined_result_helpers_preserve_legacy_shape_and_expose_anchor(self):
+        anchor = types.SimpleNamespace(content="current")
+        project = self.result(title="docs/design.md#design", content="design")
+        memory = self.result(title="memory", content="memory")
+        combined = types.SimpleNamespace(
+            current_status_docs=[anchor],
+            project_docs=[project],
+            memories=[memory],
+        )
+
+        self.assertEqual(
+            self.report.combined_results_lists(combined),
+            ([project], [memory]),
+        )
+        self.assertEqual(
+            self.report.combined_results_evidence_lists(combined),
+            ([anchor], [project], [memory]),
+        )
 
 
 if __name__ == "__main__":

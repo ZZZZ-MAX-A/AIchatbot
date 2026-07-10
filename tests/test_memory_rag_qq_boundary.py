@@ -33,6 +33,23 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertNotIn("rebuild_project_doc_index", source)
         self.assertNotIn("SOURCE_PROJECT_DOC", source)
 
+    def test_current_state_strategy_is_enabled_only_for_formal_development_report(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        formal_start = source.index("async def run_development_context_report_for_event(")
+        formal_end = source.index("\ndef owner_runtime_factory()", formal_start)
+        generic_start = source.index("async def run_main_agent_qq_command(")
+        generic_end = source.index("\n@main_agent_cmd.handle()", generic_start)
+
+        self.assertIn(
+            "use_development_report_evidence=True",
+            source[formal_start:formal_end],
+        )
+        self.assertNotIn(
+            "use_development_report_evidence=True",
+            source[generic_start:generic_end],
+        )
+        self.assertEqual(source.count("use_development_report_evidence=True"), 1)
+
     def test_main_agent_qq_entry_is_feature_gated_and_read_only(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
         factory_source = OWNER_RUNTIME_FACTORY.read_text(encoding="utf-8")
