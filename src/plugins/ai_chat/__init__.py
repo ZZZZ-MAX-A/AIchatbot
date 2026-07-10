@@ -4580,6 +4580,25 @@ def main_agent_static_reply(query: str) -> str | None:
     return None
 
 
+async def run_development_context_report_for_event(
+    event: MessageEvent,
+    query: str,
+) -> str:
+    execution = await run_dev_context_graph_for_main_agent(
+        query,
+        requester_is_owner=True,
+        event=event,
+    )
+    if execution.result.error:
+        raise RuntimeError("DevContextGraph execution failed")
+    return "\n".join(
+        [
+            f"project docs: {execution.result.project_result_count}",
+            f"memories: {execution.result.memory_result_count}",
+        ]
+    )
+
+
 def owner_runtime_factory() -> OwnerRuntimeFactory:
     return OwnerRuntimeFactory(
         session_key_from_event=session_key,
@@ -4613,6 +4632,7 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         owner_user_id_default=str(config.bot_owner_qq).strip(),
         fact_memory_type=MANUAL_FACT_TYPE,
         preference_memory_type=MANUAL_PREFERENCE_TYPE,
+        development_context_report_for_event=run_development_context_report_for_event,
     )
 
 

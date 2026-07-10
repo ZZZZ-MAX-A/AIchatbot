@@ -11,6 +11,7 @@ from .owner_agent_runtime import (
     format_owner_agent_task_read,
     run_owner_agent_task_command,
 )
+from .owner_agent_work_runtime import OwnerAgentWorkContext, OwnerAgentWorkRuntime
 from .owner_read_runtime import OwnerReadRuntime, run_owner_read_command
 from .owner_write_runtime import OwnerWriteRuntime, run_owner_write_command
 
@@ -29,6 +30,7 @@ AddManualMemory: TypeAlias = Callable[..., int]
 SubjectLabel: TypeAlias = Callable[[str, str], str]
 ClearSessionSummaries: TypeAlias = Callable[[str], int]
 DeleteSessionSummary: TypeAlias = Callable[[str, int], bool]
+DevelopmentContextReportForEvent: TypeAlias = Callable[[Any, str], str | Awaitable[str]]
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class OwnerRuntimeFactory:
     owner_user_id_default: str = ""
     fact_memory_type: str = "fact_summary"
     preference_memory_type: str = "preference_summary"
+    development_context_report_for_event: DevelopmentContextReportForEvent | None = None
 
     def agent_context(self, event: Any) -> OwnerAgentContext:
         return OwnerAgentContext(
@@ -129,6 +132,19 @@ class OwnerRuntimeFactory:
             owner_user_id_default=self.owner_user_id_default,
             fact_memory_type=self.fact_memory_type,
             preference_memory_type=self.preference_memory_type,
+        )
+
+    def work_runtime(self, event: Any) -> OwnerAgentWorkRuntime:
+        executor = self.development_context_report_for_event
+        if executor is None:
+            raise RuntimeError("development_context_report executor was not injected")
+        context = self.agent_context(event)
+        return OwnerAgentWorkRuntime(
+            context=OwnerAgentWorkContext(
+                session_key=context.session_key,
+                user_id=context.user_id,
+            ),
+            development_context_report_executor=lambda query: executor(event, query),
         )
 
     def run_task_command(
