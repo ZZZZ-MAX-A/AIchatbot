@@ -4255,6 +4255,59 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 MainAgent first read-only work task design
+
+状态：已落地 P2.43 设计。目标是不再把 `agent_tasks` 只当待办记录，而是先定义一个已注册、单步、只读、可审计的正式工作任务闭环；本步只做设计，不实现任务执行。
+
+本次完成：
+
+```text
+新增 docs/main-agent-first-readonly-work-task-design.md：
+  首个 work_type 固定为 development_context_report（研发上下文报告）。
+  只允许主人私聊显式 /agent 执行研发上下文任务：<query> 入口。
+  复用 DevContextGraph / dev_context 的只读依赖，不让 MainAgent LLM 自由选择工具。
+  旧 /agent 任务 <目标> 继续只创建待办，不自动执行。
+
+定义首个执行链路：
+  validate -> create pending -> atomic claim running -> work_started
+  -> registered read-only executor -> work_finished / work_failed
+  -> bounded task.result 和 event summary。
+
+定义状态和兼容策略：
+  P2.43 实现时新增 running。
+  首个只读任务使用 pending -> running -> done / failed，或 pending -> cancelled。
+  既有审批任务继续使用现有 pending / approval status，不在本步引入 waiting_approval。
+  running 任务不支持现有取消命令中断；失败后不自动 retry。
+
+定义边界：
+  不引入后台 worker、队列、定时器或独立进程。
+  不新增 shell、文件写入、未注册数据库写入、额外 QQ 发送或 Web 写操作。
+  不从 work runtime 调用 owner_write_runtime。
+  不扩展 approval_resume_enabled。
+  任务结果、事件输入和错误均需受限保存，不能持久化完整 RAG 原文、traceback 或敏感配置。
+
+更新 Owner Console 路线：
+  P2.40b 业务页面低频刷新延后到 P2.43c 有真实 running 任务生命周期之后再评估。
+```
+
+边界：
+
+```text
+本次只新增设计文档和路线记录，不修改 Python 或前端运行时代码。
+当前没有正式 work runtime，没有新的 /agent 执行命令。
+任务列表、审批和 Diagnostics 继续保持首次加载与手动刷新。
+Web Owner Console v0 继续只读。
+普通聊天继续不触发 MainAgent。
+ProjectDocRAG 继续只在显式 /agent dev_context 中使用。
+```
+
+验证：
+
+```text
+文档设计变更，无运行时代码改动。
+通过 DevContextGraph 查询现有 agent_tasks / approvals / owner runtime 基线后完成设计。
+```
+
 ## v1.6 Web Owner Console controlled auto-refresh foundation
 
 状态：已落地 P2.40a。目标是先实现自动刷新的受控基础设施和 AppShell health 低频检查，验证 timer、页面可见性、失败暂停和 AbortController 生命周期；本步不接业务页面轮询。
@@ -4351,9 +4404,8 @@ found 0 vulnerabilities
 
 定义页面策略：
   AppShell health 60 秒。
-  Dashboard overview 30 秒；diagnostics 保持手动。
-  Tasks / Task Detail 30 秒。
-  Approvals / Approval Detail 30 秒。
+  Dashboard overview、Tasks / Task Detail、Approvals / Approval Detail 在 P2.43c 有真实 running 任务前均保持手动。
+  届时如接入，业务页面候选周期为 60-120 秒；diagnostics 保持手动。
   Diagnostics / Memory / Access Control / Settings 保持手动。
   routes contract 只在首次加载和手动刷新时读取。
 
