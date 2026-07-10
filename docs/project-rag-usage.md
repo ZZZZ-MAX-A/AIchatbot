@@ -453,6 +453,18 @@ DevContextGraph 开发侧上下文
 
 ## 常见问题
 
+### 查询“当前状态和下一步”为什么可能召回旧里程碑
+
+当前 ProjectDocRAG 使用纯 cosine similarity 排序，再按 `top_k` 和 `max_context_chars` 截断。`docs/version-runlog.md` 包含大量历史章节，并反复出现“当前状态、下一步、Owner Console、边界、测试”等词，因此可能由 P2.34/P2.39 等旧片段占据前几名。
+
+这不代表索引没有重建。可以用明确的里程碑关键词验证最新文档是否已进入索引：
+
+```powershell
+.\scripts\rebuild-rag-index.ps1 -QueryDevContext "P2.44 研发上下文报告 当前状态 下一步 安全边界" -TopK 3 -MaxContextChars 1400
+```
+
+不要把 `top_k` 或上下文上限无限增大，也不要仅按整个文件的修改时间判断章节新旧。P2.45 已完成固定当前状态锚点、单来源去重和分区预算设计，尚未接入运行时，见 `docs/development-context-current-state-retrieval-design.md`。
+
 ### 新 Codex 会自动使用 RAG 吗
 
 不会。

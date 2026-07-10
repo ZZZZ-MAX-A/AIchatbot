@@ -394,6 +394,10 @@ P2.44：有用研发上下文报告。已完成。
   保留唯一 development_context_report work type；详细主人私聊回复改为固定六字段结构化报告，task.result 仍只保存命中计数和总结方式。
   MAIN_AGENT_USE_LLM=true 且有召回时只执行无工具的固定 JSON 总结；关闭、无召回或总结失败时确定性回退。
   设计与实现边界见 docs/main-agent-useful-development-context-report-design.md。
+
+P2.45：当前状态锚点与来源多样性。已完成设计，尚未实现。
+  解决历史 version-runlog 片段占满“当前状态/下一步”召回的问题；计划引入固定当前状态快照、每 source 限额和分区预算。
+  设计见 docs/development-context-current-state-retrieval-design.md。
 ```
 
 P2.43c 已提供真实 active task 生命周期，但 P2.40b 仍需要根据实际工作负载单独批准，不会自动接入业务页面轮询。届时如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。
