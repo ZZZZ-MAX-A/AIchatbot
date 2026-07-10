@@ -428,11 +428,12 @@ __pycache__
 当前边界非常重要：
 
 ```text
-QQ 侧只做 MemoryRAG。
+QQ 普通聊天侧只做 MemoryRAG。
 ProjectDocRAG 不注册 QQ 命令。
 ProjectDocRAG 不进入 QQ 普通聊天上下文。
 CombinedRAG 不进入 QQ 普通聊天上下文。
 DevContextGraph 不进入 QQ 普通聊天上下文。
+主人私聊显式“/agent 执行研发上下文任务：<问题>”是唯一固定例外：只读 development_context_report 可在 DevContextGraph 内使用当前状态锚点和多来源项目证据。
 ```
 
 可以进入 QQ 普通聊天上下文的是：
@@ -463,7 +464,7 @@ DevContextGraph 开发侧上下文
 .\scripts\rebuild-rag-index.ps1 -QueryDevContext "P2.44 研发上下文报告 当前状态 下一步 安全边界" -TopK 3 -MaxContextChars 1400
 ```
 
-不要把 `top_k` 或上下文上限无限增大，也不要仅按整个文件的修改时间判断章节新旧。P2.45a 已加入快照和固定锚点读取基础，P2.45b 已实现候选扩展、单来源去重和分区预算纯策略，但两者尚未接入 DevContextGraph / QQ 的保证锚点路径。快照可能被普通语义检索机会性召回，生产检索算法仍未改变。见 `docs/development-context-current-state-retrieval-design.md`。
+不要把 `top_k` 或上下文上限无限增大，也不要仅按整个文件的修改时间判断章节新旧。P2.45a-c 已让正式 development_context_report 先读取固定快照，再从至少 12 个项目候选中按来源去重，并使用独立证据预算；锚点缺失和部分检索失败会以固定安全类别降级。普通 `-QueryDevContext`、普通 `/agent dev_context`、`/agent-debug` 和普通聊天仍保持原有纯语义行为，因此它们仍可能召回历史里程碑。见 `docs/development-context-current-state-retrieval-design.md`。
 
 ### 新 Codex 会自动使用 RAG 吗
 

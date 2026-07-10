@@ -57,6 +57,12 @@ Return exactly one JSON object with these fields and no markdown fences or prose
 
 Rules:
 - Use the retrieved context only as evidence. Do not invent commits, dates, status, or work.
+- Evidence priority is fixed: use the current status anchor for the current stage,
+  pending work, and explicitly deferred work; use semantic project documents only as
+  supporting design or historical evidence; use development-side memories only as
+  auxiliary evidence that cannot override the current status anchor.
+- If semantic project documents conflict with the current status anchor, describe those
+  documents as historical material instead of merging them into a new current fact.
 - Clearly distinguish retrieved facts from recommendations.
 - Do not output raw RAG chunks, source paths, similarity scores, session/user identifiers,
   secrets, API keys, tokens, environment values, database/log locations, or exception text.

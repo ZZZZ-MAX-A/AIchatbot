@@ -29,6 +29,8 @@ class DevelopmentContextReportPayload:
     memory_result_count: int
     report_text: str
     summary_mode: str
+    current_status_anchor_included: bool | None = None
+    retrieval_warning_count: int = 0
 
 
 class DevelopmentContextReportFormatError(ValueError):
@@ -186,10 +188,16 @@ def build_development_context_report_source(
     *,
     project_docs: Sequence[object],
     memories: Sequence[object],
+    current_status_docs: Sequence[object] = (),
 ) -> str:
     """Build bounded LLM-only source text without paths or retrieval metadata."""
 
     blocks: list[str] = []
+    for index, document in enumerate(current_status_docs, start=1):
+        content = _sanitize_report_source_content(getattr(document, "content", ""))
+        if content:
+            blocks.append(f"当前状态锚点 {index}：\n{content}")
+
     for index, result in enumerate(project_docs, start=1):
         document = getattr(result, "document", None)
         content = _sanitize_report_source_content(getattr(document, "content", ""))
@@ -216,6 +224,9 @@ def fallback_development_context_report_sections(
     project_result_count: int,
     memory_result_count: int,
     relevant_sections: Sequence[str] = (),
+    current_status_anchor_included: bool | None = None,
+    retrieval_warnings: Sequence[str] = (),
+    retrieval_errors: Sequence[str] = (),
 ) -> DevelopmentContextReportSections:
     if project_result_count or memory_result_count:
         current_stage = "只读研发上下文检索已完成；受限结构化总结未启用或不可用。"
@@ -235,7 +246,7 @@ def fallback_development_context_report_sections(
         evidence.append(
             "相关章节：" + "、".join(str(item) for item in relevant_sections)
         )
-    return DevelopmentContextReportSections(
+    sections = DevelopmentContextReportSections(
         current_stage=current_stage,
         completed_items=completed,
         pending_items=pending,
@@ -244,6 +255,71 @@ def fallback_development_context_report_sections(
         ),
         recommended_next_steps=next_steps,
         evidence_limits=tuple(evidence),
+    )
+    return with_development_context_retrieval_limits(
+        sections,
+        current_status_anchor_included=current_status_anchor_included,
+        retrieval_warnings=retrieval_warnings,
+        retrieval_errors=retrieval_errors,
+    )
+
+
+_RETRIEVAL_LIMIT_DESCRIPTIONS = {
+    "current_status_anchor_missing": "当前状态锚点缺失，不能保证最新阶段。",
+    "current_status_anchor_failed": "当前状态锚点读取失败，不能保证最新阶段。",
+    "query_embedding_failed": "语义查询向量生成失败，本次仅使用已成功读取的证据。",
+    "project_retrieval_failed": "项目文档语义检索失败，本次报告缺少该证据分区。",
+    "memory_retrieval_failed": "开发侧记忆检索失败，本次报告缺少该辅助证据分区。",
+}
+
+
+def development_context_retrieval_limit_descriptions(
+    *,
+    current_status_anchor_included: bool | None,
+    retrieval_warnings: Sequence[str] = (),
+    retrieval_errors: Sequence[str] = (),
+) -> tuple[str, ...]:
+    limits: list[str] = []
+    if current_status_anchor_included is True:
+        limits.append("当前状态锚点已加载。")
+    elif current_status_anchor_included is False:
+        limits.append("当前状态锚点缺失，不能保证最新阶段。")
+
+    for category in (*retrieval_warnings, *retrieval_errors):
+        description = _RETRIEVAL_LIMIT_DESCRIPTIONS.get(str(category).strip())
+        if description and description not in limits:
+            limits.append(description)
+    return tuple(limits[:DEVELOPMENT_CONTEXT_REPORT_MAX_ITEMS])
+
+
+def with_development_context_retrieval_limits(
+    sections: DevelopmentContextReportSections,
+    *,
+    current_status_anchor_included: bool | None,
+    retrieval_warnings: Sequence[str] = (),
+    retrieval_errors: Sequence[str] = (),
+) -> DevelopmentContextReportSections:
+    fixed_limits = development_context_retrieval_limit_descriptions(
+        current_status_anchor_included=current_status_anchor_included,
+        retrieval_warnings=retrieval_warnings,
+        retrieval_errors=retrieval_errors,
+    )
+    if not fixed_limits:
+        return sections
+
+    combined_limits = list(fixed_limits)
+    for item in sections.evidence_limits:
+        if item not in combined_limits:
+            combined_limits.append(item)
+        if len(combined_limits) >= DEVELOPMENT_CONTEXT_REPORT_MAX_ITEMS:
+            break
+    return DevelopmentContextReportSections(
+        current_stage=sections.current_stage,
+        completed_items=sections.completed_items,
+        pending_items=sections.pending_items,
+        safety_boundaries=sections.safety_boundaries,
+        recommended_next_steps=sections.recommended_next_steps,
+        evidence_limits=tuple(combined_limits),
     )
 
 
@@ -265,12 +341,25 @@ def format_development_context_report_sections(
 
 
 def combined_results_lists(results: Any) -> tuple[Sequence[object], Sequence[object]]:
+    _, project_docs, memories = combined_results_evidence_lists(results)
+    return project_docs, memories
+
+
+def combined_results_evidence_lists(
+    results: Any,
+) -> tuple[Sequence[object], Sequence[object], Sequence[object]]:
     if results is None:
-        return (), ()
+        return (), (), ()
+    current_status_docs = getattr(results, "current_status_docs", ())
     project_docs = getattr(results, "project_docs", ())
     memories = getattr(results, "memories", ())
+    if not isinstance(current_status_docs, Sequence) or isinstance(
+        current_status_docs,
+        (str, bytes),
+    ):
+        current_status_docs = ()
     if not isinstance(project_docs, Sequence) or isinstance(project_docs, (str, bytes)):
         project_docs = ()
     if not isinstance(memories, Sequence) or isinstance(memories, (str, bytes)):
         memories = ()
-    return project_docs, memories
+    return current_status_docs, project_docs, memories

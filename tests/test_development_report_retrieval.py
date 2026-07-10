@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from pure_ai_chat_loader import load_rag_modules
 
@@ -19,11 +20,13 @@ class DevelopmentReportRetrievalPolicyTests(unittest.TestCase):
         source_id: str,
         content: str,
         source_type: str | None = None,
+        namespace: str | None = None,
+        visibility: str | None = None,
         chunk_index: int = 0,
     ):
         return self.schema.RagDocument(
             id=document_id,
-            namespace=self.schema.NAMESPACE_PROJECT_DOCS,
+            namespace=namespace or self.schema.NAMESPACE_PROJECT_DOCS,
             source_type=source_type or self.schema.SOURCE_PROJECT_DOC,
             source_id=source_id,
             source_version="1",
@@ -33,7 +36,7 @@ class DevelopmentReportRetrievalPolicyTests(unittest.TestCase):
             message_type="",
             user_id="",
             group_id="",
-            visibility=self.schema.VISIBILITY_PROJECT_OWNER,
+            visibility=visibility or self.schema.VISIBILITY_PROJECT_OWNER,
             title=f"{source_id}#Section {chunk_index}",
             content=content,
             content_hash=f"hash-{document_id}",
@@ -43,12 +46,25 @@ class DevelopmentReportRetrievalPolicyTests(unittest.TestCase):
             deleted_at="",
         )
 
-    def result(self, *, document_id: int, source_id: str, content: str, score: float):
+    def result(
+        self,
+        *,
+        document_id: int,
+        source_id: str,
+        content: str,
+        score: float,
+        source_type: str | None = None,
+        namespace: str | None = None,
+        visibility: str | None = None,
+    ):
         return self.schema.RagSearchResult(
             document=self.document(
                 document_id=document_id,
                 source_id=source_id,
                 content=content,
+                source_type=source_type,
+                namespace=namespace,
+                visibility=visibility,
             ),
             score=score,
         )
@@ -163,6 +179,180 @@ class DevelopmentReportRetrievalPolicyTests(unittest.TestCase):
             [result.document.source_id for result in evidence.project_docs],
             ["docs/a.md", "docs/b.md"],
         )
+
+    def test_formal_retrieval_reads_anchor_first_expands_candidates_and_diversifies(self):
+        events: list[str] = []
+        search_top_k: dict[str, int] = {}
+        anchor_source = self.policy.CURRENT_DEVELOPMENT_STATUS_SOURCE_ID
+        anchor = self.document(
+            document_id=50,
+            source_id=anchor_source,
+            content="P2.45b current",
+        )
+        project_candidates = [
+            self.result(document_id=51, source_id=anchor_source, content="duplicate", score=0.99),
+            self.result(document_id=52, source_id="docs/version-runlog.md", content="old 1", score=0.98),
+            self.result(document_id=53, source_id="docs/version-runlog.md", content="old 2", score=0.97),
+            self.result(document_id=54, source_id="docs/design.md", content="design", score=0.96),
+            self.result(document_id=55, source_id="docs/runbook.md", content="runbook", score=0.95),
+        ]
+        memory = self.result(
+            document_id=56,
+            source_id="memory-56",
+            content="memory",
+            score=0.90,
+            source_type=self.schema.SOURCE_MANUAL_FACT,
+            namespace=self.schema.NAMESPACE_SEMANTIC_MEMORY,
+            visibility=self.schema.VISIBILITY_OWNER_ONLY,
+        )
+
+        class Embedder:
+            provider = "fake"
+            model = "fake-model"
+
+            @staticmethod
+            def embed(_query):
+                events.append("embed")
+                return [0.1, 0.2]
+
+        def read_anchor(**_kwargs):
+            events.append("anchor")
+            return [anchor]
+
+        def search(**kwargs):
+            namespace = kwargs["namespace"]
+            events.append(f"search:{namespace}")
+            search_top_k[namespace] = kwargs["top_k"]
+            if namespace == self.schema.NAMESPACE_PROJECT_DOCS:
+                return project_candidates
+            return [memory]
+
+        with (
+            patch.object(self.policy, "retrieve_current_development_status", read_anchor),
+            patch.object(self.policy, "search_rag_documents", search),
+        ):
+            execution = self.policy.retrieve_development_report_rag(
+                query="恢复 Owner Console 当前开发状态",
+                embedder=Embedder(),
+                is_owner=True,
+                memory_top_k=5,
+            )
+
+        self.assertEqual(events[:2], ["anchor", "embed"])
+        self.assertEqual(
+            search_top_k[self.schema.NAMESPACE_PROJECT_DOCS],
+            self.policy.DEVELOPMENT_REPORT_PROJECT_CANDIDATE_MIN,
+        )
+        self.assertEqual(execution.results.current_status_docs, [anchor])
+        self.assertEqual(
+            [result.document.source_id for result in execution.results.project_docs],
+            ["docs/version-runlog.md", "docs/design.md", "docs/runbook.md"],
+        )
+        self.assertEqual(execution.results.memories, [memory])
+        self.assertEqual(execution.warnings, ())
+        self.assertEqual(execution.errors, ())
+        self.assertFalse(execution.execution_failed)
+
+    def test_anchor_survives_embedding_failure_as_partial_success(self):
+        anchor = self.document(
+            document_id=60,
+            source_id=self.policy.CURRENT_DEVELOPMENT_STATUS_SOURCE_ID,
+            content="current state",
+        )
+        observed_errors: list[tuple[str, str]] = []
+
+        class FailingEmbedder:
+            provider = "fake"
+            model = "fake-model"
+
+            @staticmethod
+            def embed(_query):
+                raise RuntimeError("PRIVATE_TOKEN=must-not-enter-result")
+
+        with patch.object(
+            self.policy,
+            "retrieve_current_development_status",
+            return_value=[anchor],
+        ):
+            execution = self.policy.retrieve_development_report_rag(
+                query="current state",
+                embedder=FailingEmbedder(),
+                is_owner=True,
+                on_error=lambda exc, category: observed_errors.append(
+                    (type(exc).__name__, category)
+                ),
+            )
+
+        self.assertEqual(execution.results.current_status_docs, [anchor])
+        self.assertEqual(execution.results.project_docs, [])
+        self.assertEqual(execution.results.memories, [])
+        self.assertEqual(execution.warnings, ())
+        self.assertEqual(execution.errors, (self.policy.QUERY_EMBEDDING_FAILED,))
+        self.assertEqual(
+            observed_errors,
+            [("RuntimeError", self.policy.QUERY_EMBEDDING_FAILED)],
+        )
+        self.assertFalse(execution.execution_failed)
+        self.assertNotIn("PRIVATE_TOKEN", repr(execution))
+
+    def test_missing_anchor_and_technical_failure_requires_graph_failure(self):
+        class FailingEmbedder:
+            provider = "fake"
+            model = "fake-model"
+
+            @staticmethod
+            def embed(_query):
+                raise RuntimeError("embedding unavailable")
+
+        with patch.object(
+            self.policy,
+            "retrieve_current_development_status",
+            return_value=[],
+        ):
+            execution = self.policy.retrieve_development_report_rag(
+                query="current state",
+                embedder=FailingEmbedder(),
+                is_owner=True,
+            )
+
+        self.assertFalse(execution.results.has_results)
+        self.assertEqual(
+            execution.warnings,
+            (self.policy.CURRENT_STATUS_ANCHOR_MISSING,),
+        )
+        self.assertEqual(execution.errors, (self.policy.QUERY_EMBEDDING_FAILED,))
+        self.assertTrue(execution.execution_failed)
+
+    def test_clean_empty_retrieval_is_evidence_insufficient_not_technical_failure(self):
+        class Embedder:
+            provider = "fake"
+            model = "fake-model"
+
+            @staticmethod
+            def embed(_query):
+                return [0.1, 0.2]
+
+        with (
+            patch.object(
+                self.policy,
+                "retrieve_current_development_status",
+                return_value=[],
+            ),
+            patch.object(self.policy, "search_rag_documents", return_value=[]),
+        ):
+            execution = self.policy.retrieve_development_report_rag(
+                query="current state",
+                embedder=Embedder(),
+                is_owner=True,
+            )
+
+        self.assertFalse(execution.results.has_results)
+        self.assertEqual(execution.errors, ())
+        self.assertEqual(
+            execution.warnings,
+            (self.policy.CURRENT_STATUS_ANCHOR_MISSING,),
+        )
+        self.assertFalse(execution.execution_failed)
 
 
 if __name__ == "__main__":

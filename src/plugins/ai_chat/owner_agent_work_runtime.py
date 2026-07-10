@@ -143,6 +143,8 @@ def _persisted_development_context_summary(
     project_count: int | None,
     memory_count: int | None,
     summary_mode: str = "legacy_count_only",
+    current_status_anchor_included: bool | None = None,
+    retrieval_warning_count: int = 0,
 ) -> str:
     lines = ["研发上下文报告已完成。"]
     if project_count is not None:
@@ -151,6 +153,10 @@ def _persisted_development_context_summary(
         lines.append(f"开发侧记忆命中：{memory_count}。")
     if project_count is None and memory_count is None:
         lines.append("执行器未返回可持久化的命中计数。")
+    if current_status_anchor_included is not None:
+        anchor_status = "已加载" if current_status_anchor_included else "缺失"
+        lines.append(f"当前状态锚点：{anchor_status}。")
+        lines.append(f"检索警告：{retrieval_warning_count}。")
     if summary_mode == "bounded_llm":
         lines.append("详细回复：受限主模型结构化总结，仅在本次主人私聊返回。")
     elif summary_mode == "deterministic_fallback":
@@ -163,12 +169,25 @@ def _sanitize_development_context_report(raw_result: object) -> SanitizedAgentWo
     if isinstance(raw_result, DevelopmentContextReportPayload):
         if raw_result.project_result_count < 0 or raw_result.memory_result_count < 0:
             raise ValueError("development context report counts must be non-negative")
+        if raw_result.current_status_anchor_included is not None and not isinstance(
+            raw_result.current_status_anchor_included,
+            bool,
+        ):
+            raise ValueError("development context report anchor flag is invalid")
+        if (
+            not isinstance(raw_result.retrieval_warning_count, int)
+            or isinstance(raw_result.retrieval_warning_count, bool)
+            or raw_result.retrieval_warning_count < 0
+        ):
+            raise ValueError("development context report warning count is invalid")
         if raw_result.summary_mode not in {"bounded_llm", "deterministic_fallback"}:
             raise ValueError("development context report summary mode is invalid")
         persisted_summary = _persisted_development_context_summary(
             project_count=raw_result.project_result_count,
             memory_count=raw_result.memory_result_count,
             summary_mode=raw_result.summary_mode,
+            current_status_anchor_included=raw_result.current_status_anchor_included,
+            retrieval_warning_count=raw_result.retrieval_warning_count,
         )
         response_text = _sanitize_development_context_response(raw_result.report_text)
         return SanitizedAgentWorkResult(

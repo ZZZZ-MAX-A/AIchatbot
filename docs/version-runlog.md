@@ -4257,6 +4257,80 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Development context current-state production connection
+
+状态：已完成 P2.45c 实现、回归及 P2.45d 本地索引验收，尚待主人 QQ live 验收。目标是只为主人私聊正式 `development_context_report` 接入固定当前状态锚点和多来源语义证据，不改变普通 `/agent`、`/agent-debug`、本地通用 DevContext 或普通聊天。
+
+本次完成：
+
+```text
+src/plugins/ai_chat/rag/development_report.py：
+  固定先从 ProjectDocRAG 读取 current-development-status 锚点，再生成一次 query embedding。
+  项目语义候选固定至少 12 条，排除锚点 source，每 source 最多 1 条，最终最多 3 条。
+  记忆继续只读检索，并与 anchor 1200 / project 1800 / memory 800 / format 400 分区预算合并。
+  只返回 current_status_anchor_missing、current_status_anchor_failed、query_embedding_failed、project_retrieval_failed、memory_retrieval_failed 等固定类别，不把异常原文写进结果。
+
+DevContextGraph：
+  新增默认关闭的内部 development-report evidence 模式。
+  只有 run_development_context_report_for_event 固定传 true；普通 MainAgent dev_context 继续使用原 retrieve_combined_rag。
+  正式模式的图 metadata 只保留锚点布尔值/块数、项目来源数/结果数、记忆结果数、来源多样性标志和固定 warning/error 类别。
+  原始 RagDocument/RagSearchResult 只存在于单次图执行闭包，报告 source 经过脱敏后进入 context_text，不写入 metadata 或任务持久化。
+
+报告与持久化：
+  当前状态锚点固定排在项目语义证据和开发侧记忆之前。
+  主模型提示明确：锚点决定当前阶段、未完成项和明确延后项；语义文档只补设计/历史；记忆不能覆盖锚点。
+  锚点与历史材料冲突时，历史材料必须按历史说明。
+  确定性回退和受限主模型结果都追加固定的锚点/检索限制说明。
+  agent_tasks.result 与 work_finished.output_summary 只新增“当前状态锚点：已加载/缺失”和“检索警告：N”，不保存详细报告、路径、分数、source id、片段或异常原文。
+```
+
+部分失败策略：
+
+```text
+锚点成功、embedding 或语义检索失败：使用锚点完成部分报告，任务可保持 done，并显示固定证据限制。
+锚点缺失、语义证据成功：使用语义证据完成报告，并明确不能保证最新阶段。
+没有任何证据且存在技术检索错误：DevContextGraph execution_failed，任务 failed。
+干净地没有命中且没有技术错误：返回证据不足回退，不伪造系统故障。
+不自动重试，不直接读文件兜底，不发送额外 QQ。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_development_report_retrieval tests.test_development_context_report tests.test_main_agent_llm tests.test_owner_agent_work_runtime tests.test_memory_rag_qq_boundary -v
+Ran 48 tests OK
+
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_development_report_retrieval tests.test_rag_units tests.test_graph_runners tests.test_development_context_report tests.test_owner_agent_work_runtime tests.test_main_agent_llm tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 222 tests OK
+
+既有非失败提示：FastAPI 测试依赖产生 StarletteDeprecationWarning。
+
+更新快照和文档后执行 .\scripts\rebuild-rag-index.ps1 -ProjectDocs：
+  scanned_files=59
+  chunks_seen=1271
+  errors=0
+
+使用重建后的真实本地索引和固定问题“恢复 Owner Console 当前开发状态和下一步计划”执行正式证据检索干跑：
+  anchor_included=true
+  anchor_chunks=1
+  anchor 包含 P2.45c、P2.40b 和 Owner Console 只读边界
+  project_results=3
+  project_sources=web-owner-console-read-model-design、owner-console-http-surface-audit、version-runlog
+  memory_results=0
+  warnings=0
+  errors=0
+  execution_failed=false
+  evidence_chars=2720
+```
+
+边界：
+
+```text
+P2.45c 没有新增 work type、QQ 命令、Web endpoint、Web 写操作、登录鉴权、shell、Git、任意文件读写、未注册数据库写入或多步写自动化。
+Owner Console 继续只读 GET；P2.40b 继续未启用；/docs、/redoc、/openapi.json 继续关闭。
+本地干跑没有发送 QQ。完成提交后，再通知主人重启 Bot 并手动执行固定 live 命令。
+```
+
 ## v1.6 Development context diverse evidence policy
 
 状态：已完成 P2.45b。目标是在不查询数据库、不调用 embedding、不接 QQ 生产路径的前提下，把研发报告所需的候选扩展、固定锚点排除、单来源去重和分区预算实现为独立纯策略。

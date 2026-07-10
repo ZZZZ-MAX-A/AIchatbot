@@ -131,6 +131,8 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
                     ]
                 ),
                 summary_mode="bounded_llm",
+                current_status_anchor_included=True,
+                retrieval_warning_count=1,
             )
 
         with temp_dir, patcher:
@@ -146,11 +148,14 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
 
         self.assertEqual(execution.outcome, "completed")
         self.assertIn("项目文档命中：4", execution.task.result)
+        self.assertIn("当前状态锚点：已加载", execution.task.result)
+        self.assertIn("检索警告：1", execution.task.result)
         self.assertIn("受限主模型结构化总结", execution.task.result)
         self.assertIn("P2.43 已完成", reply)
         self.assertIn("设计 P2.44", reply)
         self.assertNotIn("P2.43 已完成", execution.task.result)
         self.assertNotIn("设计 P2.44", execution.task.result)
+        self.assertNotIn("current_status_anchor", execution.task.result)
         self.assertNotIn("must-not-leak", reply)
         self.assertNotIn("owner@example.com", reply)
         self.assertNotIn("13800138000", reply)
