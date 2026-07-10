@@ -2,7 +2,7 @@
 
 本文记录 P2.29 Web Owner Console 前端技术栈与目录边界设计。当前阶段只做设计，不创建前端工程、不安装 npm 依赖、不修改 FastAPI 行为。
 
-后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已接入概览页 `/overview` 和 `/diagnostics` 只读数据。P2.33 已接入任务列表 `/tasks` 只读数据。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}` 只读数据。P2.35 已接入诊断页 `/diagnostics`、记忆页 `/memory`、访问控制页 `/access-control` 和设置页 `/settings` 只读数据，主导航页面已全部接入真实数据。P2.36 已完成前端只读收口审计，见 `docs/web-owner-console-frontend-readonly-audit.md`。P2.37 已新增 `npm run guard:readonly` 前端只读 contract guard，见 `docs/web-owner-console-frontend-contract-guard.md`。P2.39 已补充本地部署方式设计，见 `docs/web-owner-console-local-deployment-design.md`。P2.39a 已实现可选本地静态模式：Vite build base 为 `/owner-console/`，FastAPI 在 `OWNER_CONSOLE_STATIC_ENABLED=true` 时服务 `dist`。P2.39b 已新增本地一键启动/停止脚本，仍不开放 Web 写操作。
+后续实现状态：P2.30 已补充 UI 布局和中文化展示规则，见 `docs/web-owner-console-ui-layout-design.md`。P2.31 已按本文边界创建 `web/owner-console` 最小 Vite + React + TypeScript 工程，只接 `/healthz` 和 `/api/v1/owner-console/routes`。P2.32 已接入概览页 `/overview` 和 `/diagnostics` 只读数据。P2.33 已接入任务列表 `/tasks` 只读数据。P2.34 已接入任务详情 `/tasks/{task_id}`、审批列表 `/approvals` 和审批详情 `/approvals/{approval_id}` 只读数据。P2.35 已接入诊断页 `/diagnostics`、记忆页 `/memory`、访问控制页 `/access-control` 和设置页 `/settings` 只读数据，主导航页面已全部接入真实数据。P2.36 已完成前端只读收口审计，见 `docs/web-owner-console-frontend-readonly-audit.md`。P2.37 已新增 `npm run guard:readonly` 前端只读 contract guard，见 `docs/web-owner-console-frontend-contract-guard.md`。P2.39 已补充本地部署方式设计，见 `docs/web-owner-console-local-deployment-design.md`。P2.39a 已实现可选本地静态模式：Vite build base 为 `/owner-console/`，FastAPI 在 `OWNER_CONSOLE_STATIC_ENABLED=true` 时服务 `dist`。P2.39b 已新增本地一键启动/停止脚本，仍不开放 Web 写操作。P2.40 已完成只读自动刷新策略设计，见 `docs/web-owner-console-readonly-auto-refresh-design.md`。P2.40a 已实现受控自动刷新基础设施和 AppShell health 低频检查；业务页面仍保持手动刷新，等待 P2.40b。
 
 ## 1. 目标
 
@@ -598,9 +598,14 @@ P2.35：接 Diagnostics / Memory / Access Control / Settings。
 P2.36：完成前端只读收口审计。
 P2.37：补前端 smoke / contract guard。
 P2.38：整理使用手册和启动 runbook。
-P2.39：再讨论本地部署方式。
-P2.40：再讨论登录/鉴权设计。
-P2.41：再讨论审批操作设计。
+P2.39：本地部署方式设计。已完成。
+P2.39a：可选本地静态模式。已完成。
+P2.39b：本地一键启动/停止脚本。已完成。
+P2.40：只读自动刷新策略设计。已完成。
+P2.40a：受控自动刷新基础设施与测试。已完成。
+P2.40b-P2.40c：业务页面接入和 guard / smoke 收口。
+P2.41：设计本地访问保护 / 鉴权。
+P2.42：设计 Web 审批操作。
 ```
 
 下一步不建议直接做：
@@ -609,7 +614,7 @@ P2.41：再讨论审批操作设计。
 审批按钮。
 写操作 API。
 主动 diagnostics probe。
-自动轮询。
+未经 P2.40a 实现和 guard 验证的自动轮询。
 公网部署。
 大型 UI framework。
 ```

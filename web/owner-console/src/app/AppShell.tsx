@@ -17,7 +17,16 @@ import type { LucideIcon } from "lucide-react";
 
 import { ownerConsoleApi } from "../api/ownerConsoleApi";
 import type { OwnerConsoleSnapshot } from "../api/ownerConsoleTypes";
+import { AutoRefreshControl } from "../components/AutoRefreshControl";
 import { StatusBadge } from "../components/StatusBadge";
+import { useControlledAutoRefresh } from "../hooks/useControlledAutoRefresh";
+import { useAutoRefreshPreference } from "./AutoRefreshContext";
+import {
+  classifyOwnerConsoleAutoRefreshError,
+  OWNER_CONSOLE_AUTO_REFRESH_FAILURE_LIMIT,
+  OWNER_CONSOLE_HEALTH_REFRESH_INTERVAL_MS,
+  OWNER_CONSOLE_VISIBILITY_RESUME_DELAY_MS,
+} from "./ownerConsoleRefreshPolicy";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -53,6 +62,8 @@ function formatRefreshTime(value: Date | null): string {
 }
 
 export function AppShell() {
+  const { enabled: autoRefreshEnabled, setEnabled: setAutoRefreshEnabled } =
+    useAutoRefreshPreference();
   const [state, setState] = useState<LoadState>("loading");
   const [snapshot, setSnapshot] = useState<OwnerConsoleSnapshot>({
     health: null,
@@ -61,7 +72,7 @@ export function AppShell() {
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  const refresh = useCallback(async (signal?: AbortSignal) => {
+  const refresh = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     setState("loading");
     setError(null);
     try {
@@ -72,14 +83,47 @@ export function AppShell() {
       setSnapshot({ health, routes });
       setLastRefreshed(new Date());
       setState("ready");
+      return true;
     } catch (exc) {
       if (exc instanceof DOMException && exc.name === "AbortError") {
-        return;
+        return false;
       }
       setError(exc instanceof Error ? exc.message : "后端连接失败");
       setState("error");
+      return false;
     }
   }, []);
+
+  const refreshHealth = useCallback(async (signal: AbortSignal) => {
+    const health = await ownerConsoleApi.getHealth(signal);
+    if (signal.aborted) {
+      return;
+    }
+    setSnapshot((current) => ({ ...current, health }));
+    setLastRefreshed(new Date());
+    setError(null);
+  }, []);
+
+  const autoRefresh = useControlledAutoRefresh({
+    enabled: autoRefreshEnabled,
+    intervalMs: OWNER_CONSOLE_HEALTH_REFRESH_INTERVAL_MS,
+    refresh: refreshHealth,
+    classifyError: classifyOwnerConsoleAutoRefreshError,
+    failureLimit: OWNER_CONSOLE_AUTO_REFRESH_FAILURE_LIMIT,
+    visibilityResumeDelayMs: OWNER_CONSOLE_VISIBILITY_RESUME_DELAY_MS,
+  });
+
+  const handleManualRefresh = useCallback(async () => {
+    if (!autoRefresh.beginManualRefresh()) {
+      return;
+    }
+    const succeeded = await refresh();
+    autoRefresh.finishManualRefresh(succeeded);
+  }, [
+    autoRefresh.beginManualRefresh,
+    autoRefresh.finishManualRefresh,
+    refresh,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -90,7 +134,7 @@ export function AppShell() {
   const status = useMemo(() => {
     const health = snapshot.health;
     const routes = snapshot.routes;
-    const connected = state === "ready";
+    const connected = state === "ready" && autoRefresh.lastError === null;
     const readOnly = health?.read_only === true && routes?.read_only === true;
     const writeClosed =
       health?.web_write_enabled === false &&
@@ -106,7 +150,11 @@ export function AppShell() {
       schemaVersion,
       routeCount,
     };
-  }, [snapshot, state]);
+  }, [autoRefresh.lastError, snapshot, state]);
+
+  const connectionError =
+    autoRefresh.lastError?.message ??
+    (state === "error" ? error ?? "后端连接失败" : null);
 
   return (
     <div className="app-shell">
@@ -172,26 +220,33 @@ export function AppShell() {
             />
             <StatusBadge label="接口版本" value={status.schemaVersion} />
             <StatusBadge
-              label="最后刷新"
+              label="连接检查"
               value={formatRefreshTime(lastRefreshed)}
             />
           </div>
 
-          <button
-            className="refresh-button"
-            type="button"
-            onClick={() => void refresh()}
-            disabled={state === "loading"}
-          >
-            <RefreshCw aria-hidden="true" size={16} />
-            <span>刷新</span>
-          </button>
+          <div className="top-status-bar__actions">
+            <AutoRefreshControl
+              enabled={autoRefreshEnabled}
+              status={autoRefresh.status}
+              onChange={setAutoRefreshEnabled}
+            />
+            <button
+              className="refresh-button"
+              type="button"
+              onClick={() => void handleManualRefresh()}
+              disabled={state === "loading" || autoRefresh.status === "refreshing"}
+            >
+              <RefreshCw aria-hidden="true" size={16} />
+              <span>刷新</span>
+            </button>
+          </div>
         </header>
 
-        {state === "error" ? (
+        {connectionError ? (
           <section className="connection-banner" role="status">
             <WifiOff aria-hidden="true" size={18} />
-            <span>{error ?? "后端连接失败"}</span>
+            <span>{connectionError}</span>
           </section>
         ) : (
           <section className="connection-banner connection-banner--ready">

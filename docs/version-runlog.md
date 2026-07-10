@@ -4255,6 +4255,146 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Web Owner Console controlled auto-refresh foundation
+
+状态：已落地 P2.40a。目标是先实现自动刷新的受控基础设施和 AppShell health 低频检查，验证 timer、页面可见性、失败暂停和 AbortController 生命周期；本步不接业务页面轮询。
+
+本次完成：
+
+```text
+新增 web/owner-console/src/hooks/useControlledAutoRefresh.ts：
+  使用请求完成后再 setTimeout 的 completion-based 调度。
+  不使用 setInterval。
+  页面 hidden 时清 timer 并 abort 自动请求。
+  页面恢复 visible 时，过期请求最多延迟 1 秒补一次。
+  同一资源不并发、不积压 tick。
+  手动刷新开始前暂停 timer，结束后再恢复调度。
+  自动请求执行期间拒绝并发手动刷新。
+  transient 失败按正常周期重试，连续 3 次后暂停。
+  terminal 失败立即暂停。
+  手动成功可以清失败状态并恢复调度。
+
+新增 AutoRefreshContext / AutoRefreshControl / ownerConsoleRefreshPolicy：
+  AppShell 内存态开关默认 false。
+  浏览器完整刷新后恢复关闭。
+  不写 localStorage、sessionStorage、cookie 或数据库。
+  AppShell 开启后每 60 秒检查 GET /healthz。
+  routes contract 不周期读取。
+  顶部“最后刷新”调整为语义更准确的“连接检查”。
+
+新增前端生命周期测试：
+  Vitest + jsdom + @testing-library/react renderHook。
+  覆盖默认关闭、周期调度、慢请求不重叠、hidden 暂停、visible 补一次、连续失败暂停、terminal 失败、手动恢复、隐藏/关闭 abort 和错误分类。
+
+扩展 readonly guard：
+  timer 和 visibility API 只能出现在受控 hook，测试文件除外。
+  第一版禁止 setInterval。
+  业务组件不能自行创建 timer 或监听 visibilitychange。
+
+本地启动兼容修复：
+  start-owner-console.ps1 在后台 Start-Process 前规范化当前进程 Path 环境项。
+  避免部分启动环境同时携带 Path / PATH 时触发 duplicate-key 异常。
+  后台启动由固定等待 2 秒改为最多等待 10 秒，并在进程提前退出时立即失败。
+  避免冷启动超过 2 秒时被误报为启动失败。
+  Path 值本身保持不变，不改变端口、launcher、日志或静态模式行为。
+```
+
+边界：
+
+```text
+Dashboard、Tasks、Approvals、Task Detail、Approval Detail 尚未接周期刷新。
+Diagnostics、Memory、Access Control、Settings 继续手动刷新。
+不新增后端 API，不修改 FastAPI app。
+所有自动请求继续经过 ownerConsoleApi GET allowlist。
+不新增 POST / PUT / PATCH / DELETE。
+不新增登录/鉴权或 Web 写操作。
+不触发 MainAgent、ProjectDocRAG、MemoryRAG 检索或 QQ 发送。
+不开放 /docs、/redoc、/openapi.json。
+```
+
+验证：
+
+```text
+npm run guard:readonly
+Owner Console frontend read-only guard passed.
+Checked 24 TypeScript source files.
+
+npm test
+Test Files 1 passed
+Tests 12 passed
+
+npm run typecheck
+OK
+
+npm run build
+OK
+
+npm audit
+found 0 vulnerabilities
+```
+
+## v1.6 Web Owner Console read-only auto-refresh design
+
+状态：已落地 P2.40 设计。目标是在 Web Owner Console 本地静态模式可用后，先定义低频、可控、页面可见时才运行的只读自动刷新策略，不直接实现轮询，也不引入 WebSocket / SSE。
+
+本次完成：
+
+```text
+新增 docs/web-owner-console-readonly-auto-refresh-design.md：
+  默认关闭自动刷新，用户显式开启后只在 AppShell 内存生命周期内生效。
+  页面完整刷新后恢复关闭，不写 localStorage、sessionStorage、cookie 或数据库。
+  页面隐藏时停止 timer 并取消自动请求，恢复可见时最多补一次。
+  同一资源不允许并发或重叠请求。
+  自动失败不立即重试；连续 3 次网络/5xx 失败后暂停。
+  400 / 403 / 404 / contract mismatch 立即暂停自动刷新。
+  手动刷新继续保留，手动成功后可以恢复调度。
+
+定义页面策略：
+  AppShell health 60 秒。
+  Dashboard overview 30 秒；diagnostics 保持手动。
+  Tasks / Task Detail 30 秒。
+  Approvals / Approval Detail 30 秒。
+  Diagnostics / Memory / Access Control / Settings 保持手动。
+  routes contract 只在首次加载和手动刷新时读取。
+
+定义后续实现边界：
+  使用单一 useControlledAutoRefresh hook。
+  推荐请求完成后再 setTimeout，不使用固定节拍 setInterval。
+  readonly guard 后续限制 timer 和 visibility API 只能出现在受控 hook。
+  自动刷新仍只调用现有 ownerConsoleApi GET allowlist。
+  不新增后端 endpoint、WebSocket、SSE、TanStack Query 或全局状态库。
+
+同步文档：
+  修正 local deployment design 中“不新增启动脚本”的过期描述。
+  将 v0 runbook 的后端 contract 基线从 20 项更新为 22 项。
+  更新 frontend stack、UI layout、readonly audit、contract guard、local deployment、runbook 和 frontend README。
+```
+
+边界：
+
+```text
+本次只做设计，不修改 web/owner-console/src 运行时代码。
+当前自动刷新仍默认不存在，不产生周期请求。
+不新增后端 API，不修改 FastAPI app。
+不新增 POST / PUT / PATCH / DELETE。
+不新增登录/鉴权。
+不开放审批确认、拒绝或恢复执行。
+不开放 /docs、/redoc、/openapi.json。
+不改变 QQ / NoneBot / /agent 行为。
+ProjectDocRAG 仍只允许在显式 /agent dev_context 中使用。
+Web Owner Console v0 继续只读。
+```
+
+验证：
+
+```text
+设计前重新执行 Owner Console 后端 HTTP contract：
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
+Ran 22 tests OK
+
+本次无运行时代码改动，后续 P2.40a 实现时再增加 timer / visibility 生命周期测试并执行前端 guard、typecheck、build 和 audit。
+```
+
 ## v1.6 Web Owner Console local start scripts
 
 状态：已落地 P2.39b。目标是让 Web Owner Console 本地静态模式可以一键后台启动和停止，避免日常使用时每次手动输入 uvicorn 环境变量和启动命令。

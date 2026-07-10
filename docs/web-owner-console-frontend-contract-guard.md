@@ -17,6 +17,8 @@ HTTP client 是否仍只使用 GET。
 源码是否出现写操作风格 API 名称。
 主导航页面路由是否仍全部存在。
 占位业务页是否已经清理。
+timer 和 visibility API 是否只出现在受控自动刷新 hook。
+第一版自动刷新是否避免使用 setInterval。
 ```
 
 它不检查：
@@ -41,8 +43,8 @@ npm run guard:readonly
 
 ```text
 Owner Console frontend read-only guard passed.
-Checked 19 TypeScript source files.
-Verified GET-only fetch usage, read-only allowlist, page routes, and absence of write-style API names.
+Checked 24 TypeScript source files.
+Verified GET-only fetch usage, read-only allowlist, controlled timers, page routes, and absence of write-style API names.
 ```
 
 ## 3. 文件
@@ -106,6 +108,8 @@ HTTP method 不是 GET。
 出现 clearImageCache / clearErrorLog。
 出现 addMemory / deleteMemory。
 重新引入 PlaceholderPage。
+在业务页面或组件中直接使用 setTimeout / clearTimeout / setInterval。
+在业务页面或组件中直接监听 visibilitychange。
 ```
 
 这些名字不是完整安全模型，只是 v0 只读边界的前端防线。后端 FastAPI / route contract / runtime service 测试仍然必须保留。
@@ -135,10 +139,13 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 建议下一步：
 
 ```text
-P2.38：整理 Web Owner Console v0 使用手册和启动 runbook。
-P2.39：讨论本地部署方式。
-P2.40：讨论登录/鉴权。
-P2.41：单独设计 Web 审批操作。
+P2.38：Web Owner Console v0 使用手册和启动 runbook。已完成。
+P2.39-P2.39b：本地部署设计、静态模式和启停脚本。已完成。
+P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
+P2.40a：已扩展 guard，限制 timer 和 visibility API 只能出现在受控 hook。
+P2.40b-P2.40c：页面接入后继续约束手动页面不能注册业务 timer，并补浏览器 smoke。
+P2.41：设计本地访问保护 / 鉴权。
+P2.42：单独设计 Web 审批操作。
 ```
 
 仍不建议直接做：
@@ -147,7 +154,7 @@ P2.41：单独设计 Web 审批操作。
 审批按钮。
 写操作 API。
 公网部署。
-自动轮询。
+未经 P2.40a 实现和 guard 验证的自动轮询。
 WebSocket / SSE。
 登录页假实现。
 ```

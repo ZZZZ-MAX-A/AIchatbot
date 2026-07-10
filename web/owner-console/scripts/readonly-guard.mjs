@@ -7,6 +7,8 @@ const srcRoot = join(projectRoot, "src");
 const apiFile = join(srcRoot, "api", "ownerConsoleApi.ts");
 const appFile = join(srcRoot, "app", "App.tsx");
 const placeholderFile = join(srcRoot, "app", "PlaceholderPage.tsx");
+const autoRefreshHookFile = join(srcRoot, "hooks", "useControlledAutoRefresh.ts");
+const autoRefreshHookRelative = "src/hooks/useControlledAutoRefresh.ts";
 
 const expectedStaticPaths = [
   "HEALTH_PATH",
@@ -105,6 +107,10 @@ const sourceTexts = sourceFiles.map((path) => ({
   text: readText(path),
 }));
 
+if (!existsSync(autoRefreshHookFile)) {
+  fail("The controlled auto-refresh hook is missing.");
+}
+
 if (existsSync(placeholderFile)) {
   fail("PlaceholderPage.tsx still exists after all main pages have real data.");
 }
@@ -141,6 +147,48 @@ for (const file of sourceTexts) {
 
   if (/\bPlaceholderPage\b/.test(file.text)) {
     fail(`${file.rel} still references PlaceholderPage.`);
+  }
+
+  const isAutoRefreshTest = /useControlledAutoRefresh\.test\.[tj]sx?$/.test(
+    file.rel,
+  );
+  if (
+    file.rel !== autoRefreshHookRelative &&
+    !isAutoRefreshTest &&
+    /\b(?:setTimeout|clearTimeout)\s*\(/.test(file.text)
+  ) {
+    fail(`${file.rel} manages timers outside the controlled auto-refresh hook.`);
+  }
+  if (
+    file.rel !== autoRefreshHookRelative &&
+    !isAutoRefreshTest &&
+    /\b(?:visibilityState|visibilitychange)\b/.test(file.text)
+  ) {
+    fail(`${file.rel} manages page visibility outside the controlled auto-refresh hook.`);
+  }
+  if (
+    file.rel !== autoRefreshHookRelative &&
+    /\bsetInterval\s*\(/.test(file.text)
+  ) {
+    fail(`${file.rel} uses setInterval outside the controlled auto-refresh hook.`);
+  }
+}
+
+if (existsSync(autoRefreshHookFile)) {
+  const autoRefreshHookText = readText(autoRefreshHookFile);
+  for (const expectedToken of [
+    "window.setTimeout",
+    "window.clearTimeout",
+    "document.visibilityState",
+    'document.addEventListener("visibilitychange"',
+    "AbortController",
+  ]) {
+    if (!autoRefreshHookText.includes(expectedToken)) {
+      fail(`The controlled auto-refresh hook is missing ${expectedToken}.`);
+    }
+  }
+  if (/\bsetInterval\s*\(/.test(autoRefreshHookText)) {
+    fail("The first controlled auto-refresh implementation must not use setInterval.");
   }
 }
 
@@ -185,4 +233,4 @@ if (failures.length > 0) {
 
 console.log("Owner Console frontend read-only guard passed.");
 console.log(`Checked ${sourceFiles.length} TypeScript source files.`);
-console.log("Verified GET-only fetch usage, read-only allowlist, page routes, and absence of write-style API names.");
+console.log("Verified GET-only fetch usage, read-only allowlist, controlled timers, page routes, and absence of write-style API names.");

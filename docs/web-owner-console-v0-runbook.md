@@ -56,6 +56,7 @@ Approval Detail：/owner-console/approvals/:approval_id
 后端已连接 / 后端未连接
 schema_version
 最后刷新时间
+自动刷新开关，完整页面加载后默认关闭
 ```
 
 ## 3. 启动前检查
@@ -233,6 +234,22 @@ cd D:\AIchatbot
 
 ## 6. 手动验收顺序
 
+### P2.40a 自动刷新基础设施
+
+当前顶部状态区已经提供“自动刷新”开关：
+
+```text
+默认关闭。
+只保存在当前 AppShell 内存中，浏览器完整刷新后恢复关闭。
+开启后当前只每 60 秒检查一次 /healthz。
+页面隐藏时暂停 timer 并取消自动 health 请求。
+连续 3 次网络/5xx 失败后暂停；400/403/404 或 contract mismatch 立即暂停。
+手动刷新成功后恢复调度。
+Dashboard、Tasks、Approvals 和 Detail 业务数据当前仍然只支持首次加载和手动刷新。
+```
+
+P2.40b 才会把 30 秒低频刷新接入允许的业务页面。Diagnostics、Memory、Access Control 和 Settings 继续保持手动刷新。
+
 建议按这个顺序看页面：
 
 ```text
@@ -256,6 +273,7 @@ cd D:\AIchatbot
 ```powershell
 cd D:\AIchatbot\web\owner-console
 npm run guard:readonly
+npm test
 npm run typecheck
 npm run build
 npm audit
@@ -265,6 +283,7 @@ npm audit
 
 ```text
 guard:readonly 通过。
+test 显示 1 个测试文件、12 项测试通过。
 typecheck 通过。
 build 通过。
 npm audit 显示 found 0 vulnerabilities。
@@ -282,7 +301,7 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 关键期望：
 
 ```text
-Ran 20 tests OK
+Ran 22 tests OK
 ```
 
 目前测试中可能出现 Starlette / httpx deprecation warning。只要最终结果是 OK，不影响当前判断。
@@ -334,7 +353,7 @@ POST / PUT / PATCH / DELETE。
 修改名单按钮。
 新增/删除记忆按钮。
 主动运行诊断探测按钮。
-自动轮询、WebSocket 或 SSE。
+未经 P2.40b 页面接入和 guard 验证的业务自动轮询、WebSocket 或 SSE。
 登录页假实现。
 ```
 
@@ -436,6 +455,7 @@ docs/web-owner-console-frontend-stack-design.md
 docs/web-owner-console-ui-layout-design.md
 docs/web-owner-console-frontend-readonly-audit.md
 docs/web-owner-console-frontend-contract-guard.md
+docs/web-owner-console-readonly-auto-refresh-design.md
 web/owner-console/README.md
 ```
 
@@ -447,7 +467,10 @@ web/owner-console/README.md
 P2.39：本地部署方式设计，见 docs/web-owner-console-local-deployment-design.md。
 P2.39a：按设计实现可选本地静态模式。已完成。
 P2.39b：Owner Console 本地一键启动/停止脚本。已完成。
-P2.40：设计只读自动刷新策略。
+P2.40：只读自动刷新策略设计。已完成，见 docs/web-owner-console-readonly-auto-refresh-design.md。
+P2.40a：受控自动刷新基础设施、AppShell health 检查和生命周期测试。已完成。
+P2.40b：接入 Dashboard、Tasks、Approvals 和两个 Detail 页面。
+P2.40c：guard、runbook 和浏览器 smoke 收口。
 P2.41：设计本地访问保护 / 鉴权。
 P2.42：单独设计 Web 审批操作，不能直接在 v0 只读页面上加按钮。
 ```
