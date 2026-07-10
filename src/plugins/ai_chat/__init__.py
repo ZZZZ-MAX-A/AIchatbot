@@ -58,6 +58,15 @@ from .diagnostics import (
     recent_error_lines,
     vision_troubleshoot_findings,
 )
+from .development_context_report import (
+    DevelopmentContextReportPayload,
+    build_development_context_report_source,
+    combined_results_lists,
+    fallback_development_context_report_sections,
+    format_development_context_report_sections,
+    parse_development_context_report_json,
+    relevant_project_section_titles,
+)
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
 from .graph import (
     ActorRole,
@@ -97,6 +106,7 @@ from .graph import (
     chat_state_with_prompt_context,
     chat_state_with_runtime_result,
     chat_state_with_vision_result,
+    call_main_llm_for_development_context_report,
     create_read_only_main_agent_runtime_handler,
     create_read_only_main_agent_tool_registry,
     persisted_turn_from_chat_turn,
@@ -130,6 +140,7 @@ from .llm import (
 from .lc import (
     create_main_agent_lc_call_handler,
     create_main_agent_tool_summary_lc_handler,
+    create_main_llm_call,
 )
 from .memory import (
     append_message,
@@ -4540,7 +4551,7 @@ def main_agent_status_reply() -> str:
             f"入口：{'开启' if config.enable_main_agent else '关闭'}",
             "模式：只读优先 + 审批门控写工具",
             "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
-            "任务：支持 pending / running / done / failed 事件记录；研发上下文报告只能由主人私聊显式命令执行。",
+            "任务：支持 pending / running / done / failed 事件记录；研发上下文报告只能由主人私聊显式命令执行，详细回复与持久化摘要分离。",
             "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
             "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（清空图片缓存/错误日志、选择角色卡、添加长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单）",
             "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
@@ -4560,13 +4571,13 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊通过 owner_read_command 语义触发诊断、配置、视觉、最近错误、图片缓存、记忆状态、记忆检索、多步只读图片/记忆排查、摘要、RAG、角色卡、角色卡列表、模型配置、访问控制、RAG索引详情、MainAgent观测、语音和名单类只读查询。",
             "允许：主人私聊通过 agent_task_read 语义查询任务列表、任务详情、审批列表和审批详情。",
             "允许：主人私聊通过 agent_task_command 语义创建/取消任务、确认/拒绝审批、创建审批演练；该工具对 LLM 隐藏，仅确定性语义命中使用。",
-            "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行唯一已注册的 development_context_report；不由 LLM 选择工具。",
+            "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行唯一已注册的 development_context_report；不由 LLM 选择工具，召回后只允许固定 JSON 契约的受限总结。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
             "禁止：MainAgent/LLM 执行 shell、任意文件写入、未注册数据库写入、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
             "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
-            "真实 LLM：只负责生成 ActionRequest 和总结只读工具结果。",
+            "真实 LLM：只负责生成 ActionRequest、总结只读工具结果，以及为显式研发上下文任务生成无工具的受限结构化报告。",
         ]
     )
 
@@ -4589,7 +4600,7 @@ def main_agent_static_reply(query: str) -> str | None:
 async def run_development_context_report_for_event(
     event: MessageEvent,
     query: str,
-) -> str:
+) -> DevelopmentContextReportPayload:
     execution = await run_dev_context_graph_for_main_agent(
         query,
         requester_is_owner=True,
@@ -4597,11 +4608,39 @@ async def run_development_context_report_for_event(
     )
     if execution.result.error:
         raise RuntimeError("DevContextGraph execution failed")
-    return "\n".join(
-        [
-            f"project docs: {execution.result.project_result_count}",
-            f"memories: {execution.result.memory_result_count}",
-        ]
+
+    project_docs, memories = combined_results_lists(
+        execution.result.metadata.get("combined_results")
+    )
+    relevant_sections = relevant_project_section_titles(project_docs)
+    sections = fallback_development_context_report_sections(
+        project_result_count=execution.result.project_result_count,
+        memory_result_count=execution.result.memory_result_count,
+        relevant_sections=relevant_sections,
+    )
+    summary_mode = "deterministic_fallback"
+    report_source = build_development_context_report_source(
+        project_docs=project_docs,
+        memories=memories,
+    )
+
+    if config.main_agent_use_llm and report_source:
+        try:
+            raw_report = await call_main_llm_for_development_context_report(
+                query,
+                report_source,
+                create_main_llm_call(config),
+            )
+            sections = parse_development_context_report_json(raw_report)
+            summary_mode = "bounded_llm"
+        except Exception as exc:
+            log_ai_event_error(exc, event)
+
+    return DevelopmentContextReportPayload(
+        project_result_count=execution.result.project_result_count,
+        memory_result_count=execution.result.memory_result_count,
+        report_text=format_development_context_report_sections(sections),
+        summary_mode=summary_mode,
     )
 
 

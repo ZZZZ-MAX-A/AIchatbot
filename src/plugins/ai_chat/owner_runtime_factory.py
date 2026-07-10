@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+from .development_context_report import DevelopmentContextReportPayload
 from .owner_agent_runtime import (
     OwnerAgentContext,
     create_owner_agent_approval_request,
@@ -35,7 +36,10 @@ AddManualMemory: TypeAlias = Callable[..., int]
 SubjectLabel: TypeAlias = Callable[[str, str], str]
 ClearSessionSummaries: TypeAlias = Callable[[str], int]
 DeleteSessionSummary: TypeAlias = Callable[[str, int], bool]
-DevelopmentContextReportForEvent: TypeAlias = Callable[[Any, str], str | Awaitable[str]]
+DevelopmentContextReportForEvent: TypeAlias = Callable[
+    [Any, str],
+    str | DevelopmentContextReportPayload | Awaitable[str | DevelopmentContextReportPayload],
+]
 
 
 @dataclass(frozen=True)

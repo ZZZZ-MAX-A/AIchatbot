@@ -112,6 +112,52 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn("raw RAG chunk", reply)
         self.assertNotIn("D:\\private", reply)
 
+    def test_structured_report_is_ephemeral_while_task_keeps_only_safe_metadata(self):
+        temp_dir, patcher = self.temp_database()
+
+        def executor(_query: str):
+            return self.work_runtime.DevelopmentContextReportPayload(
+                project_result_count=4,
+                memory_result_count=0,
+                report_text="\n".join(
+                    [
+                        "当前阶段：",
+                        "P2.43 已完成。",
+                        "推荐下一步：",
+                        "- 设计 P2.44。",
+                        "PRIVATE_TOKEN=must-not-leak",
+                        "owner@example.com 13800138000",
+                        "docs/private-plan.md",
+                    ]
+                ),
+                summary_mode="bounded_llm",
+            )
+
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(executor).execute(
+                    work_type=self.work_runtime.DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+                    query="恢复当前开发状态和下一步",
+                )
+            )
+            assert execution.task is not None
+            events = self.agent_tasks.list_agent_task_events(execution.task.id)
+            reply = self.work_runtime.format_owner_agent_work_execution(execution)
+
+        self.assertEqual(execution.outcome, "completed")
+        self.assertIn("项目文档命中：4", execution.task.result)
+        self.assertIn("受限主模型结构化总结", execution.task.result)
+        self.assertIn("P2.43 已完成", reply)
+        self.assertIn("设计 P2.44", reply)
+        self.assertNotIn("P2.43 已完成", execution.task.result)
+        self.assertNotIn("设计 P2.44", execution.task.result)
+        self.assertNotIn("must-not-leak", reply)
+        self.assertNotIn("owner@example.com", reply)
+        self.assertNotIn("13800138000", reply)
+        self.assertNotIn("docs/private-plan.md", reply)
+        self.assertNotIn("must-not-leak", events[-1].output_summary)
+        self.assertNotIn("P2.43 已完成", events[-1].output_summary)
+
     def test_invalid_or_unregistered_work_never_creates_a_task(self):
         temp_dir, patcher = self.temp_database()
         with temp_dir, patcher:

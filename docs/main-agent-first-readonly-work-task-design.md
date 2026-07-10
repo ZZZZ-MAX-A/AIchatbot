@@ -101,6 +101,8 @@ cancel_agent_task 同样使用 status=pending 的条件更新，避免与 claim 
 
 P2.43b 已提供 work registry、executor 和 factory 注入：它只注册 `development_context_report`，执行器结果只会转换为受限命中计数摘要再持久化，不能把原始 RAG 片段、路径或异常文本写入任务记录。P2.43c 已将严格的 `执行研发上下文任务：<query>` 形式绑定到既有 `/agent` 入口；只有主人私聊可同步执行，`/agent-debug`、普通 `/agent` 查询和旧 `/agent 任务 <目标>` 都不匹配这个执行路径。
 
+P2.44 已在不改变上述持久化边界的前提下补充本次主人私聊的结构化详细回复：任务记录仍只保存命中计数和总结方式，详细报告不进入 `task.result` 或 task event。受限主模型总结不经过 ActionRequest、不带工具；不可用时使用确定性回退。见 `docs/main-agent-useful-development-context-report-design.md`。
+
 ## 4. 入口和总流程
 
 首个工作任务的流程应是确定性的，不由 LLM 自由编排：
@@ -387,6 +389,11 @@ P2.43c：主人私聊显式 /agent 命令。已完成。
 
 P2.43d：Owner Console 只读展示回归和文档收口。已完成。
   `running` 可通过既有 GET read model 展示和筛选，只提供监看提示，不新增 Web 写操作。
+
+P2.44：有用研发上下文报告。已完成。
+  保留唯一 development_context_report work type；详细主人私聊回复改为固定六字段结构化报告，task.result 仍只保存命中计数和总结方式。
+  MAIN_AGENT_USE_LLM=true 且有召回时只执行无工具的固定 JSON 总结；关闭、无召回或总结失败时确定性回退。
+  设计与实现边界见 docs/main-agent-useful-development-context-report-design.md。
 ```
 
 P2.43c 已提供真实 active task 生命周期，但 P2.40b 仍需要根据实际工作负载单独批准，不会自动接入业务页面轮询。届时如需低频刷新，建议只在存在 running 任务时以 60-120 秒刷新；没有活动任务时停止轮询。

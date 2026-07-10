@@ -96,6 +96,8 @@ Ran 24 tests OK
   /agent 任务 <目标> 可创建 pending 任务记录。
   /agent 新增任务：<目标> 等明确本地别名可创建 pending 任务记录。
   /agent 把“目标”加入任务 等明确本地别名可创建 pending 任务记录。
+  /agent 执行研发上下文任务：<问题> 仅允许主人私聊显式执行唯一已注册的只读 work type，并形成 running -> done / failed 生命周期。
+  研发上下文任务在有召回且 MainAgent LLM 开启时返回固定六字段受限报告；不可用时确定性回退，任务记录只保存命中计数和总结方式。
   /agent 任务状态 可查看当前会话任务。
   /agent 任务详情 <任务ID> 可查看任务和事件。
   /agent 取消任务 <任务ID> 可取消当前会话 pending 任务。
@@ -4253,6 +4255,62 @@ found 0 vulnerabilities
 
 $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -v
 Ran 20 tests OK
+```
+
+## v1.6 MainAgent useful development context report
+
+状态：已落地 P2.44。目标是让主人私聊显式研发上下文任务返回真正有用的“当前阶段、完成项、未完成项、安全边界和下一步”，同时继续禁止原始 RAG、路径、详细回复和异常文本进入任务记录。设计与边界见 `docs/main-agent-useful-development-context-report-design.md`。
+
+本次完成：
+
+```text
+新增 src/plugins/ai_chat/development_context_report.py：
+  定义固定六字段报告结构、JSON 严格解析、确定性回退、报告格式化和限长。
+  总结输入最多 4200 字符；移除来源路径、检索元数据，并预脱敏密钥、Token、URL、本地路径和 .env。
+
+src/plugins/ai_chat/graph/main_agent_llm.py：
+  新增专用 development-context report system prompt 和直接 LLM 调用。
+  不进入 ActionRequest planner，不附带工具，只接受固定 JSON；禁止编造提交/日期或输出原始 RAG、路径、标识符和异常文本。
+
+src/plugins/ai_chat/__init__.py：
+  DevContextGraph 成功后构造受限总结输入。
+  MAIN_AGENT_USE_LLM=true 且有召回时执行一次固定 JSON 总结；模型关闭、无召回、调用或 JSON 失败时使用确定性回退。
+  总结失败不把任务标成 failed，不重试，不新增消息发送。
+
+src/plugins/ai_chat/owner_agent_work_runtime.py：
+  详细 QQ 回复与持久化摘要分层。
+  task.result 和 work_finished 继续只保存命中计数、总结方式和固定安全说明。
+  详细回复再次脱敏并限制为 2400 字符，不持久化。
+```
+
+边界：
+
+```text
+唯一执行入口仍是主人私聊 /agent 执行研发上下文任务：<问题>。
+普通聊天、群聊、非主人私聊、/agent-debug、Web Owner Console 和 MainAgent LLM 工具选择不能触发该 work runtime。
+专用总结调用没有 ToolRegistry、ActionRequest、shell、文件写入、数据库写入、Web 写操作或 QQ 发送能力。
+DevContextGraph 失败仍进入 failed；只有总结失败才安全回退为 done。
+P2.40b 继续保持未启用，业务页面仍手动刷新。
+```
+
+验证：
+
+```text
+$env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\python.exe -m unittest tests.test_development_context_report tests.test_owner_agent_work_runtime tests.test_main_agent_llm tests.test_main_agent_bridge tests.test_memory_rag_qq_boundary tests.test_persistence_units tests.test_owner_console_read_runtime tests.test_owner_console_fastapi_launcher tests.test_owner_console_fastapi_app tests.test_owner_console_http_contract -q
+Ran 146 tests OK
+
+cd web/owner-console
+npm run guard:readonly
+npm run typecheck
+OK
+
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs
+扫描文件 57，扫描片段 1230，错误：无。
+
+.\scripts\rebuild-rag-index.ps1 -QueryDevContext "P2.44 研发上下文报告 当前状态 下一步 安全边界" -TopK 3 -MaxContextChars 1400
+项目文档命中 3，包含 P2.44 已完成、详细回复/持久化分层和 P2.40b 仍需单独批准；记忆命中 0。
+
+未向真实 QQ 会话发送测试消息，避免额外外部副作用。
 ```
 
 ## v1.6 MainAgent explicit development context task command
