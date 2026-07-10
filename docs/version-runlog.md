@@ -4257,6 +4257,66 @@ $env:PYTHONPATH='tests'; $env:PYTHONDONTWRITEBYTECODE='1'; .\.venv\Scripts\pytho
 Ran 20 tests OK
 ```
 
+## v1.6 Development context current-state retrieval design
+
+状态：已完成 P2.45 设计，尚未修改运行时。主人私聊 live 结果证明 P2.44 能安全生成结构化报告，但同一问题只召回 P2.34 任务详情和 P2.39b 本地启动脚本；索引包含最新文档，缺口位于纯语义排序、单来源历史片段霸榜和上下文顺序截断。
+
+本次设计：
+
+```text
+新增 docs/development-context-current-state-retrieval-design.md。
+规划固定 docs/current-development-status.md 作为权威当前状态快照。
+锚点 source id 由代码固定注册，用户、LLM、Web 和环境变量不能传任意路径。
+锚点仍从 ProjectDocRAG 数据库读取，不在 QQ adapter/work runtime 直接打开文件。
+正式 development_context_report 计划固定启用锚点；普通 /agent dev_context 第一刀保持现状。
+语义检索计划先扩大内部候选池，再限制每个 source_id 最多 1 个片段。
+报告 4200 字符输入计划拆为：锚点 1200、项目语义证据 1800、开发侧记忆 800、格式余量 400。
+锚点、semantic project results 和 memories 在结果模型中分开，不伪造锚点相似度。
+```
+
+不采用：
+
+```text
+不只增大 top_k、降低 min_score 或扩大上下文。
+不按整个 version-runlog 文件 mtime 判断章节新旧。
+不让主模型从缺失的上下文猜最新状态。
+不新增 shell、Git 工具、任意文件读取、目录扫描或自动状态生成。
+```
+
+实现拆分：
+
+```text
+P2.45a：当前状态快照和固定锚点读取基础，不接 QQ。
+P2.45b：候选扩展、单来源去重和分区预算。
+P2.45c：只接 development_context_report，并补持久化/入口/Owner Console 回归。
+P2.45d：重建索引和主人手动 live 验收。
+```
+
+边界：
+
+```text
+本次仅文档设计，没有运行时代码、数据库 schema、QQ 命令、Web endpoint 或前端改动。
+普通聊天继续不能进入 ProjectDocRAG。
+Owner Console 继续只读。
+P2.40b 继续未批准，业务页面保持手动刷新。
+```
+
+验证：
+
+```text
+git diff --check
+Markdown fence check
+OK
+
+.\scripts\rebuild-rag-index.ps1 -ProjectDocs
+扫描文件 58，扫描片段 1264，错误：无。
+
+.\scripts\rebuild-rag-index.ps1 -QueryDevContext "P2.45 当前状态锚点 来源多样性 分区预算 尚未实现" -TopK 4 -MaxContextChars 2200
+项目文档命中 4，均能明确召回 P2.45 已完成设计、尚未实现，以及 P2.45a-d 的实现拆分；记忆命中 0。
+
+原始“恢复 Owner Console 当前开发状态和下一步计划”查询仍会召回旧片段，符合本步仅设计、未修改运行时的预期。
+```
+
 ## v1.6 MainAgent useful development context report
 
 状态：已落地 P2.44。目标是让主人私聊显式研发上下文任务返回真正有用的“当前阶段、完成项、未完成项、安全边界和下一步”，同时继续禁止原始 RAG、路径、详细回复和异常文本进入任务记录。设计与边界见 `docs/main-agent-useful-development-context-report-design.md`。

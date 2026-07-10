@@ -167,3 +167,9 @@ P2.40b 不自动启用。
 任务持久化继续只含命中计数、总结方式和固定安全说明。
 普通聊天、群聊、非主人私聊和 Web 仍不能触发。
 ```
+
+## 9. P2.44 live 后发现的召回缺口
+
+主人私聊实测证明结构化报告和证据限制正常，但“恢复 Owner Console 当前开发状态和下一步计划”只召回 P2.34 与 P2.39b 历史片段。ProjectDocRAG 索引已经包含 P2.43/P2.44，缺口是纯语义排序、`version-runlog` 单来源霸榜和上下文顺序截断。
+
+P2.44 不通过扩大 prompt、top-k 或上下文上限修补该问题。后续 P2.45 已完成“权威当前状态锚点 + 来源多样性 + 分区预算”设计，尚未实现，见 `docs/development-context-current-state-retrieval-design.md`。
