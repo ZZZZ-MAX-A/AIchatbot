@@ -434,6 +434,10 @@ def load_rag_modules():
         "src.plugins.ai_chat.rag.combined",
         AI_CHAT_ROOT / "rag" / "combined.py",
     )
+    modules["development_report"] = load_module(
+        "src.plugins.ai_chat.rag.development_report",
+        AI_CHAT_ROOT / "rag" / "development_report.py",
+    )
     return modules
 
 
