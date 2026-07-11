@@ -202,6 +202,7 @@ from .system_diagnostics_report import (
     build_vision_diagnostics_report,
     build_voice_diagnostics_report,
     is_loopback_service_url,
+    voice_runtime_status_label,
 )
 from .trials import can_use_private_trial, increment_private_trial, trial_stats
 from .vision import (
@@ -1196,6 +1197,7 @@ async def tts_health_snapshot() -> dict[str, object]:
     if not config.enable_tts:
         return {
             "enabled": False,
+            "auto_start": config.tts_auto_start,
             "reachable": None,
             "ok": False,
             "loaded": None,
@@ -1205,6 +1207,7 @@ async def tts_health_snapshot() -> dict[str, object]:
     if not is_loopback_service_url(config.tts_service_url):
         return {
             "enabled": True,
+            "auto_start": config.tts_auto_start,
             "reachable": None,
             "ok": None,
             "loaded": None,
@@ -1217,6 +1220,7 @@ async def tts_health_snapshot() -> dict[str, object]:
         if response.status_code != 200:
             return {
                 "enabled": True,
+                "auto_start": config.tts_auto_start,
                 "reachable": True,
                 "ok": False,
                 "loaded": None,
@@ -1226,6 +1230,7 @@ async def tts_health_snapshot() -> dict[str, object]:
         payload = response.json()
         return {
             "enabled": True,
+            "auto_start": config.tts_auto_start,
             "reachable": True,
             "ok": bool(payload.get("ok")),
             "loaded": payload.get("loaded"),
@@ -1235,6 +1240,7 @@ async def tts_health_snapshot() -> dict[str, object]:
     except Exception as exc:
         return {
             "enabled": True,
+            "auto_start": config.tts_auto_start,
             "reachable": False,
             "ok": False,
             "loaded": None,
@@ -1254,6 +1260,16 @@ def _diagnostics_bool_label(value: object) -> str:
 def diagnostics_graph_runtime_lines(state: DiagnosticsState) -> list[str]:
     flags = state.runtime_flags
     tts = state.tts_health
+    tts_enabled = bool(tts.get("enabled", flags.get("enable_tts")))
+    tts_auto_start = bool(tts.get("auto_start", config.tts_auto_start))
+    if not tts_enabled:
+        tts_service_status = "按设计关闭"
+    elif tts.get("reachable") is False and tts_auto_start:
+        tts_service_status = "按需待机"
+    elif tts.get("ok"):
+        tts_service_status = "正常"
+    else:
+        tts_service_status = "异常"
     return [
         "",
         "DiagnosticsGraph：",
@@ -1262,7 +1278,7 @@ def diagnostics_graph_runtime_lines(state: DiagnosticsState) -> list[str]:
         f"ChatGraph：{'开启' if flags.get('enable_chat_graph_runtime') else '关闭'}",
         f"MainAgent：{'开启' if flags.get('enable_main_agent') else '关闭'}",
         f"TTS：{'开启' if flags.get('enable_tts') else '关闭'}",
-        f"TTS 服务：{'正常' if tts.get('ok') else '异常'} ({tts.get('detail', 'unknown')})",
+        f"TTS 服务：{tts_service_status} ({tts.get('detail', 'unknown')})",
         f"IndexTTS2 已加载：{_diagnostics_bool_label(tts.get('loaded'))}",
         f"TTS 语言：{tts.get('language') or '未知'}",
         f"图片缓存：{state.image_cache_stats.get('total', 0)} 条",
@@ -1280,6 +1296,7 @@ def tts_status_reply_lines(tts_health: dict[str, object] | None = None) -> list[
     health_ok = health.get("ok")
     loaded = health.get("loaded")
     detail = str(health.get("detail") or "unknown")
+    auto_start = bool(health.get("auto_start", config.tts_auto_start))
 
     if not enabled:
         lines = [
@@ -1288,33 +1305,46 @@ def tts_status_reply_lines(tts_health: dict[str, object] | None = None) -> list[
             "未继续检查服务和模型。",
         ]
     else:
-        if detail == "non_loopback_not_checked":
-            overall = "未验证"
-        elif reachable is False or health_ok is False:
-            overall = "降级"
-        elif health_ok is True and loaded is False:
-            overall = "需要关注"
-        elif health_ok is True and loaded is True:
-            overall = "正常"
-        else:
-            overall = "未验证"
+        overall = voice_runtime_status_label(
+            VoiceZoneEvidence(
+                enabled=True,
+                service_ok=health_ok if isinstance(health_ok, bool) else None,
+                model_loaded=loaded if isinstance(loaded, bool) else None,
+                auto_start_enabled=auto_start,
+                service_is_loopback=(
+                    False
+                    if detail == "non_loopback_not_checked"
+                    else is_loopback_service_url(config.tts_service_url)
+                ),
+                service_reachable=reachable if isinstance(reachable, bool) else None,
+            )
+        )
         lines = [
             f"语音状态：{overall}",
             "功能配置：开启。",
+            f"启动策略：{'按需自动冷启动' if auto_start else '不自动启动'}。",
             f"TTS 服务地址：{config.tts_service_url}",
         ]
         if detail == "non_loopback_not_checked":
             lines.append("本地服务：未验证（只允许主动检查本机 loopback 地址）。")
+        elif reachable is False and auto_start:
+            lines.append("本地服务：当前未运行，符合按需冷启动待机设计。")
+            lines.append("健康接口：本次未检查（服务尚未冷启动）。")
         elif reachable is False:
-            lines.append("本地服务：不可用。")
+            lines.append("本地服务：不可用，且未配置自动启动。")
         elif reachable is True:
             lines.append("本地服务：在线。")
             lines.append(f"健康接口：{'正常' if health_ok is True else '异常'}。")
         else:
             lines.append("本地服务：未验证。")
         if health_ok is True:
-            lines.append(f"IndexTTS2：{'已加载' if loaded is True else '未加载' if loaded is False else '未知'}。")
+            if loaded is False:
+                lines.append("IndexTTS2：未加载，等待首次生成时按需加载。")
+            else:
+                lines.append(f"IndexTTS2：{'已加载' if loaded is True else '未知'}。")
             lines.append(f"语言：{health.get('language') or '未知'}。")
+        elif reachable is False and auto_start:
+            lines.append("IndexTTS2：未继续判断（服务尚未冷启动）。")
         else:
             lines.append("IndexTTS2：未继续判断。")
     if candidate is None:
@@ -4959,6 +4989,7 @@ async def _collect_system_voice_evidence(
             enabled=config.enable_tts,
             service_ok=service_ok,
             model_loaded=model_loaded,
+            auto_start_enabled=config.tts_auto_start,
             service_is_loopback=service_is_loopback,
             service_reachable=service_reachable,
             language=language,

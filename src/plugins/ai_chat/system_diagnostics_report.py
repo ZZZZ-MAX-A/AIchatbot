@@ -25,6 +25,7 @@ VISION_LAYER_OBSERVATION = "observation"
 VISION_LAYER_NONE = "none"
 
 VOICE_LAYER_CONFIGURATION = "configuration"
+VOICE_LAYER_STARTUP = "startup"
 VOICE_LAYER_ENDPOINT = "endpoint"
 VOICE_LAYER_SERVICE = "service"
 VOICE_LAYER_MODEL = "model"
@@ -96,6 +97,7 @@ VISION_LAYER_LABELS = {
 }
 VOICE_LAYER_LABELS = {
     VOICE_LAYER_CONFIGURATION: "配置层",
+    VOICE_LAYER_STARTUP: "启动策略层",
     VOICE_LAYER_ENDPOINT: "地址策略层",
     VOICE_LAYER_SERVICE: "服务层",
     VOICE_LAYER_MODEL: "模型层",
@@ -176,6 +178,7 @@ class VoiceZoneEvidence:
     enabled: bool
     service_ok: bool | None
     model_loaded: bool | None
+    auto_start_enabled: bool = False
     service_is_loopback: bool | None = None
     service_reachable: bool | None = None
     language: str = ""
@@ -449,15 +452,37 @@ def evaluate_vision_zone(evidence: VisionZoneEvidence) -> DiagnosticZoneStatus:
 def evaluate_voice_zone(evidence: VoiceZoneEvidence) -> DiagnosticZoneStatus:
     if not evidence.enabled:
         return _zone(ZONE_VOICE, STATUS_OFF_BY_DESIGN, "语音输出已关闭。")
+    if evidence.service_is_loopback is False:
+        return _zone(ZONE_VOICE, STATUS_UNKNOWN, "语音已开启，但非本机 TTS 本次未验证。")
+    if evidence.service_reachable is False and evidence.auto_start_enabled:
+        return _zone(
+            ZONE_VOICE,
+            STATUS_NORMAL,
+            "TTS 当前未运行，按需冷启动已开启，处于按设计待机状态。",
+        )
     if evidence.service_ok is None:
         return _zone(ZONE_VOICE, STATUS_UNKNOWN, "语音已开启，但本地服务状态未确认。")
     if not evidence.service_ok:
         return _zone(ZONE_VOICE, STATUS_DEGRADED, "语音已开启，但 TTS 服务不可用。")
     if evidence.model_loaded is False:
-        return _zone(ZONE_VOICE, STATUS_ATTENTION, "TTS 服务在线，但模型尚未加载。")
+        return _zone(
+            ZONE_VOICE,
+            STATUS_NORMAL,
+            "TTS 服务在线，IndexTTS2 等待首次生成时按需加载。",
+        )
     if evidence.model_loaded is None:
         return _zone(ZONE_VOICE, STATUS_UNKNOWN, "TTS 服务在线，但模型加载状态无法确认。")
     return _zone(ZONE_VOICE, STATUS_NORMAL, "TTS 服务在线。")
+
+
+def voice_runtime_status_label(evidence: VoiceZoneEvidence) -> str:
+    zone = evaluate_voice_zone(evidence)
+    if zone.status == STATUS_NORMAL and (
+        (evidence.service_reachable is False and evidence.auto_start_enabled)
+        or (evidence.service_ok is True and evidence.model_loaded is False)
+    ):
+        return "按需待机"
+    return STATUS_LABELS[zone.status]
 
 
 def _overall_status(zones: tuple[DiagnosticZoneStatus, ...]) -> str:
@@ -775,10 +800,20 @@ def build_vision_diagnostics_report(
     )
 
 
-def _voice_detail_judgment(fault_layer: str) -> str:
+def _voice_detail_judgment(
+    fault_layer: str,
+    evidence: VoiceZoneEvidence,
+) -> str:
     judgments = {
         VOICE_LAYER_CONFIGURATION: (
             "语音功能按设计关闭，未继续检查服务、模型、生成或发送观测。"
+        ),
+        VOICE_LAYER_STARTUP: (
+            "TTS 当前未运行，但按需冷启动已开启，处于按设计待机状态；"
+            "本次没有触发冷启动，因此启动、模型加载和端到端能力仍未验证。"
+            if evidence.service_reachable is False
+            else "TTS 服务在线，IndexTTS2 等待首次生成时按需加载；"
+            "本次没有触发模型加载或真实生成。"
         ),
         VOICE_LAYER_ENDPOINT: (
             "TTS 地址不是本机 loopback，本次按安全边界未主动访问服务。"
@@ -812,6 +847,10 @@ def format_voice_diagnostics_report(
         f"- 功能配置：{'开启' if evidence.enabled else '关闭'}。",
     ]
     if evidence.enabled:
+        lines.append(
+            "- 启动策略："
+            + ("按需自动冷启动。" if evidence.auto_start_enabled else "不自动启动。")
+        )
         if evidence.service_is_loopback is False:
             lines.append("- TTS 地址：非本机地址，本次未主动访问。")
             lines.append(
@@ -824,8 +863,12 @@ def format_voice_diagnostics_report(
 
     if evidence.enabled and evidence.service_is_loopback:
         if evidence.service_reachable is False:
-            lines.append("- 本地服务：不可用。")
-            lines.append("- 健康接口：未继续检查（本地服务不可达）。")
+            if evidence.auto_start_enabled:
+                lines.append("- 本地服务：当前未运行，符合按需冷启动待机设计。")
+                lines.append("- 健康接口：本次未检查（服务尚未冷启动）。")
+            else:
+                lines.append("- 本地服务：不可用。")
+                lines.append("- 健康接口：未继续检查（本地服务不可达）。")
         elif evidence.service_reachable is True:
             lines.append("- 本地服务：在线。")
             lines.append(
@@ -839,13 +882,15 @@ def format_voice_diagnostics_report(
         if evidence.model_loaded is True:
             lines.append("- IndexTTS2：已加载。")
         elif evidence.model_loaded is False:
-            lines.append("- IndexTTS2：未加载。")
+            lines.append("- IndexTTS2：未加载，等待首次生成时按需加载。")
         else:
             lines.append("- IndexTTS2：状态无法确认。")
         lines.append(f"- 语言：{evidence.language or '未知'}。")
     elif evidence.enabled and evidence.service_is_loopback:
         reason = (
-            "本地服务不可达"
+            "服务尚未冷启动"
+            if evidence.service_reachable is False and evidence.auto_start_enabled
+            else "本地服务不可达"
             if evidence.service_reachable is False
             else "健康接口未通过"
             if evidence.service_reachable is True
@@ -854,7 +899,18 @@ def format_voice_diagnostics_report(
         lines.append(f"- IndexTTS2：未继续判断（{reason}）。")
         lines.append(f"- 语言：未继续判断（{reason}）。")
 
-    if evidence.enabled and evidence.service_ok and evidence.model_loaded:
+    show_passive_observations = bool(
+        evidence.enabled
+        and (
+            evidence.service_ok
+            or (
+                evidence.service_is_loopback
+                and evidence.service_reachable is False
+                and evidence.auto_start_enabled
+            )
+        )
+    )
+    if show_passive_observations:
         lines.append(
             "- 最近语音候选："
             + ("存在。" if evidence.recent_candidate_present else "无。")
@@ -875,9 +931,6 @@ def format_voice_diagnostics_report(
                 else "暂无结构化成功证据。"
             )
         )
-    elif evidence.enabled and evidence.service_ok:
-        lines.append("- 最近生成观测：未继续判断（模型加载状态未通过）。")
-        lines.append("- 最近发送观测：未继续判断（模型加载状态未通过）。")
     elif evidence.enabled and evidence.service_is_loopback:
         reason = (
             "本地服务不可达"
@@ -893,7 +946,7 @@ def format_voice_diagnostics_report(
         [
             "",
             "初步判断：",
-            _voice_detail_judgment(payload.fault_layer),
+            _voice_detail_judgment(payload.fault_layer, evidence),
             "",
             "建议下一范围：无；本次不自动扩大诊断范围。",
             f"本次使用被动证据和 {payload.local_probe_count} 项廉价本地检查。",
@@ -921,9 +974,13 @@ def build_voice_diagnostics_report(
         fault_layer = VOICE_LAYER_CONFIGURATION
     elif evidence.service_is_loopback is False:
         fault_layer = VOICE_LAYER_ENDPOINT
+    elif evidence.service_reachable is False and evidence.auto_start_enabled:
+        fault_layer = VOICE_LAYER_STARTUP
     elif evidence.service_ok is None or not evidence.service_ok:
         fault_layer = VOICE_LAYER_SERVICE
-    elif evidence.model_loaded is None or not evidence.model_loaded:
+    elif evidence.model_loaded is False:
+        fault_layer = VOICE_LAYER_STARTUP
+    elif evidence.model_loaded is None:
         fault_layer = VOICE_LAYER_MODEL
     elif not evidence.recent_send_observation_present:
         fault_layer = VOICE_LAYER_OBSERVATION

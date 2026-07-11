@@ -140,6 +140,8 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertNotIn("check_ollama", memory_collector_source)
         self.assertNotIn("tts_health_snapshot", memory_collector_source)
         self.assertIn("tts_health_snapshot", voice_collector_source)
+        self.assertIn("auto_start_enabled=config.tts_auto_start", voice_collector_source)
+        self.assertIn("voice_runtime_status_label", source)
         self.assertNotIn("check_ollama", voice_collector_source)
         self.assertNotIn("describe_images", voice_collector_source)
         self.assertNotIn("run_voice_graph_intent", voice_collector_source)
