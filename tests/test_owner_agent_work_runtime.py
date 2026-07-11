@@ -112,6 +112,65 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             report_text=report_text,
         )
 
+    def voice_payload(self, *, report_text: str | None = None):
+        payload = self.system_report.build_voice_diagnostics_report(
+            self.system_report.VoiceZoneEvidence(
+                enabled=True,
+                service_ok=True,
+                model_loaded=True,
+                service_is_loopback=True,
+                service_reachable=True,
+                language="zh",
+                recent_candidate_present=True,
+                recent_generation_observation_present=False,
+                recent_send_observation_present=False,
+            ),
+            local_probe_count=1,
+        )
+        if report_text is None:
+            return payload
+        return self.system_report.VoiceDiagnosticsReportPayload(
+            scope=payload.scope,
+            zone_status=payload.zone_status,
+            fault_layer=payload.fault_layer,
+            recommended_scope=payload.recommended_scope,
+            local_probe_count=payload.local_probe_count,
+            external_request_count=payload.external_request_count,
+            deep_probe_count=payload.deep_probe_count,
+            repair_action_count=payload.repair_action_count,
+            report_text=report_text,
+        )
+
+    def memory_rag_payload(self, *, report_text: str | None = None):
+        payload = self.system_report.build_memory_rag_diagnostics_report(
+            self.system_report.MemoryRagZoneEvidence(
+                memory_rag_enabled=True,
+                memory_rag_inject_in_chat=True,
+                project_doc_rag_enabled=True,
+                storage_ok=True,
+                document_count=10,
+                embedding_count=8,
+                pending_count=2,
+                recent_observation_present=True,
+                recent_attempted=True,
+                recent_result_count=1,
+            ),
+            local_probe_count=1,
+        )
+        if report_text is None:
+            return payload
+        return self.system_report.MemoryRagDiagnosticsReportPayload(
+            scope=payload.scope,
+            zone_status=payload.zone_status,
+            fault_layer=payload.fault_layer,
+            recommended_scope=payload.recommended_scope,
+            local_probe_count=payload.local_probe_count,
+            external_request_count=payload.external_request_count,
+            deep_probe_count=payload.deep_probe_count,
+            repair_action_count=payload.repair_action_count,
+            report_text=report_text,
+        )
+
     def make_runtime(self, executor, system_executor=None):
         if system_executor is None:
             system_executor = lambda _scope: self.system_payload()
@@ -172,6 +231,7 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(parse("执行系统诊断任务：概览"), "overview")
         self.assertEqual(parse("执行系统诊断任务: overview"), "overview")
         self.assertEqual(parse("执行系统诊断任务：视觉"), "vision")
+        self.assertEqual(parse("执行系统诊断任务：语音"), "voice")
         self.assertEqual(parse("执行系统诊断任务：记忆与RAG"), "memory_rag")
         self.assertEqual(
             parse("执行系统诊断任务：任意外部网址"),
@@ -323,6 +383,7 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn("D:\\private", execution.task.result)
         self.assertIn(f"系统诊断任务 #{execution.task.id} 已完成", reply)
         self.assertIn("系统诊断：正常", reply)
+        self.assertIn("视觉、语音、记忆与RAG区详情", reply)
         self.assertNotIn("must-not-leak", reply)
         self.assertNotIn("D:\\private", reply)
         self.assertNotIn("must-not-leak", events[-1].output_summary)
@@ -432,6 +493,149 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             }
             values[field_name] = 1
             unsafe_payload = self.system_report.VisionDiagnosticsReportPayload(**values)
+
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(ValueError, "read-only scope"):
+                    self.work_runtime._sanitize_system_diagnostics_report(
+                        unsafe_payload
+                    )
+
+    def test_voice_detail_creates_task_but_persists_only_safe_summary(self):
+        temp_dir, patcher = self.temp_database()
+        calls: list[str] = []
+
+        def executor(scope: str):
+            calls.append(scope)
+            return self.voice_payload(
+                report_text="\n".join(
+                    [
+                        "语音区诊断：正常",
+                        "定位层级：观测层",
+                        "PRIVATE_TOKEN=must-not-leak",
+                        "D:\\private\\voice.wav",
+                    ]
+                )
+            )
+
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(
+                    lambda _query: "project docs: 0\nmemories: 0",
+                    executor,
+                ).execute(
+                    work_type=self.work_runtime.SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
+                    query="voice",
+                )
+            )
+            assert execution.task is not None
+            events = self.agent_tasks.list_agent_task_events(execution.task.id)
+            reply = self.work_runtime.format_owner_agent_work_execution(execution)
+
+        self.assertEqual(calls, ["voice"])
+        self.assertEqual(execution.outcome, "completed")
+        self.assertIn("语音区详情诊断已完成", execution.task.result)
+        self.assertIn("定位层级：观测层", execution.task.result)
+        self.assertIn("深度探针：0", execution.task.result)
+        self.assertIn("外部请求：0", execution.task.result)
+        self.assertIn("修复操作：0", execution.task.result)
+        self.assertNotIn("must-not-leak", execution.task.result)
+        self.assertNotIn("voice.wav", execution.task.result)
+        self.assertIn("语音区诊断：正常", reply)
+        self.assertNotIn("must-not-leak", reply)
+        self.assertNotIn("voice.wav", reply)
+        self.assertNotIn("must-not-leak", events[-1].output_summary)
+
+    def test_voice_detail_rejects_external_deep_or_repair_actions(self):
+        payload = self.voice_payload()
+        for field_name in (
+            "external_request_count",
+            "deep_probe_count",
+            "repair_action_count",
+        ):
+            values = {
+                "scope": payload.scope,
+                "zone_status": payload.zone_status,
+                "fault_layer": payload.fault_layer,
+                "recommended_scope": payload.recommended_scope,
+                "local_probe_count": payload.local_probe_count,
+                "external_request_count": payload.external_request_count,
+                "deep_probe_count": payload.deep_probe_count,
+                "repair_action_count": payload.repair_action_count,
+                "report_text": payload.report_text,
+            }
+            values[field_name] = 1
+            unsafe_payload = self.system_report.VoiceDiagnosticsReportPayload(**values)
+
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(ValueError, "read-only scope"):
+                    self.work_runtime._sanitize_system_diagnostics_report(
+                        unsafe_payload
+                    )
+
+    def test_memory_rag_detail_creates_task_but_persists_only_safe_summary(self):
+        temp_dir, patcher = self.temp_database()
+        calls: list[str] = []
+
+        def executor(scope: str):
+            calls.append(scope)
+            return self.memory_rag_payload(
+                report_text="\n".join(
+                    [
+                        "记忆与RAG区诊断：需要关注",
+                        "定位层级：索引层",
+                        "PRIVATE_TOKEN=must-not-leak",
+                        "D:\\private\\rag.db",
+                    ]
+                )
+            )
+
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(
+                    lambda _query: "project docs: 0\nmemories: 0",
+                    executor,
+                ).execute(
+                    work_type=self.work_runtime.SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
+                    query="memory_rag",
+                )
+            )
+            assert execution.task is not None
+            reply = self.work_runtime.format_owner_agent_work_execution(execution)
+
+        self.assertEqual(calls, ["memory_rag"])
+        self.assertEqual(execution.outcome, "completed")
+        self.assertIn("记忆与RAG区详情诊断已完成", execution.task.result)
+        self.assertIn("定位层级：索引层", execution.task.result)
+        self.assertIn("深度探针：0", execution.task.result)
+        self.assertIn("外部请求：0", execution.task.result)
+        self.assertIn("修复操作：0", execution.task.result)
+        self.assertNotIn("must-not-leak", execution.task.result)
+        self.assertNotIn("rag.db", execution.task.result)
+        self.assertIn("记忆与RAG区诊断：需要关注", reply)
+        self.assertNotIn("must-not-leak", reply)
+
+    def test_memory_rag_detail_rejects_external_deep_or_repair_actions(self):
+        payload = self.memory_rag_payload()
+        for field_name in (
+            "external_request_count",
+            "deep_probe_count",
+            "repair_action_count",
+        ):
+            values = {
+                "scope": payload.scope,
+                "zone_status": payload.zone_status,
+                "fault_layer": payload.fault_layer,
+                "recommended_scope": payload.recommended_scope,
+                "local_probe_count": payload.local_probe_count,
+                "external_request_count": payload.external_request_count,
+                "deep_probe_count": payload.deep_probe_count,
+                "repair_action_count": payload.repair_action_count,
+                "report_text": payload.report_text,
+            }
+            values[field_name] = 1
+            unsafe_payload = self.system_report.MemoryRagDiagnosticsReportPayload(
+                **values
+            )
 
             with self.subTest(field_name=field_name):
                 with self.assertRaisesRegex(ValueError, "read-only scope"):

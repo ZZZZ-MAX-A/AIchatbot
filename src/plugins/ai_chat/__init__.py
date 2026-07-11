@@ -186,7 +186,9 @@ from .summaries import (
 )
 from .system_diagnostics_report import (
     SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+    SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
     SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
     ChatZoneEvidence,
     CoreZoneEvidence,
     MainAgentZoneEvidence,
@@ -196,7 +198,9 @@ from .system_diagnostics_report import (
     VisionZoneEvidence,
     VoiceZoneEvidence,
     build_system_diagnostics_overview,
+    build_memory_rag_diagnostics_report,
     build_vision_diagnostics_report,
+    build_voice_diagnostics_report,
     is_loopback_service_url,
 )
 from .trials import can_use_private_trial, increment_private_trial, trial_stats
@@ -1192,10 +1196,20 @@ async def tts_health_snapshot() -> dict[str, object]:
     if not config.enable_tts:
         return {
             "enabled": False,
+            "reachable": None,
             "ok": False,
             "loaded": None,
             "language": "",
             "detail": "disabled",
+        }
+    if not is_loopback_service_url(config.tts_service_url):
+        return {
+            "enabled": True,
+            "reachable": None,
+            "ok": None,
+            "loaded": None,
+            "language": "",
+            "detail": "non_loopback_not_checked",
         }
     try:
         async with httpx.AsyncClient(timeout=2) as client:
@@ -1203,6 +1217,7 @@ async def tts_health_snapshot() -> dict[str, object]:
         if response.status_code != 200:
             return {
                 "enabled": True,
+                "reachable": True,
                 "ok": False,
                 "loaded": None,
                 "language": "",
@@ -1211,6 +1226,7 @@ async def tts_health_snapshot() -> dict[str, object]:
         payload = response.json()
         return {
             "enabled": True,
+            "reachable": True,
             "ok": bool(payload.get("ok")),
             "loaded": payload.get("loaded"),
             "language": str(payload.get("language") or ""),
@@ -1219,6 +1235,7 @@ async def tts_health_snapshot() -> dict[str, object]:
     except Exception as exc:
         return {
             "enabled": True,
+            "reachable": False,
             "ok": False,
             "loaded": None,
             "language": "",
@@ -1255,14 +1272,66 @@ def diagnostics_graph_runtime_lines(state: DiagnosticsState) -> list[str]:
     ]
 
 
-def tts_status_reply_lines() -> list[str]:
+def tts_status_reply_lines(tts_health: dict[str, object] | None = None) -> list[str]:
+    health = tts_health or {}
     candidate = get_last_tts_candidate()
-    lines = tts_status_lines()
-    if candidate is None:
-        lines.append("上一条可朗读回复：无")
+    enabled = bool(health.get("enabled", config.enable_tts))
+    reachable = health.get("reachable")
+    health_ok = health.get("ok")
+    loaded = health.get("loaded")
+    detail = str(health.get("detail") or "unknown")
+
+    if not enabled:
+        lines = [
+            "语音状态：按设计关闭",
+            "功能配置：关闭。",
+            "未继续检查服务和模型。",
+        ]
     else:
-        lines.append(f"上一条可朗读回复：{candidate.created_at.isoformat(timespec='seconds')}")
-        lines.append(f"可朗读长度：{len(candidate.speakable_text)} 字")
+        if detail == "non_loopback_not_checked":
+            overall = "未验证"
+        elif reachable is False or health_ok is False:
+            overall = "降级"
+        elif health_ok is True and loaded is False:
+            overall = "需要关注"
+        elif health_ok is True and loaded is True:
+            overall = "正常"
+        else:
+            overall = "未验证"
+        lines = [
+            f"语音状态：{overall}",
+            "功能配置：开启。",
+            f"TTS 服务地址：{config.tts_service_url}",
+        ]
+        if detail == "non_loopback_not_checked":
+            lines.append("本地服务：未验证（只允许主动检查本机 loopback 地址）。")
+        elif reachable is False:
+            lines.append("本地服务：不可用。")
+        elif reachable is True:
+            lines.append("本地服务：在线。")
+            lines.append(f"健康接口：{'正常' if health_ok is True else '异常'}。")
+        else:
+            lines.append("本地服务：未验证。")
+        if health_ok is True:
+            lines.append(f"IndexTTS2：{'已加载' if loaded is True else '未加载' if loaded is False else '未知'}。")
+            lines.append(f"语言：{health.get('language') or '未知'}。")
+        else:
+            lines.append("IndexTTS2：未继续判断。")
+    if candidate is None:
+        lines.append("最近语音候选：无。")
+    else:
+        lines.append(
+            "最近语音候选：存在，"
+            f"{candidate.created_at.isoformat(timespec='seconds')}，"
+            f"{len(candidate.speakable_text)} 字。"
+        )
+    lines.extend(
+        [
+            "真实生成：本次未执行。",
+            "端到端发送：本次未验证。",
+            "本次未生成测试语音，未发送 QQ，未重启服务，未修改配置。",
+        ]
+    )
     return lines
 
 
@@ -1597,7 +1666,7 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         elif current.view == DiagnosticsView.MEMORY:
             current.reply_text = "\n".join(memory_status_lines(event))
         elif current.view == DiagnosticsView.TTS:
-            current.reply_text = "\n".join(tts_status_reply_lines())
+            current.reply_text = "\n".join(tts_status_reply_lines(current.tts_health))
         else:
             base_reply = await format_diagnostics(config, current.image_cache_stats)
             current.reply_text = "\n".join(
@@ -4492,6 +4561,8 @@ def main_agent_help_reply() -> str:
             "/agent 执行研发上下文任务：<问题>",
             "/agent 执行系统诊断任务",
             "/agent 执行系统诊断任务：视觉",
+            "/agent 执行系统诊断任务：语音",
+            "/agent 执行系统诊断任务：记忆与RAG",
             "/agent 新增任务：<目标>",
             "/agent 把“目标”加入任务",
             "/agent 任务状态",
@@ -4528,7 +4599,7 @@ def main_agent_tool_status_reply() -> str:
         [
             "MainAgent 当前开放能力：",
             "",
-            "正式只读工作：development_context_report、system_diagnostics_report/overview、vision（主人私聊显式命令，不属于 LLM 工具选择）。",
+            "正式只读工作：development_context_report、system_diagnostics_report/overview、vision、voice、memory_rag（主人私聊显式命令，不属于 LLM 工具选择）。",
             "",
             "1. dev_context",
             "风险：read_local",
@@ -4645,6 +4716,8 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊显式 /agent 执行研发上下文任务：<问题>，同步执行已注册的 development_context_report；不由 LLM 选择工具，召回后只允许固定 JSON 契约的受限总结。",
             "允许：主人私聊显式 /agent 执行系统诊断任务，同步执行已注册的 system_diagnostics_report/overview；只返回确定性大区概览，不由 LLM 选择或总结。",
             "允许：主人私聊显式 /agent 执行系统诊断任务：视觉，同步执行已注册的 system_diagnostics_report/vision；按首故障层返回确定性视觉区详情，不做真实视觉推理。",
+            "允许：主人私聊显式 /agent 执行系统诊断任务：语音，同步执行已注册的 system_diagnostics_report/voice；按首故障层返回确定性语音区详情，不生成或发送测试语音。",
+            "允许：主人私聊显式 /agent 执行系统诊断任务：记忆与RAG，同步执行已注册的 system_diagnostics_report/memory_rag；按首故障层返回本地索引和安全观测，不执行 embedding、召回或重建。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
@@ -4751,9 +4824,13 @@ def _system_recent_observation_evidence() -> dict[str, object]:
             "chat_error": False,
             "memory_present": False,
             "memory_error": False,
+            "memory_attempted": False,
+            "memory_result_count": 0,
             "vision_used": False,
             "vision_errors": 0,
             "vision_low_quality": 0,
+            "voice_generation_succeeded": False,
+            "voice_send_succeeded": False,
         }
 
     error_artifact = observation.get("error_artifact")
@@ -4780,11 +4857,54 @@ def _system_recent_observation_evidence() -> dict[str, object]:
         "chat_error": bool(observation.get("error")) or bool(error_artifact),
         "memory_present": "memory_rag_enabled" in chat_commit,
         "memory_error": bool(str(chat_commit.get("memory_rag_error") or "").strip()),
+        "memory_attempted": bool(chat_commit.get("memory_rag_attempted")),
+        "memory_result_count": _non_negative_observation_int(
+            chat_commit.get("memory_rag_result_count")
+        ),
         "vision_used": bool(context.get("vision_used"))
         or bool(vision_descriptions or vision_errors or vision_low_quality),
         "vision_errors": vision_errors,
         "vision_low_quality": vision_low_quality,
+        "voice_generation_succeeded": bool(chat_commit.get("chat_voice_sent")),
+        "voice_send_succeeded": bool(chat_commit.get("chat_voice_sent")),
     }
+
+
+def _collect_system_memory_rag_evidence(
+    observation: dict[str, object],
+) -> tuple[MemoryRagZoneEvidence, int]:
+    storage_ok: bool | None = None
+    document_count = 0
+    embedding_count = 0
+    pending_count = 0
+    local_probe_count = 0
+    if config.enable_memory_rag:
+        local_probe_count = 1
+        try:
+            storage = memory_rag_storage_stats(ensure_schema=False)
+            storage_ok = True
+            document_count = int(storage.get("document_count", 0) or 0)
+            embedding_count = int(storage.get("embedding_count", 0) or 0)
+            pending_count = int(storage.get("pending_count", 0) or 0)
+        except Exception:
+            storage_ok = False
+
+    return (
+        MemoryRagZoneEvidence(
+            memory_rag_enabled=config.enable_memory_rag,
+            memory_rag_inject_in_chat=config.memory_rag_inject_in_chat,
+            project_doc_rag_enabled=config.enable_project_doc_rag,
+            storage_ok=storage_ok,
+            document_count=document_count,
+            embedding_count=embedding_count,
+            pending_count=pending_count,
+            recent_observation_present=bool(observation["memory_present"]),
+            recent_error=bool(observation["memory_error"]),
+            recent_attempted=bool(observation["memory_attempted"]),
+            recent_result_count=int(observation["memory_result_count"]),
+        ),
+        local_probe_count,
+    )
 
 
 async def _collect_system_vision_evidence(
@@ -4814,17 +4934,77 @@ async def _collect_system_vision_evidence(
     )
 
 
+async def _collect_system_voice_evidence(
+    observation: dict[str, object],
+) -> tuple[VoiceZoneEvidence, int]:
+    service_is_loopback = is_loopback_service_url(config.tts_service_url)
+    service_reachable: bool | None = None
+    service_ok: bool | None = None
+    model_loaded: bool | None = None
+    language = ""
+    local_probe_count = 0
+    if config.enable_tts and service_is_loopback:
+        local_probe_count = 1
+        voice_status = await tts_health_snapshot()
+        reachable = voice_status.get("reachable")
+        service_reachable = reachable if isinstance(reachable, bool) else None
+        ok = voice_status.get("ok")
+        service_ok = ok if isinstance(ok, bool) else None
+        loaded = voice_status.get("loaded")
+        model_loaded = loaded if isinstance(loaded, bool) else None
+        language = str(voice_status.get("language") or "")
+
+    return (
+        VoiceZoneEvidence(
+            enabled=config.enable_tts,
+            service_ok=service_ok,
+            model_loaded=model_loaded,
+            service_is_loopback=service_is_loopback,
+            service_reachable=service_reachable,
+            language=language,
+            recent_candidate_present=get_last_tts_candidate() is not None,
+            recent_generation_observation_present=bool(
+                observation.get("voice_generation_succeeded")
+            ),
+            recent_send_observation_present=bool(
+                observation.get("voice_send_succeeded")
+            ),
+        ),
+        local_probe_count,
+    )
+
+
 async def run_system_diagnostics_report_for_event(
     event: MessageEvent,
     scope: str,
 ) -> SystemDiagnosticsPayload:
     if scope not in {
         SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+        SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
         SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+        SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
     }:
         raise ValueError("system diagnostics scope is not registered")
 
     observation = _system_recent_observation_evidence()
+    if scope == SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE:
+        memory_evidence, memory_probe_count = _collect_system_memory_rag_evidence(
+            observation
+        )
+        return build_memory_rag_diagnostics_report(
+            memory_evidence,
+            local_probe_count=memory_probe_count,
+        )
+
+    if scope == SYSTEM_DIAGNOSTICS_VOICE_SCOPE:
+        voice_evidence, voice_probe_count = await _collect_system_voice_evidence(
+            observation
+        )
+        return build_voice_diagnostics_report(
+            voice_evidence,
+            local_probe_count=voice_probe_count,
+        )
+
     vision_evidence, vision_probe_count = await _collect_system_vision_evidence(
         observation
     )
@@ -4834,32 +5014,14 @@ async def run_system_diagnostics_report_for_event(
             local_probe_count=vision_probe_count,
         )
 
-    local_probe_count = 1 + vision_probe_count
+    voice_evidence, voice_probe_count = await _collect_system_voice_evidence(observation)
+    memory_evidence, memory_probe_count = _collect_system_memory_rag_evidence(
+        observation
+    )
+    local_probe_count = (
+        1 + vision_probe_count + voice_probe_count + memory_probe_count
+    )
     database_ok = _system_database_read_probe()
-
-    memory_storage_ok: bool | None = None
-    memory_document_count = 0
-    memory_embedding_count = 0
-    memory_pending_count = 0
-    if config.enable_memory_rag:
-        local_probe_count += 1
-        try:
-            storage = memory_rag_storage_stats(ensure_schema=False)
-            memory_storage_ok = True
-            memory_document_count = int(storage.get("document_count", 0) or 0)
-            memory_embedding_count = int(storage.get("embedding_count", 0) or 0)
-            memory_pending_count = int(storage.get("pending_count", 0) or 0)
-        except Exception:
-            memory_storage_ok = False
-
-    voice_service_ok: bool | None = None
-    voice_model_loaded: bool | None = None
-    if config.enable_tts and is_loopback_service_url(config.tts_service_url):
-        local_probe_count += 1
-        voice_status = await tts_health_snapshot()
-        voice_service_ok = bool(voice_status.get("ok"))
-        loaded = voice_status.get("loaded")
-        voice_model_loaded = loaded if isinstance(loaded, bool) else None
 
     registered_work_types = set(
         owner_runtime_factory().work_runtime(event).registered_work_types
@@ -4911,23 +5073,9 @@ async def run_system_diagnostics_report_for_event(
             ),
             enabled_high_risk_capabilities=enabled_high_risk_capabilities,
         ),
-        memory_rag=MemoryRagZoneEvidence(
-            memory_rag_enabled=config.enable_memory_rag,
-            memory_rag_inject_in_chat=config.memory_rag_inject_in_chat,
-            project_doc_rag_enabled=config.enable_project_doc_rag,
-            storage_ok=memory_storage_ok,
-            document_count=memory_document_count,
-            embedding_count=memory_embedding_count,
-            pending_count=memory_pending_count,
-            recent_observation_present=bool(observation["memory_present"]),
-            recent_error=bool(observation["memory_error"]),
-        ),
+        memory_rag=memory_evidence,
         vision=vision_evidence,
-        voice=VoiceZoneEvidence(
-            enabled=config.enable_tts,
-            service_ok=voice_service_ok,
-            model_loaded=voice_model_loaded,
-        ),
+        voice=voice_evidence,
         local_probe_count=local_probe_count,
     )
     return build_system_diagnostics_overview(evidence)
@@ -5023,14 +5171,18 @@ async def run_main_agent_explicit_work_command(
     if diagnostics_scope == SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE:
         return (
             "系统诊断范围不受支持；当前只允许：/agent 执行系统诊断任务，或 "
-            "/agent 执行系统诊断任务：视觉"
+            "/agent 执行系统诊断任务：视觉，/agent 执行系统诊断任务：语音，"
+            "或 /agent 执行系统诊断任务：记忆与RAG"
         )
     if diagnostics_scope not in {
         SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
+        SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
         SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+        SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
     }:
         return (
-            "当前只开放系统诊断概览和视觉区详情，所请求区域尚未注册；"
+            "当前只开放系统诊断概览、视觉区详情、语音区详情和记忆与RAG区详情，"
+            "所请求区域尚未注册；"
             "未创建任务，也未执行深度探针。"
         )
 
@@ -5049,6 +5201,14 @@ def normalize_main_agent_query(query: str) -> str:
     if stripped in {"下一步", "next"}:
         return "继续 AIchatbot MainAgentGraph 开发，恢复当前状态、边界和下一步建议"
     return stripped
+
+
+def is_explicit_main_agent_dev_context_query(query: str) -> bool:
+    stripped = query.strip().lower()
+    return any(
+        stripped.startswith(prefix)
+        for prefix in ("查 ", "查询 ", "search ")
+    )
 
 
 def log_main_agent_runtime_observations(
@@ -5113,6 +5273,7 @@ async def run_main_agent_qq_command(
         if task_reply is not None:
             return task_reply
 
+    explicit_dev_context = raw_output or is_explicit_main_agent_dev_context_query(query)
     normalized_query = normalize_main_agent_query(query)
     raw_text = f"/agent {normalized_query}".strip()
     runtime_state = runtime_state_from_main_agent_command(
@@ -5126,6 +5287,9 @@ async def run_main_agent_qq_command(
     )
     if runtime_state is None:
         return "MainAgent rejected: invalid command."
+    command_artifact = runtime_state.artifacts.get("main_agent_command", {})
+    if isinstance(command_artifact, dict):
+        command_artifact["explicit_dev_context"] = explicit_dev_context
 
     async def retrieve_dev_context(query_text: str, requester_is_owner: bool) -> str:
         execution = await run_dev_context_graph_for_main_agent(

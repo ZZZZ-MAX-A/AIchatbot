@@ -67,6 +67,10 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("approval_resume_enabled=true", source)
         self.assertIn("run_main_agent_task_command", source)
         self.assertIn("run_main_agent_explicit_work_command", source)
+        self.assertIn("/agent 执行系统诊断任务：语音", source)
+        self.assertIn("/agent 执行系统诊断任务：记忆与RAG", source)
+        self.assertIn("is_explicit_main_agent_dev_context_query", source)
+        self.assertIn('command_artifact["explicit_dev_context"]', source)
         self.assertIn("parse_development_context_report_command", source)
         self.assertIn("parse_system_diagnostics_report_command", source)
         self.assertIn("execute_system_diagnostics_report", factory_source)
@@ -90,14 +94,24 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("/agent 审批演练 <目标>", source)
         self.assertIn("create_read_only_main_agent_runtime_handler", source)
         self.assertIn("RuntimeIntent.MAIN_AGENT", source)
-        system_start = source.index("async def _collect_system_vision_evidence(")
+        system_start = source.index("def _collect_system_memory_rag_evidence(")
+        vision_start = source.index(
+            "async def _collect_system_vision_evidence(",
+            system_start,
+        )
+        voice_start = source.index(
+            "async def _collect_system_voice_evidence(",
+            vision_start,
+        )
         runner_start = source.index(
             "async def run_system_diagnostics_report_for_event(",
-            system_start,
+            voice_start,
         )
         system_end = source.index("\ndef owner_runtime_factory()", system_start)
         system_source = source[system_start:system_end]
-        vision_collector_source = source[system_start:runner_start]
+        memory_collector_source = source[system_start:vision_start]
+        vision_collector_source = source[vision_start:voice_start]
+        voice_collector_source = source[voice_start:runner_start]
         runner_source = source[runner_start:system_end]
         self.assertIn("config.enable_agent_shell", system_source)
         self.assertIn("config.enable_agent_local_write", system_source)
@@ -105,7 +119,11 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("config.enable_agent_web", system_source)
         self.assertIn("asyncio.to_thread(check_ollama, config)", system_source)
         self.assertIn("build_vision_diagnostics_report", system_source)
+        self.assertIn("build_voice_diagnostics_report", system_source)
+        self.assertIn("build_memory_rag_diagnostics_report", system_source)
         self.assertIn("SYSTEM_DIAGNOSTICS_VISION_SCOPE", system_source)
+        self.assertIn("SYSTEM_DIAGNOSTICS_VOICE_SCOPE", system_source)
+        self.assertIn("SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE", system_source)
         self.assertIn("memory_rag_storage_stats(ensure_schema=False)", system_source)
         self.assertNotIn("check_embedding_provider", system_source)
         self.assertNotIn("run_dev_context_graph_for_main_agent", system_source)
@@ -114,6 +132,26 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertNotIn("_system_database_read_probe", vision_collector_source)
         self.assertNotIn("memory_rag_storage_stats", vision_collector_source)
         self.assertNotIn("tts_health_snapshot", vision_collector_source)
+        self.assertIn("memory_rag_storage_stats(ensure_schema=False)", memory_collector_source)
+        self.assertNotIn("check_embedding_provider", memory_collector_source)
+        self.assertNotIn("retrieve_memory", memory_collector_source)
+        self.assertNotIn("rebuild_memory_rag_index", memory_collector_source)
+        self.assertNotIn("_system_database_read_probe", memory_collector_source)
+        self.assertNotIn("check_ollama", memory_collector_source)
+        self.assertNotIn("tts_health_snapshot", memory_collector_source)
+        self.assertIn("tts_health_snapshot", voice_collector_source)
+        self.assertNotIn("check_ollama", voice_collector_source)
+        self.assertNotIn("describe_images", voice_collector_source)
+        self.assertNotIn("run_voice_graph_intent", voice_collector_source)
+        self.assertNotIn("memory_rag_storage_stats", voice_collector_source)
+        self.assertLess(
+            runner_source.index("if scope == SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE:"),
+            runner_source.index("if scope == SYSTEM_DIAGNOSTICS_VOICE_SCOPE:"),
+        )
+        self.assertLess(
+            runner_source.index("if scope == SYSTEM_DIAGNOSTICS_VOICE_SCOPE:"),
+            runner_source.index("_collect_system_vision_evidence"),
+        )
         self.assertLess(
             runner_source.index("if scope == SYSTEM_DIAGNOSTICS_VISION_SCOPE:"),
             runner_source.index("database_ok = _system_database_read_probe()"),
