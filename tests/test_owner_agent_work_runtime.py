@@ -545,6 +545,44 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn("voice.wav", reply)
         self.assertNotIn("must-not-leak", events[-1].output_summary)
 
+    def test_voice_on_demand_startup_layer_completes_formal_work_task(self):
+        temp_dir, patcher = self.temp_database()
+        payload = self.system_report.build_voice_diagnostics_report(
+            self.system_report.VoiceZoneEvidence(
+                enabled=True,
+                service_ok=False,
+                model_loaded=None,
+                auto_start_enabled=True,
+                service_is_loopback=True,
+                service_reachable=False,
+                recent_candidate_present=False,
+                recent_generation_observation_present=False,
+                recent_send_observation_present=False,
+            ),
+            local_probe_count=1,
+        )
+
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(
+                    lambda _query: "project docs: 0\nmemories: 0",
+                    lambda _scope: payload,
+                ).execute(
+                    work_type=self.work_runtime.SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
+                    query="voice",
+                )
+            )
+            assert execution.task is not None
+            reply = self.work_runtime.format_owner_agent_work_execution(execution)
+
+        self.assertEqual(execution.outcome, "completed")
+        self.assertEqual(execution.task.status, self.agent_tasks.AGENT_TASK_DONE)
+        self.assertIn("语音区详情诊断已完成", execution.task.result)
+        self.assertIn("区域状态：正常", execution.task.result)
+        self.assertIn("定位层级：启动策略层", execution.task.result)
+        self.assertIn("语音区诊断：正常", reply)
+        self.assertIn("按需冷启动待机设计", reply)
+
     def test_voice_detail_rejects_external_deep_or_repair_actions(self):
         payload = self.voice_payload()
         for field_name in (

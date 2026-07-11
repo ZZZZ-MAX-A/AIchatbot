@@ -691,7 +691,7 @@ P2.46b 起，`OwnerAgentWorkRuntime` 注册第二个正式只读工作类型 `sy
 
 P2.46c 起，主人私聊严格命令 `/agent 执行系统诊断任务：视觉` 执行 `scope=vision`。视觉详情只沿功能配置、loopback Ollama 服务、模型可用性和最近视觉调用/质量证据检查到第一故障层；上游失败后不继续展开下游。它不使用测试图片、不执行真实视觉推理、不拉取模型、不重启服务，也不自动创建 `vision_invocation` 或 `vision_inference` 深度任务。
 
-当前同一正式工作类型还注册了 `/agent 执行系统诊断任务：语音`（`scope=voice`）和 `/agent 执行系统诊断任务：记忆与RAG`（`scope=memory_rag`）。语音详情只检查开关、loopback、本地 health、IndexTTS2 loaded、语言、最近候选和最近安全发送观测，不生成音频或发送 QQ。记忆与RAG详情只检查配置、非正文存储/索引统计和最近安全观测，不执行 embedding、语义召回、ProjectDocRAG 正文读取或索引重建。两个 scope 都按第一故障层停止，并且不会自动创建深度或修复任务。
+当前同一正式工作类型还注册了 `/agent 执行系统诊断任务：语音`（`scope=voice`）和 `/agent 执行系统诊断任务：记忆与RAG`（`scope=memory_rag`）。语音详情只检查开关、启动策略、loopback、本地 health、IndexTTS2 loaded、语言、最近候选和最近安全发送观测，不生成音频或发送 QQ。`TTS_AUTO_START=true` 且本机服务未运行时显示“按需冷启动待机”，不会为了诊断启动服务；服务在线但模型未加载时显示等待首次生成按需加载。自动启动关闭且服务不可达，或 health 明确异常时才显示降级。记忆与RAG详情只检查配置、非正文存储/索引统计和最近安全观测，不执行 embedding、语义召回、ProjectDocRAG 正文读取或索引重建。两个 scope 都按第一故障层停止，并且不会自动创建深度或修复任务。
 
 `/agent` 未命中确定性命令时的无 Main LLM fallback 现在是 `ask_owner`，不会再默认执行 `dev_context`。只有显式 `/agent 查 <问题>`、`/agent 查询 <问题>`、`/agent search <问题>` 和 `/agent-debug <问题>` 会确定性查询研发上下文。`ask_owner` 应返回一条主要的真实命令和最多三条替代命令；它不执行工具、不查询 RAG、不保存 pending intent，也不把主人随后发送的裸“可以”当成授权。Main LLM 遇到对象、范围或运行/研发含义不清时同样应优先 `ask_owner`；当前服务、模型加载、配置生效、错误、进程、数据库、TTS 和视觉状态禁止由 `dev_context` 兜底猜测。
 

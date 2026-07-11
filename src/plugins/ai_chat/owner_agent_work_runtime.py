@@ -504,6 +504,7 @@ def _sanitize_system_diagnostics_report(
             raise ValueError("voice diagnostics fault layer is invalid")
         expected_statuses = {
             "configuration": {"off_by_design"},
+            "startup": {"normal"},
             "endpoint": {"unknown"},
             "service": {"unknown", "degraded"},
             "model": {"unknown", "attention"},

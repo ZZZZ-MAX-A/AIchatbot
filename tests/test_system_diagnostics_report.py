@@ -119,6 +119,7 @@ class SystemDiagnosticsReportTests(unittest.TestCase):
         self,
         *,
         enabled=True,
+        auto_start_enabled=True,
         service_is_loopback=True,
         service_reachable=True,
         service_ok=True,
@@ -132,6 +133,7 @@ class SystemDiagnosticsReportTests(unittest.TestCase):
             enabled=enabled,
             service_ok=service_ok,
             model_loaded=model_loaded,
+            auto_start_enabled=auto_start_enabled,
             service_is_loopback=service_is_loopback,
             service_reachable=service_reachable,
             language=language,
@@ -534,6 +536,7 @@ class SystemDiagnosticsReportTests(unittest.TestCase):
     def test_voice_detail_service_failure_stops_before_model(self):
         payload = self.report.build_voice_diagnostics_report(
             self.voice_evidence(
+                auto_start_enabled=False,
                 service_reachable=False,
                 service_ok=False,
                 model_loaded=False,
@@ -550,18 +553,57 @@ class SystemDiagnosticsReportTests(unittest.TestCase):
         self.assertIn("最近生成观测：未继续判断（本地服务不可达）", payload.report_text)
         self.assertIn("最近发送观测：未继续判断（本地服务不可达）", payload.report_text)
 
-    def test_voice_detail_unloaded_model_stops_before_observations(self):
+    def test_voice_detail_on_demand_service_standby_is_normal_not_degraded(self):
+        payload = self.report.build_voice_diagnostics_report(
+            self.voice_evidence(
+                auto_start_enabled=True,
+                service_reachable=False,
+                service_ok=False,
+                model_loaded=None,
+            ),
+            local_probe_count=1,
+        )
+
+        self.assertEqual(payload.zone_status.status, self.report.STATUS_NORMAL)
+        self.assertEqual(payload.fault_layer, self.report.VOICE_LAYER_STARTUP)
+        self.assertIn("启动策略：按需自动冷启动", payload.report_text)
+        self.assertIn("当前未运行，符合按需冷启动待机设计", payload.report_text)
+        self.assertIn("健康接口：本次未检查（服务尚未冷启动）", payload.report_text)
+        self.assertIn("IndexTTS2：未继续判断（服务尚未冷启动）", payload.report_text)
+        self.assertIn("最近生成观测：暂无结构化成功证据", payload.report_text)
+        self.assertIn("最近发送观测：暂无结构化成功证据", payload.report_text)
+        self.assertIn("启动、模型加载和端到端能力仍未验证", payload.report_text)
+        self.assertNotIn("语音区诊断：降级", payload.report_text)
+        self.assertEqual(
+            self.report.voice_runtime_status_label(
+                self.voice_evidence(
+                    auto_start_enabled=True,
+                    service_reachable=False,
+                    service_ok=False,
+                    model_loaded=None,
+                )
+            ),
+            "按需待机",
+        )
+
+    def test_voice_detail_unloaded_model_is_on_demand_standby(self):
         payload = self.report.build_voice_diagnostics_report(
             self.voice_evidence(model_loaded=False),
             local_probe_count=1,
         )
 
-        self.assertEqual(payload.zone_status.status, self.report.STATUS_ATTENTION)
-        self.assertEqual(payload.fault_layer, self.report.VOICE_LAYER_MODEL)
-        self.assertIn("IndexTTS2：未加载", payload.report_text)
-        self.assertIn("最近生成观测：未继续判断（模型加载状态未通过）", payload.report_text)
-        self.assertIn("最近发送观测：未继续判断（模型加载状态未通过）", payload.report_text)
-        self.assertIn("本次不加载或下载模型", payload.report_text)
+        self.assertEqual(payload.zone_status.status, self.report.STATUS_NORMAL)
+        self.assertEqual(payload.fault_layer, self.report.VOICE_LAYER_STARTUP)
+        self.assertIn("IndexTTS2：未加载，等待首次生成时按需加载", payload.report_text)
+        self.assertIn("最近生成观测：暂无结构化成功证据", payload.report_text)
+        self.assertIn("最近发送观测：暂无结构化成功证据", payload.report_text)
+        self.assertIn("本次没有触发模型加载或真实生成", payload.report_text)
+        self.assertEqual(
+            self.report.voice_runtime_status_label(
+                self.voice_evidence(model_loaded=False)
+            ),
+            "按需待机",
+        )
 
     def test_voice_detail_without_send_observation_is_not_end_to_end_proof(self):
         payload = self.report.build_voice_diagnostics_report(
@@ -741,11 +783,18 @@ class SystemDiagnosticsReportTests(unittest.TestCase):
                 model_loaded=None,
             ),
             "service_degraded": self.voice_evidence(
+                auto_start_enabled=False,
                 service_reachable=False,
                 service_ok=False,
                 model_loaded=None,
             ),
-            "model_attention": self.voice_evidence(model_loaded=False),
+            "on_demand_service_standby": self.voice_evidence(
+                auto_start_enabled=True,
+                service_reachable=False,
+                service_ok=False,
+                model_loaded=None,
+            ),
+            "on_demand_model_standby": self.voice_evidence(model_loaded=False),
             "no_send_observation": self.voice_evidence(),
             "safe_send_observation": self.voice_evidence(
                 recent_generation_observation_present=True,

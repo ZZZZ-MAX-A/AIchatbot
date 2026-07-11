@@ -10,9 +10,9 @@
 
 MainAgent 输出边界：工具与 RAG 结果是只读证据，不是身份设定。MainAgent 不采用召回内容里的角色名，不自称“爱可”或其他聊天角色，不添加括号动作旁白，不声称执行工具未执行的检查。ChatAgent 的角色卡和聊天风格仍只属于普通聊天链路。
 
-本地验证：聚焦回归 148 tests OK；全量回归 405 tests OK；Python compile、AST 和 `git diff --check` 通过。新增交叉合同覆盖视觉 8 种、语音 6 种、记忆与RAG 8 种证据状态，确认同一 evidence 在概览与区域详情中保持相同区域状态；三类详情均保持定位层级、状态链、初步判断、下一范围和未执行边界。当前工作区包含代码、测试及本文档的未提交修改；本地 `main` 相对 `origin/main` 仍 ahead 3，未自动 commit 或 push。
+本地验证：聚焦回归 59 tests OK；全量回归 407 tests OK；101 个 Python 文件 AST 和 `git diff --check` 通过。交叉合同覆盖视觉 8 种、语音 7 种、记忆与RAG 8 种证据状态；新增正式 work runtime 的 `startup -> normal` sanitizer 接线测试，真实覆盖任务 `running -> done` 和安全摘要。当前 `main` 与 `origin/main` 无提交差异，工作区包含本轮冷启动语义的未提交修改，未自动 commit 或 push。
 
-主人 QQ live：正式任务 #33 为系统概览、#34 为视觉详情、#35 为语音详情、#36 为记忆与RAG详情，四条命令均成功完成。主人核对任务详情后确认 `external_request_count=0`、`deep_probe_count=0`、`repair_action_count=0`，其他功能输出正常。#35 准确定位为语音服务层降级：TTS 已开启且地址为本机 loopback，但本地服务不可达；因此按第一故障链没有继续判断 health、IndexTTS2、语言或生成/发送状态。live 同时发现下游“未继续判断”说明不够直观，以及工作任务尾部边界仍只写 overview/vision；代码补充逐项跳过原因并更新四个 scope 边界后，主人通过正式任务 #37 完成 QQ live 复验：服务层降级和首故障短路保持不变，health、IndexTTS2、语言、生成与发送均明确标记为因服务不可达而未继续判断，尾部边界正确列出视觉、语音、记忆与RAG。该验收不等于执行过真实视觉推理、TTS 音频生成、QQ 语音端到端发送、embedding、语义召回或索引重建。
+主人 QQ live：正式任务 #33 为系统概览、#34 为视觉详情、#35 为语音详情、#36 为记忆与RAG详情，四条命令均成功完成。#35/#37 当时把本机 TTS 未运行定位为服务层降级；主人随后明确真实设计是为了节省显存而在语音请求时冷启动 TTS。快速状态已 live 显示“按需待机”，但正式语音任务 #40 因 work runtime 的新 `startup` 层 sanitizer 映射漏注册而失败；该 `KeyError` 不是 TTS 故障。补上 `startup -> normal` 并增加正式任务链回归后，主人重启 Bot 再次验证系统概览和正式语音详情，反馈均没有问题；新的任务 ID 未提供，因此不臆造编号。overview、正式语音详情和快速状态现在共同读取 `tts_auto_start`，按需待机不再降级；该验收仍不代表执行过真实 TTS 冷启动、音频生成或 QQ 发送。
 
 当前保留现象：系统概览曾报告 MemoryRAG 有 2 条活动文档缺少向量。该现象仅作为已发现状态保留，不自动重建 MemoryRAG，不自动创建修复任务，也不擅自升级为下一阶段主任务。
 
