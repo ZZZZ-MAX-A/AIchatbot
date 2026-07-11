@@ -412,6 +412,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             query="recover project context",
             is_owner=True,
             is_group=False,
+            metadata={"explicit_dev_context": True},
         )
 
         execution = asyncio.run(runner.run(state))
@@ -451,6 +452,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         state = self.main_agent.MainAgentState(
             query="recover project context",
             is_owner=True,
+            metadata={"explicit_dev_context": True},
         )
 
         execution = asyncio.run(runner.run(state))
@@ -525,6 +527,95 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(execution.result.error, "")
         self.assertEqual(execution.result.requested_tool, "owner_read_command")
         self.assertEqual(calls, ["recent_errors"])
+
+    def test_ambiguous_troubleshooting_can_ask_owner_without_running_tool(self):
+        llm_calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for ambiguous troubleshooting")
+
+        async def execute_owner_read_command(_command, _context):
+            raise AssertionError("owner read should not run before clarification")
+
+        async def configured_llm_handler(state):
+            llm_calls.append(state.query)
+            if "图片" in state.query:
+                recommended_command = "/agent 查看视觉状态"
+            elif "语音" in state.query or "TTS" in state.query:
+                recommended_command = "/agent 语音状态怎么样"
+            else:
+                recommended_command = "/agent RAG 状态"
+            state.raw_action_request = self.main_agent_bridge.ask_owner_action_json(
+                f"可以输入 {recommended_command} 检查当前状态；"
+                "如果要查询开发设计，可以输入 /agent 查 <问题>。"
+                "这些是命令建议，本次尚未执行工具。",
+                reason="runtime and development intent are both plausible",
+            )
+            return state
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+
+        cases = {
+            "查看图片状态": "/agent 查看视觉状态",
+            "帮我看看语音功能哪里出错了": "/agent 语音状态怎么样",
+            "最近记忆好像不太对": "/agent RAG 状态",
+        }
+        for query, expected_command in cases.items():
+            with self.subTest(query=query):
+                execution = asyncio.run(
+                    runner.run(self.main_agent.MainAgentState(query=query, is_owner=True))
+                )
+
+                self.assertEqual(execution.result.error, "")
+                self.assertEqual(
+                    execution.result.action,
+                    self.main_agent.MainAgentAction.ASK_OWNER.value,
+                )
+                self.assertEqual(execution.result.requested_tool, "")
+                self.assertIn(expected_command, execution.result.response_text)
+                self.assertIn("/agent 查 <问题>", execution.result.response_text)
+                self.assertIn("尚未执行工具", execution.result.response_text)
+        self.assertEqual(llm_calls, list(cases))
+
+    def test_no_llm_unknown_query_asks_owner_without_running_any_tool(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("unknown no-LLM query must not run dev_context")
+
+        async def execute_owner_read_command(_command, _context):
+            raise AssertionError("unknown no-LLM query must not run owner read")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我看看这个怎么了",
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(
+            execution.result.action,
+            self.main_agent.MainAgentAction.ASK_OWNER.value,
+        )
+        self.assertEqual(execution.result.requested_tool, "")
+        self.assertIn("还不能确定你的主要目的", execution.result.response_text)
+        self.assertIn("/agent 查看视觉状态", execution.result.response_text)
+        self.assertIn("/agent 语音状态怎么样", execution.result.response_text)
+        self.assertIn("/agent RAG 状态", execution.result.response_text)
+        self.assertIn("/agent 查 <问题>", execution.result.response_text)
+        self.assertIn("没有查询 RAG", execution.result.response_text)
 
     def test_semantic_memory_retrieval_owner_read_extracts_query(self):
         calls = []
@@ -883,6 +974,37 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             self.main_agent_bridge.classify_owner_read_command("帮我添加事实记忆"),
             "",
         )
+
+    def test_voice_status_classifier_uses_object_plus_status_intent(self):
+        for query in (
+            "语音状态怎么样",
+            "看看语音模块",
+            "检查一下 TTS 状态",
+            "语音服务现在是否正常",
+            "TTS 是否异常",
+            "IndexTTS2 是不是没加载",
+            "语音服务是不是挂了",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.main_agent_bridge.classify_owner_read_command(query),
+                    "tts_status",
+                )
+
+    def test_voice_non_diagnostic_queries_do_not_enter_voice_diagnostics(self):
+        for query in (
+            "用语音说晚安",
+            "把上一句话读出来",
+            "我喜欢这个角色的声音",
+            "以后能不能增加语音识别",
+            "语音功能的设计文档在哪里",
+            "语言功能出现了问题",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.main_agent_bridge.classify_owner_read_command(query),
+                    "",
+                )
 
     def test_agent_task_read_classifier_accepts_task_card_wording(self):
         self.assertEqual(
@@ -1428,7 +1550,16 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             render_mode="concise",
         )
 
-        for query in ("帮我清空全部摘要", "帮我清空全部上下文", "帮我删除长期记忆 12"):
+        for query in (
+            "帮我清空全部摘要",
+            "帮我清空全部上下文",
+            "帮我删除长期记忆 12",
+            "帮我重启 TTS",
+            "自动修好语音服务",
+            "重新下载模型",
+            "改一下语音配置",
+            "清理语音缓存后重试",
+        ):
             with self.subTest(query=query):
                 execution = asyncio.run(
                     runner.run(
@@ -1749,6 +1880,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         state = self.main_agent.MainAgentState(
             query="recover project context",
             is_owner=True,
+            metadata={"explicit_dev_context": True},
         )
 
         execution = asyncio.run(runner.run(state))
@@ -1777,6 +1909,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         state = self.main_agent.MainAgentState(
             query="recover project context",
             is_owner=True,
+            metadata={"explicit_dev_context": True},
         )
 
         execution = asyncio.run(runner.run(state))
@@ -1884,7 +2017,11 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         runner = self.main_agent_bridge.create_read_only_main_agent_runner(
             retrieve_dev_context=retrieve_dev_context
         )
-        state = self.main_agent.MainAgentState(query="recover", is_owner=True)
+        state = self.main_agent.MainAgentState(
+            query="recover",
+            is_owner=True,
+            metadata={"explicit_dev_context": True},
+        )
 
         execution = asyncio.run(runner.run(state))
 
@@ -2098,6 +2235,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                 session_key="private:10001",
             ),
             intent=state_mod.RuntimeIntent.MAIN_AGENT,
+            artifacts={"main_agent_command": {"explicit_dev_context": True}},
         )
         runner = runtime_mod.RootGraphRunner(
             handlers={state_mod.RuntimeIntent.MAIN_AGENT: handler}
@@ -2253,6 +2391,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertIsNotNone(runtime_state)
         assert runtime_state is not None
+        runtime_state.artifacts["main_agent_command"]["explicit_dev_context"] = True
         handler = self.main_agent_bridge.create_read_only_main_agent_runtime_handler(
             retrieve_dev_context=retrieve_dev_context
         )

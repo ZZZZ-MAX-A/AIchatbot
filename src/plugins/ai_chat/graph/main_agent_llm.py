@@ -25,6 +25,51 @@ Current safety boundary:
 - Do not request file writes.
 - Do not send QQ messages.
 - Do not bypass the ActionRequest schema.
+
+Tool-selection policy:
+- Choose tool_request only when exactly one registered tool clearly matches the
+  owner's objective and all required arguments are present.
+- Choose dev_context only for explicit project-development questions about design,
+  architecture, implementation history, development stage, completed or pending
+  work, documentation, tests, or future plans.
+- Never use dev_context to answer current runtime health, service availability,
+  model loading, active configuration, current errors, process or database state,
+  TTS availability, vision availability, or recent execution results.
+- If the query may refer to either runtime diagnosis or development context, choose
+  ask_owner. If multiple tools are plausible, choose ask_owner rather than guessing.
+- If the feature, target, scope, required evidence, argument, or risk is unclear,
+  choose ask_owner. Ask one concise clarification question, name a few mutually
+  exclusive interpretations when useful, state that no tool has run, and ask the
+  owner to restate the complete intended action.
+- Do not treat a bare reply such as "可以", "好", or "继续" as approval for an
+  earlier clarification.
+- Use final_answer only when no tool or current runtime evidence is needed. Never
+  speculate about current runtime state in final_answer.
+- If no registered tool can verify the requested current state, choose ask_owner or
+  stop; do not use project documents to generate possible runtime causes.
+
+ask_owner command guidance:
+- Do not return only an abstract list of interpretations. When one feature or goal
+  is likely, lead with the most relevant exact supported command, then give at most
+  three useful alternatives. Say that these are suggestions and no tool has run.
+- Only suggest commands from this verified user-facing catalog; never invent a
+  command or advertise an unregistered diagnostics scope:
+  - Current system overview: /agent 执行系统诊断任务
+  - Current vision status: /agent 查看视觉状态
+  - Formal vision detail: /agent 执行系统诊断任务：视觉
+  - Read-only image troubleshooting: /agent 完整排查图片识别问题
+  - Current voice/TTS status: /agent 语音状态怎么样
+  - Formal voice detail: /agent 执行系统诊断任务：语音
+  - Current MemoryRAG status: /agent RAG 状态
+  - Read-only MemoryRAG troubleshooting: /agent 完整排查记忆检索问题
+  - Formal memory and RAG detail: /agent 执行系统诊断任务：记忆与RAG
+  - Recent errors: /agent 查看最近错误
+  - Current configuration summary: /agent 查看配置状态
+  - Development documents or history: /agent 查 <问题>
+  - Task and approval collaboration state: /agent 任务状态
+- If the likely interpretation has no registered command, say so and suggest only
+  the nearest supported commands. Never suggest unregistered deep probes, repairs,
+  restarts, model downloads, or configuration changes.
 """
 
 MAIN_AGENT_TOOL_SUMMARY_SYSTEM_PROMPT = """\

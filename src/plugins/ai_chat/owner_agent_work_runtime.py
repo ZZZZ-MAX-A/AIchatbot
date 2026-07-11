@@ -23,20 +23,29 @@ from .development_context_report import (
 from .system_diagnostics_report import (
     STATUS_LABELS,
     STATUS_ORDER,
+    SYSTEM_DIAGNOSTICS_MEMORY_RAG_RESPONSE_LIMIT,
+    SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
     SYSTEM_DIAGNOSTICS_OVERVIEW_RESPONSE_LIMIT,
     SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
     SYSTEM_DIAGNOSTICS_VISION_RESPONSE_LIMIT,
     SYSTEM_DIAGNOSTICS_VISION_SCOPE,
+    SYSTEM_DIAGNOSTICS_VOICE_RESPONSE_LIMIT,
+    SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
     VISION_INFERENCE_SCOPE,
     VISION_INVOCATION_SCOPE,
     VISION_LAYER_INVOCATION,
     VISION_LAYER_LABELS,
     VISION_LAYER_QUALITY,
+    VOICE_LAYER_LABELS,
+    MEMORY_RAG_LAYER_LABELS,
     ZONE_LABELS,
     ZONE_ORDER,
     ZONE_VISION,
+    ZONE_VOICE,
     SystemDiagnosticsReportPayload,
     VisionDiagnosticsReportPayload,
+    VoiceDiagnosticsReportPayload,
+    MemoryRagDiagnosticsReportPayload,
 )
 
 
@@ -61,14 +70,14 @@ SYSTEM_DIAGNOSTICS_SCOPE_ALIASES = {
     "main_agent": "main_agent",
     "mainagent": "main_agent",
     "agent": "main_agent",
-    "memory_rag": "memory_rag",
-    "memoryrag": "memory_rag",
-    "记忆与rag": "memory_rag",
-    "记忆与rag区": "memory_rag",
+    "memory_rag": SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
+    "memoryrag": SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
+    "记忆与rag": SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
+    "记忆与rag区": SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
     "vision": "vision",
     "视觉": "vision",
-    "voice": "voice",
-    "语音": "voice",
+    "voice": SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
+    "语音": SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
     "owner_console": "owner_console",
     "ownerconsole": "owner_console",
     "owner console": "owner_console",
@@ -156,7 +165,8 @@ def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str
         headline = f"{task_label} #{task.id} 未进入执行。"
 
     boundary = (
-        "边界：只执行已注册的确定性系统概览或主人显式选择的视觉区详情；"
+        "边界：只执行已注册的确定性系统概览，或主人显式选择的视觉、语音、"
+        "记忆与RAG区详情；"
         "未开放深度探针、外部请求、自动重试或修复。"
         if is_system_diagnostics
         else "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。"
@@ -347,6 +357,42 @@ def _persisted_vision_diagnostics_summary(
     return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
 
 
+def _persisted_voice_diagnostics_summary(
+    payload: VoiceDiagnosticsReportPayload,
+) -> str:
+    lines = [
+        "语音区详情诊断已完成。",
+        f"区域状态：{STATUS_LABELS[payload.zone_status.status]}。",
+        f"定位层级：{VOICE_LAYER_LABELS[payload.fault_layer]}。",
+        "推荐下一范围：无。",
+        f"本地检查：{payload.local_probe_count}。",
+        f"深度探针：{payload.deep_probe_count}。",
+        f"外部请求：{payload.external_request_count}。",
+        f"修复操作：{payload.repair_action_count}。",
+        "详细回复：确定性语音状态链，仅在本次主人私聊返回。",
+        "任务记录未保存服务地址、健康原文、候选文本、音频、路径或完整观测。",
+    ]
+    return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
+
+
+def _persisted_memory_rag_diagnostics_summary(
+    payload: MemoryRagDiagnosticsReportPayload,
+) -> str:
+    lines = [
+        "记忆与RAG区详情诊断已完成。",
+        f"区域状态：{STATUS_LABELS[payload.zone_status.status]}。",
+        f"定位层级：{MEMORY_RAG_LAYER_LABELS[payload.fault_layer]}。",
+        "推荐下一范围：无。",
+        f"本地检查：{payload.local_probe_count}。",
+        f"深度探针：{payload.deep_probe_count}。",
+        f"外部请求：{payload.external_request_count}。",
+        f"修复操作：{payload.repair_action_count}。",
+        "详细回复：确定性记忆与RAG状态链，仅在本次主人私聊返回。",
+        "任务记录未保存检索正文、来源路径、错误原文、配置值或完整观测。",
+    ]
+    return "\n".join(lines)[:AGENT_TASK_RESULT_LIMIT].rstrip()
+
+
 def _validate_system_diagnostics_counts(
     *,
     local_probe_count: int,
@@ -441,6 +487,84 @@ def _sanitize_system_diagnostics_report(
         )
         return SanitizedAgentWorkResult(
             persisted_summary=_persisted_vision_diagnostics_summary(raw_result),
+            response_text=response_text,
+        )
+
+    if isinstance(raw_result, VoiceDiagnosticsReportPayload):
+        if raw_result.scope != SYSTEM_DIAGNOSTICS_VOICE_SCOPE:
+            raise ValueError("voice diagnostics scope is invalid")
+        zone = raw_result.zone_status
+        if zone.zone != ZONE_VOICE or zone.status not in STATUS_ORDER:
+            raise ValueError("voice diagnostics zone status is invalid")
+        if not isinstance(zone.headline, str) or not zone.headline.strip():
+            raise ValueError("voice diagnostics zone headline is invalid")
+        if zone.recommended_scope not in {"", ZONE_VOICE}:
+            raise ValueError("voice diagnostics zone recommendation is invalid")
+        if raw_result.fault_layer not in VOICE_LAYER_LABELS:
+            raise ValueError("voice diagnostics fault layer is invalid")
+        expected_statuses = {
+            "configuration": {"off_by_design"},
+            "endpoint": {"unknown"},
+            "service": {"unknown", "degraded"},
+            "model": {"unknown", "attention"},
+            "observation": {"normal"},
+            "none": {"normal"},
+        }
+        if zone.status not in expected_statuses[raw_result.fault_layer]:
+            raise ValueError("voice diagnostics layer status is invalid")
+        if raw_result.recommended_scope:
+            raise ValueError("voice diagnostics recommended scope is invalid")
+        _validate_system_diagnostics_counts(
+            local_probe_count=raw_result.local_probe_count,
+            external_request_count=raw_result.external_request_count,
+            deep_probe_count=raw_result.deep_probe_count,
+            repair_action_count=raw_result.repair_action_count,
+        )
+        response_text = _sanitize_system_diagnostics_response(
+            raw_result.report_text,
+            limit=SYSTEM_DIAGNOSTICS_VOICE_RESPONSE_LIMIT,
+        )
+        return SanitizedAgentWorkResult(
+            persisted_summary=_persisted_voice_diagnostics_summary(raw_result),
+            response_text=response_text,
+        )
+
+    if isinstance(raw_result, MemoryRagDiagnosticsReportPayload):
+        if raw_result.scope != SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE:
+            raise ValueError("memory RAG diagnostics scope is invalid")
+        zone = raw_result.zone_status
+        if zone.zone != "memory_rag" or zone.status not in STATUS_ORDER:
+            raise ValueError("memory RAG diagnostics zone status is invalid")
+        if not isinstance(zone.headline, str) or not zone.headline.strip():
+            raise ValueError("memory RAG diagnostics zone headline is invalid")
+        if zone.recommended_scope not in {"", "memory_rag"}:
+            raise ValueError("memory RAG diagnostics zone recommendation is invalid")
+        if raw_result.fault_layer not in MEMORY_RAG_LAYER_LABELS:
+            raise ValueError("memory RAG diagnostics fault layer is invalid")
+        expected_statuses = {
+            "configuration": {"off_by_design"},
+            "storage": {"unknown", "degraded"},
+            "index": {"attention"},
+            "runtime": {"attention"},
+            "observation": {"normal"},
+            "none": {"normal"},
+        }
+        if zone.status not in expected_statuses[raw_result.fault_layer]:
+            raise ValueError("memory RAG diagnostics layer status is invalid")
+        if raw_result.recommended_scope:
+            raise ValueError("memory RAG diagnostics recommended scope is invalid")
+        _validate_system_diagnostics_counts(
+            local_probe_count=raw_result.local_probe_count,
+            external_request_count=raw_result.external_request_count,
+            deep_probe_count=raw_result.deep_probe_count,
+            repair_action_count=raw_result.repair_action_count,
+        )
+        response_text = _sanitize_system_diagnostics_response(
+            raw_result.report_text,
+            limit=SYSTEM_DIAGNOSTICS_MEMORY_RAG_RESPONSE_LIMIT,
+        )
+        return SanitizedAgentWorkResult(
+            persisted_summary=_persisted_memory_rag_diagnostics_summary(raw_result),
             response_text=response_text,
         )
 

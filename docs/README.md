@@ -116,7 +116,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 
 - [main-agent-first-readonly-work-task-design.md](main-agent-first-readonly-work-task-design.md)
 - [main-agent-useful-development-context-report-design.md](main-agent-useful-development-context-report-design.md)
-- [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：P2.46 分区分层系统诊断；P2.46b 短概览与 P2.46c 视觉区详情已本地实现，P2.46d 主人 QQ live 待验收。
+- [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：MainAgent 分区分层系统诊断；当前已注册 overview、vision、voice、memory_rag，并完成主人 QQ live 与语音服务层输出复验。
 - [development-context-current-state-retrieval-design.md](development-context-current-state-retrieval-design.md)
 - [project-rag-document-state-consistency-audit.md](project-rag-document-state-consistency-audit.md)：稳定设计中的当前/历史状态一致性审计。
 
@@ -131,7 +131,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 
 **对外文章草稿**
 
-- [juejin/](juejin/)：当前按 `01` 至 `15` 排序。文章可以解释设计取舍，但不能替代当前状态、运行手册或正式设计。
+- [juejin/](juejin/)：当前按 `01` 至 `16` 排序；第 16 篇记录 MainAgent 运行故障路由、分区诊断和 QQ live 收口。文章可以解释设计取舍，但不能替代当前状态、运行手册或正式设计。
 
 ## 5. 新增文档检查清单
 

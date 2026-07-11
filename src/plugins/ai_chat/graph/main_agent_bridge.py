@@ -151,7 +151,7 @@ def create_read_only_main_agent_runner(
     if agent_call is None and llm_call is not None:
         agent_call = create_main_agent_call_handler(llm_call, tool_registry=tool_registry)
     if agent_call is None:
-        agent_call = call_dev_context_stub_agent
+        agent_call = call_safe_no_llm_fallback_agent
     agent_call = create_semantic_first_main_agent_planner(tool_registry, agent_call)
 
     render_agent_response = (
@@ -207,6 +207,9 @@ def create_read_only_main_agent_runtime_handler(
     )
 
     async def handle_main_agent(state: RuntimeState) -> RuntimeResponse:
+        command_artifact = state.artifacts.get("main_agent_command", {})
+        if not isinstance(command_artifact, dict):
+            command_artifact = {}
         main_state = MainAgentState(
             query=state.event.plain_text,
             is_owner=state.actor.role == ActorRole.OWNER,
@@ -219,6 +222,9 @@ def create_read_only_main_agent_runtime_handler(
                 "user_id": state.actor.user_id,
                 "actor_role": state.actor.role.value,
                 "group_id": state.session.group_id or "",
+                "explicit_dev_context": bool(
+                    command_artifact.get("explicit_dev_context")
+                ),
             },
         )
         execution = await runner.run(main_state)
@@ -482,7 +488,10 @@ def create_owner_write_command_executor(
 
 
 def create_default_main_agent_planner(tool_registry: ToolRegistry) -> MainAgentHandler:
-    return create_semantic_first_main_agent_planner(tool_registry, call_dev_context_stub_agent)
+    return create_semantic_first_main_agent_planner(
+        tool_registry,
+        call_safe_no_llm_fallback_agent,
+    )
 
 
 def create_semantic_first_main_agent_planner(
@@ -560,6 +569,15 @@ def plan_semantic_read_tool_request(
                 reason="semantic owner side-effect QQ management command",
             )
             return True
+    if (
+        bool(state.metadata.get("explicit_dev_context"))
+        and tool_registry.get(MainAgentToolName.DEV_CONTEXT.value) is not None
+    ):
+        state.raw_action_request = dev_context_tool_action_json(
+            state.query,
+            reason="explicit owner development-context query",
+        )
+        return True
     return False
 
 
@@ -677,6 +695,26 @@ def call_dev_context_stub_agent(state: MainAgentState) -> MainAgentState:
     return state
 
 
+def call_safe_no_llm_fallback_agent(state: MainAgentState) -> MainAgentState:
+    if bool(state.metadata.get("explicit_dev_context")):
+        return call_dev_context_stub_agent(state)
+    state.raw_action_request = ask_owner_action_json(
+        (
+            "我还不能确定你的主要目的。\n"
+            "你可以重新发送一条完整命令，例如：\n"
+            "- 系统概览：/agent 执行系统诊断任务\n"
+            "- 视觉状态：/agent 查看视觉状态\n"
+            "- 语音状态：/agent 语音状态怎么样\n"
+            "- MemoryRAG 状态：/agent RAG 状态\n"
+            "- 研发资料：/agent 查 <问题>\n"
+            "- 任务与审批：/agent 任务状态\n"
+            "本次没有执行工具，没有查询 RAG，也没有修改任何状态。"
+        ),
+        reason="no deterministic route matched and Main LLM is unavailable",
+    )
+    return state
+
+
 def classify_owner_read_command(query: str) -> str:
     normalized = query.strip().lower()
     compact = re.sub(r"\s+", "", normalized)
@@ -754,7 +792,7 @@ def classify_owner_read_command(query: str) -> str:
         return "role_card_list"
     if any(marker in compact for marker in ("角色卡", "persona", "rolecard")):
         return "view_persona"
-    if any(marker in compact for marker in ("语音状态", "tts状态", "ttsstatus", "语音模块")):
+    if is_owner_voice_status_query(compact):
         return "tts_status"
     if any(marker in compact for marker in ("访问控制", "权限状态", "权限总览", "accessoverview", "accessstatus")):
         return "access_overview"
@@ -837,6 +875,33 @@ def classify_owner_read_command(query: str) -> str:
     return ""
 
 
+def is_owner_voice_status_query(compact: str) -> bool:
+    voice_markers = ("语音", "tts", "indextts2")
+    if not any(marker in compact for marker in voice_markers):
+        return False
+    direct_status_markers = (
+        "语音状态",
+        "tts状态",
+        "ttsstatus",
+        "语音模块",
+        "检查tts",
+        "查看tts",
+        "看看tts",
+        "是否正常",
+        "正常吗",
+        "是否在线",
+        "在线吗",
+        "是不是挂了",
+        "是否挂了",
+        "加载了吗",
+        "是否加载",
+        "是不是没加载",
+        "是否异常",
+        "有没有异常",
+    )
+    return any(marker in compact for marker in direct_status_markers)
+
+
 def is_owner_ops_health_query(compact: str) -> bool:
     broad_markers = (
         "综合诊断",
@@ -848,8 +913,6 @@ def is_owner_ops_health_query(compact: str) -> bool:
         "健康检查",
         "健康状态",
         "健康自检",
-        "排障",
-        "排查",
         "opshealth",
         "healthcheck",
     )
@@ -1125,6 +1188,16 @@ def is_disallowed_owner_write_intent(query: str) -> bool:
             "deleteallsummaries",
             "deletememory",
             "deletelongtermmemory",
+            "重启tts",
+            "重启语音服务",
+            "自动修好语音",
+            "修复语音服务",
+            "重新下载模型",
+            "下载模型",
+            "修改语音配置",
+            "改一下语音配置",
+            "清理语音缓存",
+            "清空语音缓存",
         )
     )
 

@@ -26,6 +26,125 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
             vision_max_image_bytes=5242880,
         )
 
+    def make_config_status_config(self, **overrides):
+        values = {
+            "bot_name": "AI助手",
+            "bot_owner_qq": "10001",
+            "bot_owner_public_name": "主人",
+            "enable_private_chat": True,
+            "enable_group_chat": True,
+            "enable_group_auto_reply": True,
+            "enable_owner_notifications": True,
+            "enable_chat_graph_runtime": True,
+            "chat_llm_api_key": "sk-chat-secret-value",
+            "chat_llm_base_url": "https://user:pass@chat.example.com/v1/?token=secret",
+            "chat_llm_model": "chat-current",
+            "chat_llm_timeout_seconds": 45,
+            "openai_api_key": "sk-legacy-secret-value",
+            "openai_base_url": "https://legacy.example.com/v1",
+            "openai_model": "legacy-chat",
+            "ai_timeout_seconds": 60,
+            "ai_temperature": 0.7,
+            "enable_main_agent": True,
+            "main_agent_owner_only": True,
+            "main_agent_allow_group": False,
+            "main_agent_use_llm": True,
+            "main_llm_api_key": "sk-main-secret-value",
+            "main_llm_base_url": "https://name:password@main.example.com/v1?token=secret",
+            "main_llm_model": "main-current",
+            "main_llm_timeout_seconds": 60,
+            "main_agent_max_steps": 5,
+            "main_agent_require_approval_for_writes": True,
+            "enable_memory_compression": True,
+            "max_context_messages": 40,
+            "max_stored_messages_per_session": 120,
+            "summary_keep_recent_messages": 40,
+            "summary_batch_messages": 80,
+            "max_session_summaries_in_context": 1,
+            "enable_gap_scene_summaries": True,
+            "gap_scene_summary_1_threshold": 40,
+            "gap_scene_summary_2_threshold": 80,
+            "max_gap_scene_summaries_in_context": 2,
+            "enable_long_term_memory_context": True,
+            "max_long_term_memories_in_context": 4,
+            "enable_memory_rag": True,
+            "memory_rag_inject_in_chat": True,
+            "enable_project_doc_rag": True,
+            "memory_rag_embedding_provider": "ollama",
+            "memory_rag_embedding_model": "bge-m3",
+            "memory_rag_embedding_base_url": "http://127.0.0.1:11434/?token=secret",
+            "memory_rag_embedding_dimension": 1024,
+            "memory_rag_top_k": 5,
+            "memory_rag_min_score": 0.35,
+            "memory_rag_max_context_chars": 2400,
+            "project_doc_rag_top_k": 5,
+            "project_doc_rag_min_score": 0.35,
+            "project_doc_rag_max_context_chars": 2400,
+            "enable_vision": True,
+            "vision_ollama_base_url": "http://127.0.0.1:11434/?token=secret",
+            "vision_model": "qwen2.5vl:3b",
+            "vision_timeout_seconds": 180,
+            "vision_num_ctx": 16384,
+            "vision_max_images": 1,
+            "vision_max_image_bytes": 5242880,
+            "vision_image_cache_ttl_seconds": 120,
+            "vision_private_image_wait_seconds": 5,
+            "enable_tts": True,
+            "tts_service_url": "http://127.0.0.1:9880/?token=secret",
+            "tts_auto_start": True,
+            "tts_voice": "default",
+            "tts_emotion": "neutral",
+            "tts_timeout_seconds": 180,
+            "tts_max_chars": 500,
+            "tts_max_total_seconds": 120,
+            "tts_cooldown_seconds": 5,
+            "enable_agent_web": False,
+            "enable_agent_shell": False,
+            "enable_agent_local_write": False,
+            "enable_agent_external_write": False,
+            "group_auto_reply_threshold": 80,
+        }
+        values.update(overrides)
+        return types.SimpleNamespace(**values)
+
+    def test_format_config_status_uses_current_runtime_sections_and_redacts_urls(self):
+        reply = self.diagnostics.format_config_status(self.make_config_status_config())
+
+        for heading in (
+            "基础与入口：",
+            "聊天模型：",
+            "MainAgent：",
+            "记忆与 RAG：",
+            "视觉：",
+            "语音：",
+            "MainAgent 高风险边界：",
+        ):
+            self.assertIn(heading, reply)
+        self.assertIn("聊天运行链路：ChatGraph/RootGraph", reply)
+        self.assertIn("模型：chat-current", reply)
+        self.assertIn("Main LLM 模型：main-current", reply)
+        self.assertIn("MemoryRAG：开启", reply)
+        self.assertIn("ProjectDocRAG：开启", reply)
+        self.assertIn("单图上限：5 MiB", reply)
+        self.assertIn("地址范围：本机 loopback", reply)
+        self.assertIn("主人管理写：审批门控", reply)
+        self.assertIn("不代表服务在线、模型已加载或端到端功能已经验证", reply)
+        self.assertIn("https://chat.example.com/v1", reply)
+        self.assertIn("https://main.example.com/v1", reply)
+        self.assertNotIn("legacy-chat", reply)
+        for secret in ("sk-chat", "sk-main", "password", "token=", "user:pass"):
+            self.assertNotIn(secret, reply)
+
+    def test_format_config_status_uses_legacy_chat_fields_when_graph_is_disabled(self):
+        reply = self.diagnostics.format_config_status(
+            self.make_config_status_config(enable_chat_graph_runtime=False)
+        )
+
+        self.assertIn("聊天运行链路：兼容聊天链路", reply)
+        self.assertIn("模型：legacy-chat", reply)
+        self.assertIn("接口：https://legacy.example.com/v1", reply)
+        self.assertNotIn("模型：chat-current", reply)
+
     def test_format_vision_status_includes_inference_check_result(self):
         status = self.diagnostics.OllamaStatus(
             self.diagnostics.CheckResult(True, "service-ok"),

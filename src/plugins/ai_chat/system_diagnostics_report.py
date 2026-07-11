@@ -8,6 +8,10 @@ SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE = "overview"
 SYSTEM_DIAGNOSTICS_OVERVIEW_RESPONSE_LIMIT = 1200
 SYSTEM_DIAGNOSTICS_VISION_SCOPE = "vision"
 SYSTEM_DIAGNOSTICS_VISION_RESPONSE_LIMIT = 1800
+SYSTEM_DIAGNOSTICS_VOICE_SCOPE = "voice"
+SYSTEM_DIAGNOSTICS_VOICE_RESPONSE_LIMIT = 1800
+SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE = "memory_rag"
+SYSTEM_DIAGNOSTICS_MEMORY_RAG_RESPONSE_LIMIT = 1800
 
 VISION_INVOCATION_SCOPE = "vision_invocation"
 VISION_INFERENCE_SCOPE = "vision_inference"
@@ -19,6 +23,20 @@ VISION_LAYER_INVOCATION = "invocation"
 VISION_LAYER_QUALITY = "quality"
 VISION_LAYER_OBSERVATION = "observation"
 VISION_LAYER_NONE = "none"
+
+VOICE_LAYER_CONFIGURATION = "configuration"
+VOICE_LAYER_ENDPOINT = "endpoint"
+VOICE_LAYER_SERVICE = "service"
+VOICE_LAYER_MODEL = "model"
+VOICE_LAYER_OBSERVATION = "observation"
+VOICE_LAYER_NONE = "none"
+
+MEMORY_RAG_LAYER_CONFIGURATION = "configuration"
+MEMORY_RAG_LAYER_STORAGE = "storage"
+MEMORY_RAG_LAYER_INDEX = "index"
+MEMORY_RAG_LAYER_RUNTIME = "runtime"
+MEMORY_RAG_LAYER_OBSERVATION = "observation"
+MEMORY_RAG_LAYER_NONE = "none"
 
 ZONE_CORE = "core"
 ZONE_CHAT = "chat"
@@ -76,6 +94,22 @@ VISION_LAYER_LABELS = {
     VISION_LAYER_OBSERVATION: "观测层",
     VISION_LAYER_NONE: "未发现故障层",
 }
+VOICE_LAYER_LABELS = {
+    VOICE_LAYER_CONFIGURATION: "配置层",
+    VOICE_LAYER_ENDPOINT: "地址策略层",
+    VOICE_LAYER_SERVICE: "服务层",
+    VOICE_LAYER_MODEL: "模型层",
+    VOICE_LAYER_OBSERVATION: "观测层",
+    VOICE_LAYER_NONE: "未发现故障层",
+}
+MEMORY_RAG_LAYER_LABELS = {
+    MEMORY_RAG_LAYER_CONFIGURATION: "配置层",
+    MEMORY_RAG_LAYER_STORAGE: "存储层",
+    MEMORY_RAG_LAYER_INDEX: "索引层",
+    MEMORY_RAG_LAYER_RUNTIME: "运行观测层",
+    MEMORY_RAG_LAYER_OBSERVATION: "证据层",
+    MEMORY_RAG_LAYER_NONE: "未发现故障层",
+}
 
 
 def is_loopback_service_url(value: str) -> bool:
@@ -123,6 +157,8 @@ class MemoryRagZoneEvidence:
     pending_count: int = 0
     recent_observation_present: bool = False
     recent_error: bool = False
+    recent_attempted: bool = False
+    recent_result_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -140,6 +176,12 @@ class VoiceZoneEvidence:
     enabled: bool
     service_ok: bool | None
     model_loaded: bool | None
+    service_is_loopback: bool | None = None
+    service_reachable: bool | None = None
+    language: str = ""
+    recent_candidate_present: bool = False
+    recent_generation_observation_present: bool = False
+    recent_send_observation_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -195,8 +237,37 @@ class VisionDiagnosticsReportPayload:
     report_text: str
 
 
+@dataclass(frozen=True)
+class VoiceDiagnosticsReportPayload:
+    scope: str
+    zone_status: DiagnosticZoneStatus
+    fault_layer: str
+    recommended_scope: str
+    local_probe_count: int
+    external_request_count: int
+    deep_probe_count: int
+    repair_action_count: int
+    report_text: str
+
+
+@dataclass(frozen=True)
+class MemoryRagDiagnosticsReportPayload:
+    scope: str
+    zone_status: DiagnosticZoneStatus
+    fault_layer: str
+    recommended_scope: str
+    local_probe_count: int
+    external_request_count: int
+    deep_probe_count: int
+    repair_action_count: int
+    report_text: str
+
+
 SystemDiagnosticsPayload = (
-    SystemDiagnosticsReportPayload | VisionDiagnosticsReportPayload
+    SystemDiagnosticsReportPayload
+    | VisionDiagnosticsReportPayload
+    | VoiceDiagnosticsReportPayload
+    | MemoryRagDiagnosticsReportPayload
 )
 
 
@@ -384,6 +455,8 @@ def evaluate_voice_zone(evidence: VoiceZoneEvidence) -> DiagnosticZoneStatus:
         return _zone(ZONE_VOICE, STATUS_DEGRADED, "语音已开启，但 TTS 服务不可用。")
     if evidence.model_loaded is False:
         return _zone(ZONE_VOICE, STATUS_ATTENTION, "TTS 服务在线，但模型尚未加载。")
+    if evidence.model_loaded is None:
+        return _zone(ZONE_VOICE, STATUS_UNKNOWN, "TTS 服务在线，但模型加载状态无法确认。")
     return _zone(ZONE_VOICE, STATUS_NORMAL, "TTS 服务在线。")
 
 
@@ -486,6 +559,16 @@ def format_system_diagnostics_overview(
         if payload.primary_recommended_scope == ZONE_VISION:
             lines.append(
                 "如需详情，请由主人显式执行 /agent 执行系统诊断任务：视觉；"
+                "本次未自动创建区域详情任务。"
+            )
+        elif payload.primary_recommended_scope == ZONE_MEMORY_RAG:
+            lines.append(
+                "如需详情，请由主人显式执行 /agent 执行系统诊断任务：记忆与RAG；"
+                "本次未自动创建区域详情任务。"
+            )
+        elif payload.primary_recommended_scope == ZONE_VOICE:
+            lines.append(
+                "如需详情，请由主人显式执行 /agent 执行系统诊断任务：语音；"
                 "本次未自动创建区域详情任务。"
             )
         else:
@@ -689,4 +772,323 @@ def build_vision_diagnostics_report(
         deep_probe_count=payload.deep_probe_count,
         repair_action_count=payload.repair_action_count,
         report_text=format_vision_diagnostics_report(payload, evidence),
+    )
+
+
+def _voice_detail_judgment(fault_layer: str) -> str:
+    judgments = {
+        VOICE_LAYER_CONFIGURATION: (
+            "语音功能按设计关闭，未继续检查服务、模型、生成或发送观测。"
+        ),
+        VOICE_LAYER_ENDPOINT: (
+            "TTS 地址不是本机 loopback，本次按安全边界未主动访问服务。"
+        ),
+        VOICE_LAYER_SERVICE: (
+            "当前证据停在服务层；本次不启动、重启或修复 TTS 服务。"
+        ),
+        VOICE_LAYER_MODEL: (
+            "TTS 服务已可访问，但 IndexTTS2 加载状态尚未通过；本次不加载或下载模型。"
+        ),
+        VOICE_LAYER_OBSERVATION: (
+            "配置、服务和模型状态未显示硬错误，但缺少最近生成或发送证据；"
+            "这不等于已完成端到端验证。"
+        ),
+        VOICE_LAYER_NONE: (
+            "配置、服务、模型和最近安全发送观测均未显示需要深入排查的问题。"
+        ),
+    }
+    return judgments[fault_layer]
+
+
+def format_voice_diagnostics_report(
+    payload: VoiceDiagnosticsReportPayload,
+    evidence: VoiceZoneEvidence,
+) -> str:
+    lines = [
+        f"语音区诊断：{STATUS_LABELS[payload.zone_status.status]}",
+        f"定位层级：{VOICE_LAYER_LABELS[payload.fault_layer]}",
+        "",
+        "状态链：",
+        f"- 功能配置：{'开启' if evidence.enabled else '关闭'}。",
+    ]
+    if evidence.enabled:
+        if evidence.service_is_loopback is False:
+            lines.append("- TTS 地址：非本机地址，本次未主动访问。")
+            lines.append(
+                "- 后续状态：按安全边界未验证健康接口、IndexTTS2、语言和运行观测。"
+            )
+        elif evidence.service_is_loopback:
+            lines.append("- TTS 地址：本机 loopback。")
+        else:
+            lines.append("- TTS 地址：无法确认。")
+
+    if evidence.enabled and evidence.service_is_loopback:
+        if evidence.service_reachable is False:
+            lines.append("- 本地服务：不可用。")
+            lines.append("- 健康接口：未继续检查（本地服务不可达）。")
+        elif evidence.service_reachable is True:
+            lines.append("- 本地服务：在线。")
+            lines.append(
+                f"- 健康接口：{'正常' if evidence.service_ok else '异常'}。"
+            )
+        else:
+            lines.append("- 本地服务：未验证。")
+            lines.append("- 健康接口：未继续检查（服务可达性未确认）。")
+
+    if evidence.enabled and evidence.service_ok:
+        if evidence.model_loaded is True:
+            lines.append("- IndexTTS2：已加载。")
+        elif evidence.model_loaded is False:
+            lines.append("- IndexTTS2：未加载。")
+        else:
+            lines.append("- IndexTTS2：状态无法确认。")
+        lines.append(f"- 语言：{evidence.language or '未知'}。")
+    elif evidence.enabled and evidence.service_is_loopback:
+        reason = (
+            "本地服务不可达"
+            if evidence.service_reachable is False
+            else "健康接口未通过"
+            if evidence.service_reachable is True
+            else "服务可达性未确认"
+        )
+        lines.append(f"- IndexTTS2：未继续判断（{reason}）。")
+        lines.append(f"- 语言：未继续判断（{reason}）。")
+
+    if evidence.enabled and evidence.service_ok and evidence.model_loaded:
+        lines.append(
+            "- 最近语音候选："
+            + ("存在。" if evidence.recent_candidate_present else "无。")
+        )
+        lines.append(
+            "- 最近生成观测："
+            + (
+                "存在安全成功证据。"
+                if evidence.recent_generation_observation_present
+                else "暂无结构化成功证据。"
+            )
+        )
+        lines.append(
+            "- 最近发送观测："
+            + (
+                "存在安全成功证据。"
+                if evidence.recent_send_observation_present
+                else "暂无结构化成功证据。"
+            )
+        )
+    elif evidence.enabled and evidence.service_ok:
+        lines.append("- 最近生成观测：未继续判断（模型加载状态未通过）。")
+        lines.append("- 最近发送观测：未继续判断（模型加载状态未通过）。")
+    elif evidence.enabled and evidence.service_is_loopback:
+        reason = (
+            "本地服务不可达"
+            if evidence.service_reachable is False
+            else "健康接口未通过"
+            if evidence.service_reachable is True
+            else "服务可达性未确认"
+        )
+        lines.append(f"- 最近生成观测：未继续判断（{reason}）。")
+        lines.append(f"- 最近发送观测：未继续判断（{reason}）。")
+
+    lines.extend(
+        [
+            "",
+            "初步判断：",
+            _voice_detail_judgment(payload.fault_layer),
+            "",
+            "建议下一范围：无；本次不自动扩大诊断范围。",
+            f"本次使用被动证据和 {payload.local_probe_count} 项廉价本地检查。",
+            "未生成测试语音、创建音频文件、发送 QQ、重启服务、加载模型、"
+            "下载模型、修改配置、自动重试或修复。",
+        ]
+    )
+    return "\n".join(lines)[:SYSTEM_DIAGNOSTICS_VOICE_RESPONSE_LIMIT].rstrip()
+
+
+def build_voice_diagnostics_report(
+    evidence: VoiceZoneEvidence,
+    *,
+    local_probe_count: int = 0,
+) -> VoiceDiagnosticsReportPayload:
+    if (
+        not isinstance(local_probe_count, int)
+        or isinstance(local_probe_count, bool)
+        or local_probe_count < 0
+    ):
+        raise ValueError("voice diagnostics count must be non-negative")
+
+    zone_status = evaluate_voice_zone(evidence)
+    if not evidence.enabled:
+        fault_layer = VOICE_LAYER_CONFIGURATION
+    elif evidence.service_is_loopback is False:
+        fault_layer = VOICE_LAYER_ENDPOINT
+    elif evidence.service_ok is None or not evidence.service_ok:
+        fault_layer = VOICE_LAYER_SERVICE
+    elif evidence.model_loaded is None or not evidence.model_loaded:
+        fault_layer = VOICE_LAYER_MODEL
+    elif not evidence.recent_send_observation_present:
+        fault_layer = VOICE_LAYER_OBSERVATION
+    else:
+        fault_layer = VOICE_LAYER_NONE
+
+    payload = VoiceDiagnosticsReportPayload(
+        scope=SYSTEM_DIAGNOSTICS_VOICE_SCOPE,
+        zone_status=zone_status,
+        fault_layer=fault_layer,
+        recommended_scope="",
+        local_probe_count=local_probe_count,
+        external_request_count=0,
+        deep_probe_count=0,
+        repair_action_count=0,
+        report_text="",
+    )
+    return VoiceDiagnosticsReportPayload(
+        scope=payload.scope,
+        zone_status=payload.zone_status,
+        fault_layer=payload.fault_layer,
+        recommended_scope=payload.recommended_scope,
+        local_probe_count=payload.local_probe_count,
+        external_request_count=payload.external_request_count,
+        deep_probe_count=payload.deep_probe_count,
+        repair_action_count=payload.repair_action_count,
+        report_text=format_voice_diagnostics_report(payload, evidence),
+    )
+
+
+def _memory_rag_detail_judgment(fault_layer: str) -> str:
+    judgments = {
+        MEMORY_RAG_LAYER_CONFIGURATION: (
+            "MemoryRAG 与 ProjectDocRAG 均按设计关闭，未继续读取索引统计。"
+        ),
+        MEMORY_RAG_LAYER_STORAGE: (
+            "MemoryRAG 已开启，但本地索引统计无法读取；本次不修改数据库或重建索引。"
+        ),
+        MEMORY_RAG_LAYER_INDEX: (
+            "本地索引存在待处理内容或缺失向量；本次只报告现象，不执行 embedding 或重建。"
+        ),
+        MEMORY_RAG_LAYER_RUNTIME: (
+            "索引统计可读，但最近 MemoryRAG 安全观测记录了运行错误。"
+        ),
+        MEMORY_RAG_LAYER_OBSERVATION: (
+            "配置与索引统计未显示硬错误，但暂无近期 MemoryRAG 运行证据；"
+            "这不等于已完成语义召回验证。"
+        ),
+        MEMORY_RAG_LAYER_NONE: (
+            "配置、索引统计和最近安全观测未显示需要深入排查的问题。"
+        ),
+    }
+    return judgments[fault_layer]
+
+
+def format_memory_rag_diagnostics_report(
+    payload: MemoryRagDiagnosticsReportPayload,
+    evidence: MemoryRagZoneEvidence,
+) -> str:
+    lines = [
+        f"记忆与RAG区诊断：{STATUS_LABELS[payload.zone_status.status]}",
+        f"定位层级：{MEMORY_RAG_LAYER_LABELS[payload.fault_layer]}",
+        "",
+        "状态链：",
+        f"- MemoryRAG：{'开启' if evidence.memory_rag_enabled else '关闭'}。",
+        f"- 普通聊天注入：{'开启' if evidence.memory_rag_inject_in_chat else '关闭'}。",
+        f"- ProjectDocRAG：{'开启' if evidence.project_doc_rag_enabled else '关闭'}。",
+    ]
+
+    if evidence.memory_rag_enabled:
+        if evidence.storage_ok is True:
+            lines.extend(
+                [
+                    "- 本地索引统计：可读。",
+                    f"- 活动文档：{evidence.document_count}。",
+                    f"- 向量记录：{evidence.embedding_count}。",
+                    f"- 待索引内容：{evidence.pending_count}。",
+                ]
+            )
+        elif evidence.storage_ok is False:
+            lines.append("- 本地索引统计：读取失败。")
+        else:
+            lines.append("- 本地索引统计：未确认。")
+
+    if evidence.memory_rag_enabled and evidence.storage_ok:
+        missing = max(evidence.document_count - evidence.embedding_count, 0)
+        lines.append(f"- 缺少向量的活动文档：{missing}。")
+        if evidence.recent_error:
+            lines.append("- 最近运行观测：记录到错误。")
+        elif evidence.recent_observation_present:
+            attempted = "是" if evidence.recent_attempted else "否"
+            lines.append(
+                f"- 最近运行观测：存在；尝试召回={attempted}，"
+                f"结果数={evidence.recent_result_count}。"
+            )
+        else:
+            lines.append("- 最近运行观测：暂无。")
+
+    lines.extend(
+        [
+            "",
+            "初步判断：",
+            _memory_rag_detail_judgment(payload.fault_layer),
+            "",
+            "建议下一范围：无；本次不自动扩大诊断范围。",
+            f"本次使用被动证据和 {payload.local_probe_count} 项廉价本地检查。",
+            "未执行 embedding 自检、语义召回、ProjectDocRAG 正文读取、索引重建、"
+            "数据库写入、自动重试或修复。",
+        ]
+    )
+    return "\n".join(lines)[:SYSTEM_DIAGNOSTICS_MEMORY_RAG_RESPONSE_LIMIT].rstrip()
+
+
+def build_memory_rag_diagnostics_report(
+    evidence: MemoryRagZoneEvidence,
+    *,
+    local_probe_count: int = 0,
+) -> MemoryRagDiagnosticsReportPayload:
+    counts = (
+        local_probe_count,
+        evidence.document_count,
+        evidence.embedding_count,
+        evidence.pending_count,
+        evidence.recent_result_count,
+    )
+    if any(
+        not isinstance(count, int) or isinstance(count, bool) or count < 0
+        for count in counts
+    ):
+        raise ValueError("memory RAG diagnostics count must be non-negative")
+
+    zone_status = evaluate_memory_rag_zone(evidence)
+    missing = max(evidence.document_count - evidence.embedding_count, 0)
+    if not evidence.memory_rag_enabled and not evidence.project_doc_rag_enabled:
+        fault_layer = MEMORY_RAG_LAYER_CONFIGURATION
+    elif evidence.memory_rag_enabled and evidence.storage_ok is not True:
+        fault_layer = MEMORY_RAG_LAYER_STORAGE
+    elif evidence.memory_rag_enabled and (evidence.pending_count > 0 or missing > 0):
+        fault_layer = MEMORY_RAG_LAYER_INDEX
+    elif evidence.memory_rag_enabled and evidence.recent_error:
+        fault_layer = MEMORY_RAG_LAYER_RUNTIME
+    elif evidence.memory_rag_enabled and not evidence.recent_observation_present:
+        fault_layer = MEMORY_RAG_LAYER_OBSERVATION
+    else:
+        fault_layer = MEMORY_RAG_LAYER_NONE
+
+    payload = MemoryRagDiagnosticsReportPayload(
+        scope=SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
+        zone_status=zone_status,
+        fault_layer=fault_layer,
+        recommended_scope="",
+        local_probe_count=local_probe_count,
+        external_request_count=0,
+        deep_probe_count=0,
+        repair_action_count=0,
+        report_text="",
+    )
+    return MemoryRagDiagnosticsReportPayload(
+        scope=payload.scope,
+        zone_status=payload.zone_status,
+        fault_layer=payload.fault_layer,
+        recommended_scope=payload.recommended_scope,
+        local_probe_count=payload.local_probe_count,
+        external_request_count=payload.external_request_count,
+        deep_probe_count=payload.deep_probe_count,
+        repair_action_count=payload.repair_action_count,
+        report_text=format_memory_rag_diagnostics_report(payload, evidence),
     )

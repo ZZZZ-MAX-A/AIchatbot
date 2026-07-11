@@ -4260,7 +4260,44 @@ Ran 20 tests OK
 
 ## v1.6 MainAgent zoned system diagnostics overview
 
-状态：已完成 P2.46a 设计、P2.46b 系统概览和 P2.46c 视觉区详情的本地实现/回归；P2.46d 主人 QQ live 尚未完成。设计见 `docs/main-agent-system-diagnostics-report-design.md`。
+状态：已完成 P2.46a 设计、P2.46b 系统概览、P2.46c 视觉区详情和 P2.46d 主人 QQ live。随后在不另设阶段编号的前提下，增加了语音、记忆与RAG区域详情以及 MainAgent 路由/表达收口。设计见 `docs/main-agent-system-diagnostics-report-design.md`。
+
+当前扩展（不另设阶段编号）：
+
+```text
+system_diagnostics_report 当前严格注册 overview、vision、voice 和 memory_rag。
+/agent 执行系统诊断任务：语音 沿 configuration -> endpoint -> service -> model -> observation 首故障链检查，只读 loopback TTS health、loaded、language、最近候选和最近安全发送观测。
+/agent 执行系统诊断任务：记忆与RAG 沿 configuration -> storage -> index -> runtime -> observation 首故障链检查，只读非正文存储/索引统计和最近安全观测。
+voice 不生成音频、不创建音频文件、不发送 QQ、不重启或加载/下载模型；memory_rag 不执行 embedding、语义召回、ProjectDocRAG 正文读取或索引重建。
+/agent 语音状态怎么样 已显示总体状态、开关、服务可达性、health、IndexTTS2 loaded、语言、最近候选和端到端未验证声明。
+/agent 查看配置状态 已更新为基础入口、聊天模型、MainAgent、记忆与RAG、视觉、语音和高风险边界分区，并继续对 URL 与 Key 脱敏。
+未知且无 Main LLM 的 /agent 表达现在进入 ask_owner，不再默认调用 dev_context/RAG；显式 /agent 查、/agent 查询、/agent search 和 /agent-debug 仍可进入研发上下文。
+Main LLM 遇到对象、范围或运行/研发歧义时优先 ask_owner；运行状态禁止由 dev_context 兜底猜测。
+MainAgent 工具总结新增中性身份边界：RAG/工具结果不是身份设定，不采用角色名、自称、动作旁白，也不虚构未执行检查。
+OwnerAgentWorkRuntime sanitizer 已支持四种报告 payload；任务记录只保留区域状态、定位层级、推荐 scope 和安全计数，任何 external/deep/repair 非零结果都拒绝完成。
+```
+
+当前扩展验证：
+
+```text
+聚焦回归：148 tests OK。
+全量 unittest discover：405 tests OK。
+新增视觉 8 种、语音 6 种、记忆与RAG 8 种概览—详情状态一致性合同，以及三类详情共同实用性输出合同。
+Python compile、AST 和 git diff --check 通过。
+既有非失败提示：FastAPI/Starlette TestClient 与 httpx 弃用警告。
+```
+
+主人 QQ live：
+
+```text
+正式任务：#33 系统概览、#34 视觉详情、#35 语音详情、#36 记忆与RAG详情；四条命令均成功完成。
+主人核对任务详情后确认 external_request_count=0、deep_probe_count=0、repair_action_count=0，其他功能输出正常。
+#35 定位为语音服务层降级：TTS 开启、地址为本机 loopback，但本地服务不可达；第一故障链因此没有继续判断 health、IndexTTS2、语言或生成/发送状态。
+live 发现服务失败时下游“未继续判断”原因不够直观，且任务回复尾部仍只写 overview/vision。代码已补充 health、模型、语言、生成、发送的逐项跳过原因，并把边界更新为 overview、vision、voice、memory_rag。
+正式任务 #37 已完成主人 QQ live 复验：仍准确定位服务层降级；health、IndexTTS2、语言、最近生成和最近发送均明确写明因本地服务不可达而未继续判断；尾部正确列出视觉、语音、记忆与RAG区详情。未启动或重启 TTS，未生成音频，未发送 QQ，未执行深度探针或修复。
+该 live 不代表执行了真实视觉推理、TTS 音频生成、QQ 语音端到端发送、embedding、语义召回或 MemoryRAG 重建。
+系统概览曾显示 2 条活动文档缺少向量；仅保留为已发现现象，不自动重建索引或创建修复任务。
+```
 
 本次完成：
 
@@ -4366,19 +4403,19 @@ P2.46c 文档与检索验证：
   embeddings_updated=75
   errors=0
 
-固定查询“P2.46c system_diagnostics_report vision 视觉区详情 当前实现 P2.46d QQ live 待验收”：
+P2.46c 当时的固定查询“P2.46c system_diagnostics_report vision 视觉区详情 当前实现 P2.46d QQ live 待验收”：
   project_results=5
   第 1 条为 current-development-status P2.46c 当前状态锚点
   第 2 条为 main-agent-system-diagnostics-report-design 的 P2.46c 实现清单
   第 4、5 条为设计总状态和 version-runlog 当前阶段
-  召回结论一致：P2.46c 本地完成，P2.46d Bot 重启和主人 QQ live 待完成
+  当时召回结论一致：P2.46c 本地完成，P2.46d Bot 重启和主人 QQ live 待完成
   历史 P2.46a/b 片段只作为后排阶段记录，没有覆盖当前状态锚点
 ```
 
 边界：
 
 ```text
-P2.46a-c 已完成本地设计/实现/回归，但尚未重启 Bot 或进行 P2.46d live 验收。
+本段是 P2.46c 完成时的历史边界；当时尚未重启 Bot 或进行 P2.46d live 验收，后续 live 已完成。
 普通聊天仍不能触发 MainAgent；ProjectDocRAG 正文仍只进入显式 /agent dev_context。
 不新增 shell、Git、任意文件读写、未注册数据库写入、外部请求、自动诊断、自动下钻、自动修复或额外 QQ 发送。
 Owner Console 继续只读 GET；P2.40b、登录鉴权和 Web 审批操作继续未批准。

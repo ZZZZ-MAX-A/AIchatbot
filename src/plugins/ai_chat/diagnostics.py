@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from nonebot import get_driver
@@ -66,6 +67,36 @@ def _configured(value: str) -> str:
     return "已配置" if value else "未配置"
 
 
+def _redacted_url(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return "未配置"
+    parsed = urlsplit(stripped)
+    if not parsed.scheme or not parsed.netloc:
+        return "[无效地址]"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme}://{host}{port}{path}"
+
+
+def _service_address_scope(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    host = (parsed.hostname or "").lower()
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return "本机 loopback"
+    return "非本机地址" if host else "未知"
+
+
+def _human_bytes(value: int) -> str:
+    size = max(int(value), 0)
+    if size and size % (1024 * 1024) == 0:
+        return f"{size // (1024 * 1024)} MiB"
+    if size and size % 1024 == 0:
+        return f"{size // 1024} KiB"
+    return f"{size} 字节"
+
+
 def _short_error(exc: Exception) -> str:
     message = sanitize_text(str(exc))
     if len(message) > 80:
@@ -112,12 +143,28 @@ def _chat_finish_reason(response: object) -> str:
 
 def config_warnings(config: AiChatConfig) -> list[str]:
     warnings: list[str] = []
+    chat_api_key = (
+        config.chat_llm_api_key
+        if config.enable_chat_graph_runtime
+        else config.openai_api_key
+    )
+    chat_model = (
+        config.chat_llm_model
+        if config.enable_chat_graph_runtime
+        else config.openai_model
+    )
     if not config.bot_owner_qq:
         warnings.append("BOT_OWNER_QQ 未配置，主人命令不可用。")
-    if not config.openai_api_key:
-        warnings.append("OPENAI_API_KEY 未配置，普通聊天不可用。")
-    if not config.openai_model:
-        warnings.append("OPENAI_MODEL 为空。")
+    if not chat_api_key:
+        warnings.append("当前聊天运行链路的 API Key 未配置，普通聊天不可用。")
+    if not chat_model:
+        warnings.append("当前聊天运行链路的模型为空。")
+    if (
+        config.enable_main_agent
+        and config.main_agent_use_llm
+        and not config.main_llm_api_key
+    ):
+        warnings.append("MainAgent 已启用 Main LLM，但 MAIN_LLM_API_KEY 未配置。")
     if config.enable_vision and not config.vision_model:
         warnings.append("ENABLE_VISION=true 但 VISION_MODEL 为空。")
     if config.summary_keep_recent_messages >= config.max_stored_messages_per_session:
@@ -134,43 +181,106 @@ def config_warnings(config: AiChatConfig) -> list[str]:
 
 
 def format_config_status(config: AiChatConfig) -> str:
+    use_chat_graph = config.enable_chat_graph_runtime
+    chat_runtime = "ChatGraph/RootGraph" if use_chat_graph else "兼容聊天链路"
+    chat_api_key = config.chat_llm_api_key if use_chat_graph else config.openai_api_key
+    chat_base_url = config.chat_llm_base_url if use_chat_graph else config.openai_base_url
+    chat_model = config.chat_llm_model if use_chat_graph else config.openai_model
+    chat_timeout = (
+        config.chat_llm_timeout_seconds if use_chat_graph else config.ai_timeout_seconds
+    )
     lines = [
         "配置状态：",
+        "",
+        "基础与入口：",
         f"机器人：{config.bot_name}",
-        f"主人 QQ：{_configured(config.bot_owner_qq)}",
+        f"主人：{_configured(config.bot_owner_qq)}",
         f"主人公开称呼：{_configured(config.bot_owner_public_name)}",
-        "",
-        f"聊天接口：{config.openai_base_url}",
-        f"聊天模型：{config.openai_model}",
-        f"API Key：{_configured(config.openai_api_key)}",
-        f"AI 超时：{config.ai_timeout_seconds} 秒",
-        f"温度：{config.ai_temperature}",
-        "",
-        f"视觉：{_on_off(config.enable_vision)}",
-        f"视觉接口：{config.vision_ollama_base_url}",
-        f"视觉模型：{config.vision_model}",
-        f"视觉超时：{config.vision_timeout_seconds} 秒",
-        f"视觉上下文：{config.vision_num_ctx}",
-        f"每轮图片：{config.vision_max_images}",
-        f"单图大小：{config.vision_max_image_bytes} 字节",
-        f"图片缓存 TTL：{config.vision_image_cache_ttl_seconds} 秒",
-        f"私聊图片等待：{config.vision_private_image_wait_seconds} 秒",
-        "",
         f"私聊：{_on_off(config.enable_private_chat)}",
         f"群聊：{_on_off(config.enable_group_chat)}",
-        f"主动回复：{_on_off(config.enable_group_auto_reply)}",
+        f"群主动回复：{_on_off(config.enable_group_auto_reply)}",
         f"主人转告：{_on_off(config.enable_owner_notifications)}",
+        f"聊天运行链路：{chat_runtime}",
+        "",
+        "聊天模型：",
+        f"Chat LLM：{_configured(chat_api_key and chat_model)}",
+        f"接口：{_redacted_url(chat_base_url)}",
+        f"模型：{chat_model or '未配置'}",
+        f"Key：{_configured(chat_api_key)}",
+        f"超时：{chat_timeout} 秒",
+        f"温度：{config.ai_temperature}",
+        "",
+        "MainAgent：",
+        f"入口：{_on_off(config.enable_main_agent)}",
+        f"仅主人：{_yes_no(config.main_agent_owner_only)}",
+        f"允许群聊：{_yes_no(config.main_agent_allow_group)}",
+        f"Main LLM：{_on_off(config.main_agent_use_llm)}",
+        f"Main LLM 接口：{_redacted_url(config.main_llm_base_url)}",
+        f"Main LLM 模型：{config.main_llm_model or '未配置'}",
+        f"Main LLM Key：{_configured(config.main_llm_api_key)}",
+        f"Main LLM 超时：{config.main_llm_timeout_seconds} 秒",
+        f"最大步骤：{config.main_agent_max_steps}",
+        f"主人写操作审批：{_on_off(config.main_agent_require_approval_for_writes)}",
+        "",
+        "记忆与 RAG：",
         f"记忆压缩：{_on_off(config.enable_memory_compression)}",
         f"上下文消息：{config.max_context_messages}",
-        f"每会话原文上限：{config.max_stored_messages_per_session}",
-        f"保留最近原文：{config.summary_keep_recent_messages}",
-        f"每次压缩条数：{config.summary_batch_messages}",
         f"摘要上下文：{config.max_session_summaries_in_context}",
         f"空窗场景摘要：{_on_off(config.enable_gap_scene_summaries)}",
-        f"空窗阈值：>{config.gap_scene_summary_1_threshold} / >{config.gap_scene_summary_2_threshold}",
         f"空窗摘要上下文：{config.max_gap_scene_summaries_in_context}",
-        f"主人手动长期记忆上下文：{_on_off(config.enable_long_term_memory_context)}",
+        f"手动长期记忆上下文：{_on_off(config.enable_long_term_memory_context)}",
         f"长期记忆上下文：{config.max_long_term_memories_in_context}",
+        f"MemoryRAG：{_on_off(config.enable_memory_rag)}",
+        f"普通聊天注入：{_on_off(config.memory_rag_inject_in_chat)}",
+        f"ProjectDocRAG：{_on_off(config.enable_project_doc_rag)}",
+        f"Embedding：{config.memory_rag_embedding_provider} / {config.memory_rag_embedding_model}",
+        f"Embedding 地址：{_redacted_url(config.memory_rag_embedding_base_url)}",
+        f"Embedding 维度：{config.memory_rag_embedding_dimension}",
+        "MemoryRAG top_k / min_score / context："
+        f"{config.memory_rag_top_k} / {config.memory_rag_min_score} / "
+        f"{config.memory_rag_max_context_chars}",
+        "ProjectDocRAG top_k / min_score / context："
+        f"{config.project_doc_rag_top_k} / {config.project_doc_rag_min_score} / "
+        f"{config.project_doc_rag_max_context_chars}",
+        "",
+        "视觉：",
+        f"功能：{_on_off(config.enable_vision)}",
+        f"服务地址：{_redacted_url(config.vision_ollama_base_url)}",
+        f"地址范围：{_service_address_scope(config.vision_ollama_base_url)}",
+        f"模型：{config.vision_model or '未配置'}",
+        f"超时：{config.vision_timeout_seconds} 秒",
+        f"上下文：{config.vision_num_ctx}",
+        f"每轮图片：{config.vision_max_images}",
+        f"单图上限：{_human_bytes(config.vision_max_image_bytes)}",
+        f"缓存 TTL：{config.vision_image_cache_ttl_seconds} 秒",
+        f"私聊图片等待：{config.vision_private_image_wait_seconds} 秒",
+        "",
+        "语音：",
+        f"功能：{_on_off(config.enable_tts)}",
+        f"服务地址：{_redacted_url(config.tts_service_url)}",
+        f"地址范围：{_service_address_scope(config.tts_service_url)}",
+        f"自动启动：{_on_off(config.tts_auto_start)}",
+        f"默认音色：{config.tts_voice}",
+        f"默认情绪：{config.tts_emotion}",
+        f"超时：{config.tts_timeout_seconds} 秒",
+        f"文本上限：{config.tts_max_chars} 字",
+        f"总时长上限：{config.tts_max_total_seconds} 秒",
+        f"冷却：{config.tts_cooldown_seconds} 秒",
+        "",
+        "MainAgent 高风险边界：",
+        f"Agent Web：{_on_off(config.enable_agent_web)}",
+        f"Shell：{_on_off(config.enable_agent_shell)}",
+        f"通用本地写：{_on_off(config.enable_agent_local_write)}",
+        f"外部写：{_on_off(config.enable_agent_external_write)}",
+        "主人管理写："
+        + (
+            "审批门控"
+            if config.main_agent_require_approval_for_writes
+            else "未要求审批"
+        ),
+        "",
+        "说明：以上是当前进程加载的配置值，不代表服务在线、模型已加载或端到端功能已经验证。",
+        "运行状态请使用 /agent 执行系统诊断任务，或对应的状态命令。",
     ]
     warnings = config_warnings(config)
     if warnings:
