@@ -92,6 +92,12 @@ _HTTP_ROUTE_MAPPINGS = (
         read_page="diagnostics",
     ),
     _OwnerConsoleHttpRouteMapping(
+        name="external-read",
+        resource="external-read",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read",
+        read_page="external_read",
+    ),
+    _OwnerConsoleHttpRouteMapping(
         name="memory",
         resource="memory",
         path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory",

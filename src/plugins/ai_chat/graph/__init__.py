@@ -32,6 +32,7 @@ from .diagnostics import (
     DiagnosticsNode,
     DiagnosticsState,
     DiagnosticsView,
+    diagnostics_node_sequence_for_view,
 )
 from .dev_context import (
     DEV_CONTEXT_NODE_SEQUENCE,
@@ -196,6 +197,7 @@ __all__ = [
     "DiagnosticsNode",
     "DiagnosticsState",
     "DiagnosticsView",
+    "diagnostics_node_sequence_for_view",
     "DEV_CONTEXT_NODE_SEQUENCE",
     "DEVELOPMENT_CONTEXT_REPORT_SYSTEM_PROMPT",
     "DevContextGraphExecution",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import types
 import unittest
 
@@ -15,6 +16,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         cls.main_agent_bridge = cls.modules["main_agent_bridge"]
         cls.owner_read_runtime = cls.modules["owner_read_runtime"]
         cls.owner_write_runtime = cls.modules["owner_write_runtime"]
+        cls.owner_agent_work_runtime = cls.modules["owner_agent_work_runtime"]
         cls.owner_runtime_factory = cls.modules["owner_runtime_factory"]
         cls.policy_risk = cls.modules["policy_risk"]
         cls.tool_registry = cls.modules["tool_registry"]
@@ -116,6 +118,34 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(
             work_runtime.work_spec("system_diagnostics_report").executor("overview"),
             "system diagnostics overview",
+        )
+        external_payload = self.owner_agent_work_runtime.ExternalReadReportPayload(
+            provider_name="fake_search",
+            result_count=0,
+            source_host_count=0,
+            dropped_result_count=0,
+            external_request_count=1,
+            response_truncated=False,
+            status_category="no_results",
+            error_category="none",
+            report_text="结果：未找到可用公开结果。",
+        )
+        external_factory = replace(
+            factory,
+            external_read_report_for_event=lambda _event, _query: external_payload,
+        )
+        external_runtime = external_factory.work_runtime(event)
+        self.assertEqual(
+            external_runtime.registered_work_types,
+            (
+                "development_context_report",
+                "system_diagnostics_report",
+                "external_read_report",
+            ),
+        )
+        self.assertIs(
+            external_runtime.work_spec("external_read_report").executor("public query"),
+            external_payload,
         )
         self.assertEqual(
             asyncio.run(factory.run_read_command(event, "bot_status", context)),

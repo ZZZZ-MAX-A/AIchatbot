@@ -205,6 +205,40 @@ class GraphContractTests(unittest.TestCase):
         )
         self.assertEqual(sequence[-1], self.diagnostics.DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY)
 
+    def test_diagnostics_views_have_explicit_minimal_node_sequences(self):
+        node = self.diagnostics.DiagnosticsNode
+        view = self.diagnostics.DiagnosticsView
+        expected = {
+            view.FULL: self.diagnostics.DIAGNOSTICS_NODE_SEQUENCE,
+            view.CONFIG: (node.READ_CONFIG_SNAPSHOT, node.RENDER_DIAGNOSTIC_REPLY),
+            view.VISION: (
+                node.READ_CONFIG_SNAPSHOT,
+                node.READ_IMAGE_CACHE_STATS,
+                node.RENDER_DIAGNOSTIC_REPLY,
+            ),
+            view.RECENT_ERRORS: (node.READ_RECENT_ERRORS, node.RENDER_DIAGNOSTIC_REPLY),
+            view.IMAGE_CACHE: (
+                node.READ_CONFIG_SNAPSHOT,
+                node.READ_IMAGE_CACHE_STATS,
+                node.RENDER_DIAGNOSTIC_REPLY,
+            ),
+            view.MEMORY: (node.READ_MEMORY_STATS, node.RENDER_DIAGNOSTIC_REPLY),
+            view.TTS: (
+                node.READ_CONFIG_SNAPSHOT,
+                node.CHECK_TTS_HEALTH,
+                node.RENDER_DIAGNOSTIC_REPLY,
+            ),
+        }
+
+        self.assertEqual(set(expected), set(view))
+        for selected_view, sequence in expected.items():
+            with self.subTest(view=selected_view):
+                self.assertEqual(
+                    self.diagnostics.diagnostics_node_sequence_for_view(selected_view),
+                    sequence,
+                )
+                self.assertEqual(sequence[-1], node.RENDER_DIAGNOSTIC_REPLY)
+
     def test_notification_node_sequence_checks_before_sending_owner_message(self):
         sequence = self.notification.NOTIFICATION_NODE_SEQUENCE
 

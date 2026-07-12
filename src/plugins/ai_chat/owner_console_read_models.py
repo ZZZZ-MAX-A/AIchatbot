@@ -92,12 +92,14 @@ class OwnerConsoleTaskRow:
     latest_event_summary: str
     pending_approval_ids: list[int] = field(default_factory=list)
     next_action: str = ""
+    work_type: str = ""
 
 
 @dataclass(frozen=True)
 class OwnerConsoleTaskList:
     generated_at: str
     status_filter: str | None
+    work_type_filter: str | None
     limit: int
     total_visible: int
     rows: list[OwnerConsoleTaskRow]
@@ -291,6 +293,63 @@ class OwnerConsoleMemorySnapshot:
     retrieval_executed: bool
     index_rebuild_executed: bool
     boundary: OwnerConsoleRuntimeBoundary
+
+
+@dataclass(frozen=True)
+class OwnerConsoleExternalReadDependencySnapshot:
+    httpx_version: str
+    httpcore_version: str
+    compatible: bool
+
+
+@dataclass(frozen=True)
+class OwnerConsoleExternalReadTaskSnapshot:
+    available: bool
+    task_id: int | None = None
+    task_status: str = ""
+    provider_name: str = ""
+    result_count: int | None = None
+    source_host_count: int | None = None
+    dropped_result_count: int | None = None
+    external_request_count: int | None = None
+    status_category: str = ""
+    error_category: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class OwnerConsoleExternalReadBoundary:
+    owner_private_strict_command_only: bool = True
+    main_llm_can_trigger: bool = False
+    ordinary_chat_can_trigger: bool = False
+    arbitrary_url_fetch_allowed: bool = False
+    ai_answer_enabled: bool = False
+    raw_content_enabled: bool = False
+    images_enabled: bool = False
+    retry_enabled: bool = False
+    fallback_enabled: bool = False
+    live_probe_executed: bool = False
+    external_request_executed: bool = False
+    query_exposed: bool = False
+    result_content_exposed: bool = False
+    source_url_exposed: bool = False
+    credential_value_exposed: bool = False
+
+
+@dataclass(frozen=True)
+class OwnerConsoleExternalReadSnapshot:
+    generated_at: str
+    enabled: bool
+    credential_configured: bool
+    executor_configured: bool
+    provider_name: str
+    search_depth: str
+    max_results: int
+    timeout_seconds: int
+    endpoint_host: str
+    dependencies: OwnerConsoleExternalReadDependencySnapshot
+    recent_task: OwnerConsoleExternalReadTaskSnapshot
+    boundary: OwnerConsoleExternalReadBoundary
 
 
 @dataclass(frozen=True)

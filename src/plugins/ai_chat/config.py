@@ -1,8 +1,10 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from .local_time import DEFAULT_BOT_TIMEZONE, timezone_for_name
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +25,17 @@ def _int_env(name: str, default: int) -> int:
     return int(value)
 
 
+def _security_int_env(name: str, default: int) -> int:
+    """Return an invalid fail-closed sentinel instead of breaking startup."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
 def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -36,13 +49,20 @@ def _csv_env(name: str) -> frozenset[str]:
     return frozenset(item for item in items if item)
 
 
+def _timezone_env(name: str) -> str:
+    value = os.getenv(name, DEFAULT_BOT_TIMEZONE).strip() or DEFAULT_BOT_TIMEZONE
+    timezone_for_name(value)
+    return value
+
+
 @dataclass(frozen=True)
 class AiChatConfig:
     bot_name: str
     bot_aliases: frozenset[str]
     bot_owner_qq: str
     bot_owner_public_name: str
-    openai_api_key: str
+    bot_timezone: str
+    openai_api_key: str = field(repr=False)
     openai_base_url: str
     openai_model: str
     ai_temperature: float
@@ -54,14 +74,16 @@ class AiChatConfig:
     main_agent_max_steps: int
     main_agent_require_approval_for_writes: bool
     enable_agent_web: bool
+    tavily_api_key: str = field(repr=False)
+    tavily_timeout_seconds: int
     enable_agent_local_write: bool
     enable_agent_external_write: bool
     enable_agent_shell: bool
-    main_llm_api_key: str
+    main_llm_api_key: str = field(repr=False)
     main_llm_base_url: str
     main_llm_model: str
     main_llm_timeout_seconds: int
-    chat_llm_api_key: str
+    chat_llm_api_key: str = field(repr=False)
     chat_llm_base_url: str
     chat_llm_model: str
     chat_llm_timeout_seconds: int
@@ -148,6 +170,7 @@ def load_config() -> AiChatConfig:
         bot_aliases=_csv_env("BOT_ALIASES"),
         bot_owner_qq=os.getenv("BOT_OWNER_QQ", "").strip(),
         bot_owner_public_name=os.getenv("BOT_OWNER_PUBLIC_NAME", "").strip(),
+        bot_timezone=_timezone_env("BOT_TIMEZONE"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
         openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
@@ -160,6 +183,8 @@ def load_config() -> AiChatConfig:
         main_agent_max_steps=_int_env("MAIN_AGENT_MAX_STEPS", 5),
         main_agent_require_approval_for_writes=_bool_env("MAIN_AGENT_REQUIRE_APPROVAL_FOR_WRITES", True),
         enable_agent_web=_bool_env("ENABLE_AGENT_WEB", False),
+        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+        tavily_timeout_seconds=_security_int_env("TAVILY_TIMEOUT_SECONDS", 10),
         enable_agent_local_write=_bool_env("ENABLE_AGENT_LOCAL_WRITE", False),
         enable_agent_external_write=_bool_env("ENABLE_AGENT_EXTERNAL_WRITE", False),
         enable_agent_shell=_bool_env("ENABLE_AGENT_SHELL", False),

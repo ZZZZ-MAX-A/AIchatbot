@@ -58,6 +58,12 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "approval_detail",
             ),
             ("diagnostics", "diagnostics", "/api/v1/owner-console/diagnostics", "diagnostics"),
+            (
+                "external-read",
+                "external-read",
+                "/api/v1/owner-console/external-read",
+                "external_read",
+            ),
             ("memory", "memory", "/api/v1/owner-console/memory", "memory"),
             (
                 "access-control",
@@ -104,9 +110,18 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
             rows["tasks.detail"].query_params,
             ["event_limit", "preview_limit"],
         )
+        self.assertEqual(
+            rows["tasks"].query_params,
+            ["status", "work_type", "limit"],
+        )
         self.assertEqual(rows["approvals.detail"].path_params, ["approval_id"])
         self.assertEqual(rows["settings"].query_params, [])
         self.assertFalse(rows["settings"].requires_context)
+        self.assertTrue(rows["external-read"].requires_context)
+        self.assertEqual(
+            rows["external-read"].read_model,
+            "OwnerConsoleExternalReadSnapshot",
+        )
 
     def test_http_response_and_error_envelopes_are_stable_and_json_safe(self):
         snapshot = (

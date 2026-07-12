@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import metadata
 import json
 from typing import Any, TypeAlias
 
@@ -15,6 +16,7 @@ from .agent_tasks import (
     AgentApproval,
     AgentTask,
     AgentTaskEvent,
+    agent_task_work_type,
     agent_approval_status_label,
     agent_task_status_label,
     count_agent_approvals,
@@ -29,6 +31,8 @@ from .agent_tasks import (
 from .access_store import AccessStore
 from .config import AiChatConfig
 from .database import utc_now
+from . import database as database_module
+from .external_read_status import latest_external_read_task_snapshot
 from .main_agent_observability import redacted_base_url
 from .owner_console_read_models import (
     OWNER_CONSOLE_SCHEMA_VERSION,
@@ -40,6 +44,10 @@ from .owner_console_read_models import (
     OwnerConsoleApprovalRow,
     OwnerConsoleContext,
     OwnerConsoleHealthSnapshot,
+    OwnerConsoleExternalReadBoundary,
+    OwnerConsoleExternalReadDependencySnapshot,
+    OwnerConsoleExternalReadSnapshot,
+    OwnerConsoleExternalReadTaskSnapshot,
     OwnerConsoleMemoryContextPolicy,
     OwnerConsoleMemoryCounts,
     OwnerConsoleMemoryRagSnapshot,
@@ -93,7 +101,7 @@ OWNER_CONSOLE_READ_ROUTE_SPECS = (
         runtime_method="build_task_list",
         read_model="OwnerConsoleTaskList",
         requires_context=True,
-        optional_params=("status", "limit"),
+        optional_params=("status", "work_type", "limit"),
     ),
     OwnerConsoleReadRouteSpec(
         page="task_detail",
@@ -139,6 +147,13 @@ OWNER_CONSOLE_READ_ROUTE_SPECS = (
             "main_agent_observation_lines",
             "root_graph_observation_lines",
         ),
+    ),
+    OwnerConsoleReadRouteSpec(
+        page="external_read",
+        response_page="external_read",
+        runtime_method="build_external_read_snapshot",
+        read_model="OwnerConsoleExternalReadSnapshot",
+        requires_context=True,
     ),
     OwnerConsoleReadRouteSpec(
         page="memory",
@@ -202,6 +217,13 @@ SENSITIVE_KEY_FRAGMENTS = (
     "cookie",
 )
 DEFAULT_PREVIEW_LIMIT = 240
+OWNER_CONSOLE_WORK_TYPES = frozenset(
+    {
+        "development_context_report",
+        "system_diagnostics_report",
+        "external_read_report",
+    }
+)
 ConfigProvider: TypeAlias = Callable[[], AiChatConfig]
 AccessProvider: TypeAlias = Callable[[], AccessStore]
 RoleCardsProvider: TypeAlias = Callable[[], list[Any]]
@@ -400,11 +422,13 @@ class OwnerConsoleReadRuntime:
         context: OwnerConsoleContext,
         *,
         status: str | None = None,
+        work_type: str | None = None,
         limit: int = 20,
     ) -> OwnerConsoleTaskList:
         return build_owner_console_task_list(
             context,
             status=status,
+            work_type=work_type,
             limit=limit,
         )
 
@@ -478,6 +502,15 @@ class OwnerConsoleReadRuntime:
             rag_document_stats=self.rag_document_stats_provider(),
         )
 
+    def build_external_read_snapshot(
+        self,
+        context: OwnerConsoleContext,
+    ) -> OwnerConsoleExternalReadSnapshot:
+        return build_owner_console_external_read_snapshot(
+            self.config_provider(),
+            context,
+        )
+
     def build_health_snapshot(
         self,
         *,
@@ -523,6 +556,94 @@ def _stat_int(stats: dict[str, Any] | None, key: str) -> int:
         return int(stats.get(key, 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _installed_version(distribution: str) -> str:
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:
+        return "not_installed"
+
+
+def _version_in_range(
+    value: str,
+    *,
+    minimum: tuple[int, ...],
+    maximum: tuple[int, ...],
+) -> bool:
+    try:
+        numeric = tuple(int(part) for part in value.split(".")[:3])
+    except ValueError:
+        return False
+    return minimum <= numeric < maximum
+
+
+def build_owner_console_external_read_snapshot(
+    config: AiChatConfig,
+    context: OwnerConsoleContext,
+    *,
+    httpx_version: str | None = None,
+    httpcore_version: str | None = None,
+) -> OwnerConsoleExternalReadSnapshot:
+    selected_httpx_version = httpx_version or _installed_version("httpx")
+    selected_httpcore_version = httpcore_version or _installed_version("httpcore")
+    dependencies_compatible = (
+        _version_in_range(
+            selected_httpx_version,
+            minimum=(0, 28, 1),
+            maximum=(0, 29, 0),
+        )
+        and _version_in_range(
+            selected_httpcore_version,
+            minimum=(1, 0, 9),
+            maximum=(1, 1, 0),
+        )
+    )
+    task = latest_external_read_task_snapshot(
+        session_key=context.session_key,
+        user_id=context.user_id,
+        database_path=database_module.DATABASE_PATH,
+    )
+    recent_task = (
+        OwnerConsoleExternalReadTaskSnapshot(available=False)
+        if task is None
+        else OwnerConsoleExternalReadTaskSnapshot(
+            available=True,
+            task_id=task.task_id,
+            task_status=task.task_status,
+            provider_name=task.provider_name,
+            result_count=task.result_count,
+            source_host_count=task.source_host_count,
+            dropped_result_count=task.dropped_result_count,
+            external_request_count=task.external_request_count,
+            status_category=task.status_category,
+            error_category=task.error_category,
+            updated_at=task.updated_at,
+        )
+    )
+    credential_configured = bool(config.tavily_api_key)
+    return OwnerConsoleExternalReadSnapshot(
+        generated_at=utc_now(),
+        enabled=config.enable_agent_web,
+        credential_configured=credential_configured,
+        executor_configured=(
+            config.enable_agent_web
+            and credential_configured
+            and dependencies_compatible
+        ),
+        provider_name="tavily",
+        search_depth="basic",
+        max_results=3,
+        timeout_seconds=config.tavily_timeout_seconds,
+        endpoint_host="api.tavily.com",
+        dependencies=OwnerConsoleExternalReadDependencySnapshot(
+            httpx_version=selected_httpx_version,
+            httpcore_version=selected_httpcore_version,
+            compatible=dependencies_compatible,
+        ),
+        recent_task=recent_task,
+        boundary=OwnerConsoleExternalReadBoundary(),
+    )
 
 
 def _visible_items(items: frozenset[str], *, limit: int) -> tuple[list[str], bool]:
@@ -986,6 +1107,12 @@ def _task_row(
     event_kind, event_summary = _event_summary(latest_agent_task_event(task.id))
     goal_preview, _ = _preview_text(task.goal, limit=preview_limit)
     result_preview, _ = _preview_text(task.result, limit=preview_limit)
+    candidate_work_type = agent_task_work_type(task.id)
+    safe_work_type = (
+        candidate_work_type
+        if candidate_work_type in OWNER_CONSOLE_WORK_TYPES
+        else ""
+    )
     return OwnerConsoleTaskRow(
         task_id=task.id,
         title=task.title,
@@ -999,6 +1126,7 @@ def _task_row(
         latest_event_summary=event_summary,
         pending_approval_ids=pending_approval_ids,
         next_action=_next_action_for_task(task, related_approvals),
+        work_type=safe_work_type,
     )
 
 
@@ -1006,12 +1134,16 @@ def build_owner_console_task_list(
     context: OwnerConsoleContext,
     *,
     status: str | None = None,
+    work_type: str | None = None,
     limit: int = 20,
 ) -> OwnerConsoleTaskList:
+    if work_type is not None and work_type not in OWNER_CONSOLE_WORK_TYPES:
+        raise ValueError("unsupported owner console work type")
     tasks = list_agent_tasks(
         session_key=context.session_key,
         user_id=context.user_id,
         status=status,
+        work_type=work_type,
         limit=limit,
     )
     rows: list[OwnerConsoleTaskRow] = []
@@ -1027,6 +1159,7 @@ def build_owner_console_task_list(
     return OwnerConsoleTaskList(
         generated_at=utc_now(),
         status_filter=status,
+        work_type_filter=work_type,
         limit=_safe_limit(limit),
         total_visible=len(rows),
         rows=rows,

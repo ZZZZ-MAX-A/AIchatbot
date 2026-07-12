@@ -180,6 +180,47 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertIn("service-down", reply)
 
+    def test_format_vision_status_suggests_manual_runner_reload_for_low_quality_repeat(self):
+        status = self.diagnostics.OllamaStatus(
+            self.diagnostics.CheckResult(True, "正常"),
+            True,
+            ("qwen2.5vl:3b",),
+        )
+        probe = self.vision.VisionInferenceCheck(
+            False,
+            "失败：Ollama 返回低质量重复内容，用时 1.3 秒",
+        )
+
+        with patch.object(self.diagnostics, "check_ollama", return_value=status):
+            with patch.object(self.diagnostics, "check_vision_inference", return_value=probe):
+                reply = self.diagnostics.format_vision_status(
+                    self.make_vision_config(),
+                    {"total": 0, "private": 0, "group": 0},
+                )
+
+        self.assertIn("Runner 恢复建议：", reply)
+        self.assertIn("当前视觉 runner 可能处于异常状态", reply)
+        self.assertIn("ollama stop qwen2.5vl:3b", reply)
+        self.assertIn("本次诊断未执行该命令，也未自动重试", reply)
+
+    def test_format_vision_status_does_not_suggest_runner_reload_for_other_failures(self):
+        status = self.diagnostics.OllamaStatus(
+            self.diagnostics.CheckResult(True, "正常"),
+            True,
+            ("qwen2.5vl:3b",),
+        )
+        probe = self.vision.VisionInferenceCheck(False, "失败：Ollama 识别超时")
+
+        with patch.object(self.diagnostics, "check_ollama", return_value=status):
+            with patch.object(self.diagnostics, "check_vision_inference", return_value=probe):
+                reply = self.diagnostics.format_vision_status(
+                    self.make_vision_config(),
+                    {"total": 0, "private": 0, "group": 0},
+                )
+
+        self.assertNotIn("Runner 恢复建议：", reply)
+        self.assertNotIn("ollama stop", reply)
+
     def test_vision_troubleshoot_findings_accepts_chinese_normal_status(self):
         findings = self.diagnostics.vision_troubleshoot_findings(
             vision_lines=[
@@ -187,7 +228,7 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
                 "Ollama 服务：正常",
                 "视觉模型：qwen2.5vl:3b",
                 "模型存在：是",
-                "推理自检：成功，用时 0.5 秒",
+                "推理自检：正常，用时 0.5 秒，返回 74 字",
             ],
             recent_errors=[],
             root_lines=[
@@ -219,6 +260,24 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
         self.assertIn("识图错误计数", joined)
         self.assertIn("低质量识图输出", joined)
         self.assertNotIn("未发现明确", joined)
+
+    def test_vision_troubleshoot_findings_include_manual_runner_reload_for_repeat(self):
+        findings = self.diagnostics.vision_troubleshoot_findings(
+            vision_lines=[
+                "视觉识图：开启",
+                "Ollama 服务：正常",
+                "视觉模型：qwen2.5vl:3b",
+                "模型存在：是",
+                "推理自检：失败：Ollama 返回低质量重复内容，用时 1.3 秒",
+            ],
+            recent_errors=[],
+            root_lines=[],
+        )
+
+        joined = "\n".join(findings)
+        self.assertIn("当前视觉 runner 可能处于异常状态", joined)
+        self.assertIn("ollama stop qwen2.5vl:3b", joined)
+        self.assertIn("本次诊断未执行该命令，也未自动重试", joined)
 
     def test_vision_troubleshoot_findings_suppresses_secondary_checks_when_disabled(self):
         findings = self.diagnostics.vision_troubleshoot_findings(

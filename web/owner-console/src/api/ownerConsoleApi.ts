@@ -7,6 +7,7 @@ import type {
   OwnerConsoleApprovalDetailEnvelope,
   OwnerConsoleApprovalListEnvelope,
   OwnerConsoleDiagnosticsEnvelope,
+  OwnerConsoleExternalReadEnvelope,
   OwnerConsoleHealth,
   OwnerConsoleMemoryEnvelope,
   OwnerConsoleOverviewEnvelope,
@@ -25,6 +26,7 @@ const allowedPaths = new Set([
   `${API_BASE}/routes`,
   `${API_BASE}/overview`,
   `${API_BASE}/diagnostics`,
+  `${API_BASE}/external-read`,
   `${API_BASE}/memory`,
   `${API_BASE}/access-control`,
   `${API_BASE}/settings`,
@@ -180,6 +182,20 @@ export const ownerConsoleApi = {
     return envelope;
   },
 
+  async getExternalRead(
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleExternalReadEnvelope> {
+    const envelope = await getJson<OwnerConsoleExternalReadEnvelope>(
+      `${API_BASE}/external-read`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
   async getAccessControl(
     params: { item_limit: number },
     signal?: AbortSignal,
@@ -208,7 +224,7 @@ export const ownerConsoleApi = {
   },
 
   async getTasks(
-    params: { status?: string | null; limit: number },
+    params: { status?: string | null; work_type?: string | null; limit: number },
     signal?: AbortSignal,
   ): Promise<OwnerConsoleTaskListEnvelope> {
     const envelope = await getJson<OwnerConsoleTaskListEnvelope>(

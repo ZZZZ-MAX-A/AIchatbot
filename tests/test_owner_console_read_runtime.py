@@ -117,7 +117,9 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(claimed)
         self.assertIsNotNone(task)
         self.assertEqual(task_list.status_filter, "running")
+        self.assertIsNone(task_list.work_type_filter)
         self.assertEqual([row.task_id for row in task_list.rows], [task_id])
+        self.assertEqual(task_list.rows[0].work_type, "development_context_report")
         self.assertEqual(task_list.rows[0].status, self.agent_tasks.AGENT_TASK_RUNNING)
         self.assertEqual(task_list.rows[0].status_label, "运行中")
         self.assertEqual(task_list.rows[0].next_action, "monitor_running_task")
@@ -128,6 +130,67 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             [event.kind for event in task_detail.events],
             ["created", "work_claimed", "work_started"],
         )
+        self.assertEqual(task_detail.task.work_type, "development_context_report")
+
+    def test_task_work_type_is_filtered_in_sql_and_unknown_values_are_hidden(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            external_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="主人显式提供的外部只读查询（原文未持久化）",
+            )
+            self.agent_tasks.claim_agent_task_for_work(
+                task_id=external_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="external_read_report",
+                query_summary="主人显式提供的外部只读查询（原文未持久化）",
+            )
+            polluted_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="newer task",
+            )
+            self.agent_tasks.claim_agent_task_for_work(
+                task_id=polluted_task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="query=must-not-leak",
+                query_summary="fixed placeholder",
+            )
+            context = self.owner_console.OwnerConsoleContext(
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+            filtered = self.owner_console.build_owner_console_task_list(
+                context,
+                work_type="external_read_report",
+                limit=1,
+            )
+            all_tasks = self.owner_console.build_owner_console_task_list(
+                context,
+                limit=5,
+            )
+
+        self.assertEqual(filtered.work_type_filter, "external_read_report")
+        self.assertEqual([row.task_id for row in filtered.rows], [external_task_id])
+        rows = {row.task_id: row for row in all_tasks.rows}
+        self.assertEqual(rows[external_task_id].work_type, "external_read_report")
+        self.assertEqual(rows[polluted_task_id].work_type, "")
+        self.assertNotIn(
+            "must-not-leak",
+            json.dumps(
+                self.owner_console.owner_console_to_jsonable(rows[polluted_task_id]),
+                ensure_ascii=False,
+            ),
+        )
+        with self.assertRaises(ValueError):
+            self.owner_console.build_owner_console_task_list(
+                context,
+                work_type="unknown_work",
+            )
 
     def test_task_and_approval_details_include_redacted_previews(self):
         temp_dir, patcher = self.temp_database()
@@ -717,6 +780,7 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             "approvals",
             "approval_detail",
             "diagnostics",
+            "external_read",
             "memory",
             "access_control",
             "settings",

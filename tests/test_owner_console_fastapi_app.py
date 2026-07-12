@@ -87,6 +87,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/settings",
                 "/api/v1/owner-console/memory",
                 "/api/v1/owner-console/diagnostics",
+                "/api/v1/owner-console/external-read",
             ],
         )
 
@@ -113,7 +114,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(data["allowed_methods"], ["GET"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 10)
+        self.assertEqual(data["route_count"], 11)
         rows = {row["name"]: row for row in data["rows"]}
         self.assertEqual(
             rows["routes"]["path"],
@@ -139,6 +140,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["settings"]["http_api_enabled"])
         self.assertTrue(rows["memory"]["http_api_enabled"])
         self.assertTrue(rows["diagnostics"]["http_api_enabled"])
+        self.assertTrue(rows["external-read"]["http_api_enabled"])
         self.assertEqual(rows["tasks.detail"]["path_params"], ["task_id"])
         self.assertEqual(
             rows["approvals.detail"]["path_params"],
@@ -386,7 +388,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/tasks?status=pending&limit=20"
             )
             running_response = self.client.get(
-                "/api/v1/owner-console/tasks?status=running&limit=20"
+                "/api/v1/owner-console/tasks?status=running&work_type=development_context_report&limit=20"
             )
             approvals_response = self.client.get(
                 "/api/v1/owner-console/approvals?status=pending&limit=20"
@@ -418,7 +420,15 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIsNone(running_payload["error"])
         running_data = running_payload["data"]
         self.assertEqual(running_data["status_filter"], "running")
+        self.assertEqual(
+            running_data["work_type_filter"],
+            "development_context_report",
+        )
         self.assertEqual([row["task_id"] for row in running_data["rows"]], [running_task_id])
+        self.assertEqual(
+            running_data["rows"][0]["work_type"],
+            "development_context_report",
+        )
         self.assertEqual(running_data["rows"][0]["status_label"], "运行中")
         self.assertEqual(running_data["rows"][0]["next_action"], "monitor_running_task")
 
@@ -456,11 +466,19 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             invalid_limit = self.client.get(
                 "/api/v1/owner-console/approvals?limit=abc"
             )
+            invalid_work_type = self.client.get(
+                "/api/v1/owner-console/tasks?work_type=unknown_work"
+            )
 
         self.assertEqual(invalid_status.status_code, 400)
         status_payload = invalid_status.json()
         self.assertEqual(status_payload["resource"], "tasks")
         self.assertEqual(status_payload["error"]["code"], "bad_request")
+        self.assertEqual(invalid_work_type.status_code, 400)
+        self.assertEqual(
+            invalid_work_type.json()["error"]["details"]["field"],
+            "work_type",
+        )
         self.assertEqual(status_payload["error"]["details"]["field"], "status")
         self.assertIn("pending", status_payload["error"]["details"]["allowed"])
         self.assertFalse(status_payload["web_write_enabled"])
@@ -847,6 +865,85 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         self.assertNotIn("secret owner message", rendered)
         self.assertNotIn("secret assistant message", rendered)
+
+    def test_external_read_endpoint_is_local_safe_and_exposes_only_metadata(self):
+        temp_dir, patcher = self.temp_database()
+        safe_result = "\n".join(
+            [
+                "外部只读查询已完成。",
+                "Provider：tavily。",
+                "结果数：3。",
+                "来源主机数：2。",
+                "丢弃结果数：1。",
+                "外部请求：1。",
+                "状态类别：completed。",
+                "错误类别：none。",
+            ]
+        )
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_AGENT_WEB": "true",
+                "TAVILY_API_KEY": "tvly-secret-must-not-leak",
+                "TAVILY_TIMEOUT_SECONDS": "10",
+            },
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                title="外部只读查询报告",
+                goal="主人显式提供的外部只读查询（原文未持久化）",
+            )
+            _, claimed = self.agent_tasks.claim_agent_task_for_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="external_read_report",
+                query_summary="主人显式提供的外部只读查询（原文未持久化）",
+            )
+            _, completed = self.agent_tasks.complete_agent_task_work(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+                work_type="external_read_report",
+                result=safe_result,
+            )
+
+            response = self.client.get("/api/v1/owner-console/external-read")
+
+        self.assertTrue(claimed)
+        self.assertTrue(completed)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resource"], "external-read")
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["web_write_enabled"])
+        data = payload["data"]
+        self.assertTrue(data["enabled"])
+        self.assertTrue(data["credential_configured"])
+        self.assertTrue(data["executor_configured"])
+        self.assertEqual(data["provider_name"], "tavily")
+        self.assertEqual(data["search_depth"], "basic")
+        self.assertEqual(data["max_results"], 3)
+        self.assertEqual(data["endpoint_host"], "api.tavily.com")
+        self.assertTrue(data["dependencies"]["compatible"])
+        self.assertTrue(data["recent_task"]["available"])
+        self.assertEqual(data["recent_task"]["task_id"], task_id)
+        self.assertEqual(data["recent_task"]["result_count"], 3)
+        self.assertEqual(data["recent_task"]["external_request_count"], 1)
+        self.assertFalse(data["boundary"]["live_probe_executed"])
+        self.assertFalse(data["boundary"]["external_request_executed"])
+        self.assertFalse(data["boundary"]["query_exposed"])
+        self.assertFalse(data["boundary"]["result_content_exposed"])
+        self.assertFalse(data["boundary"]["source_url_exposed"])
+        self.assertFalse(data["boundary"]["credential_value_exposed"])
+
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("tvly-secret-must-not-leak", rendered)
+        self.assertNotIn("主人显式提供", rendered)
+        self.assertNotIn("https://", rendered.lower())
 
     def test_diagnostics_endpoint_is_read_only_and_skips_external_probes(self):
         temp_dir, patcher = self.temp_database()

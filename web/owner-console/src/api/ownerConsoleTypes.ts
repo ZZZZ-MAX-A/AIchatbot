@@ -85,6 +85,7 @@ export type OwnerConsoleTaskRow = {
   latest_event_summary: string;
   pending_approval_ids: number[];
   next_action: string;
+  work_type: string;
 };
 
 export type OwnerConsoleTaskEventRow = {
@@ -248,6 +249,62 @@ export type OwnerConsoleMemorySnapshot = {
 export type OwnerConsoleMemoryEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleMemorySnapshot>;
 
+export type OwnerConsoleExternalReadDependencySnapshot = {
+  httpx_version: string;
+  httpcore_version: string;
+  compatible: boolean;
+};
+
+export type OwnerConsoleExternalReadTaskSnapshot = {
+  available: boolean;
+  task_id: number | null;
+  task_status: string;
+  provider_name: string;
+  result_count: number | null;
+  source_host_count: number | null;
+  dropped_result_count: number | null;
+  external_request_count: number | null;
+  status_category: string;
+  error_category: string;
+  updated_at: string;
+};
+
+export type OwnerConsoleExternalReadBoundary = {
+  owner_private_strict_command_only: boolean;
+  main_llm_can_trigger: boolean;
+  ordinary_chat_can_trigger: boolean;
+  arbitrary_url_fetch_allowed: boolean;
+  ai_answer_enabled: boolean;
+  raw_content_enabled: boolean;
+  images_enabled: boolean;
+  retry_enabled: boolean;
+  fallback_enabled: boolean;
+  live_probe_executed: boolean;
+  external_request_executed: boolean;
+  query_exposed: boolean;
+  result_content_exposed: boolean;
+  source_url_exposed: boolean;
+  credential_value_exposed: boolean;
+};
+
+export type OwnerConsoleExternalReadSnapshot = {
+  generated_at: string;
+  enabled: boolean;
+  credential_configured: boolean;
+  executor_configured: boolean;
+  provider_name: string;
+  search_depth: string;
+  max_results: number;
+  timeout_seconds: number;
+  endpoint_host: string;
+  dependencies: OwnerConsoleExternalReadDependencySnapshot;
+  recent_task: OwnerConsoleExternalReadTaskSnapshot;
+  boundary: OwnerConsoleExternalReadBoundary;
+};
+
+export type OwnerConsoleExternalReadEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleExternalReadSnapshot>;
+
 export type OwnerConsoleAccessList = {
   label: string;
   count: number;
@@ -300,6 +357,7 @@ export type OwnerConsoleSettingsEnvelope =
 export type OwnerConsoleTaskList = {
   generated_at: string;
   status_filter: string | null;
+  work_type_filter: string | null;
   limit: number;
   total_visible: number;
   rows: OwnerConsoleTaskRow[];

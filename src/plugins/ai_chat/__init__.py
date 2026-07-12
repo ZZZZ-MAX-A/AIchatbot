@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from time import monotonic
 
@@ -68,6 +69,10 @@ from .development_context_report import (
     with_development_context_retrieval_limits,
 )
 from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
+from .external_read_status import (
+    external_read_task_snapshot_lines,
+    latest_external_read_task_snapshot,
+)
 from .graph import (
     ActorRole,
     ChatState,
@@ -137,6 +142,11 @@ from .llm import (
     ask_llm,
     load_persona_prompt,
 )
+from .local_time import (
+    finalize_local_time_chat_reply,
+    history_with_trusted_local_time_context,
+    resolve_local_time_request,
+)
 from .lc import (
     create_main_agent_lc_call_handler,
     create_main_agent_tool_summary_lc_handler,
@@ -160,7 +170,9 @@ from .owner_agent_work_runtime import (
     SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
     format_owner_agent_work_execution,
     parse_development_context_report_command,
+    parse_external_read_report_command,
     parse_system_diagnostics_report_command,
+    prepare_external_read_command,
     SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE,
 )
 from .owner_runtime_factory import OwnerRuntimeFactory
@@ -878,8 +890,13 @@ def status_lines() -> list[str]:
     ]
 
 
-def memory_status_lines(event: MessageEvent | None = None) -> list[str]:
-    stats = memory_stats()
+def memory_status_lines(
+    event: MessageEvent | None = None,
+    *,
+    stats: dict[str, object] | None = None,
+) -> list[str]:
+    if stats is None:
+        stats = memory_stats()
     manual = manual_memory_stats()
     gap = gap_scene_summary_stats()
     trials = trial_stats()
@@ -1694,7 +1711,9 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         elif current.view == DiagnosticsView.IMAGE_CACHE:
             current.reply_text = format_image_cache_status(config, current.image_cache_stats)
         elif current.view == DiagnosticsView.MEMORY:
-            current.reply_text = "\n".join(memory_status_lines(event))
+            current.reply_text = "\n".join(
+                memory_status_lines(event, stats=current.memory_stats)
+            )
         elif current.view == DiagnosticsView.TTS:
             current.reply_text = "\n".join(tts_status_reply_lines(current.tts_health))
         else:
@@ -3786,16 +3805,32 @@ async def generate_chat_text_response(
     prompt_context: ChatPromptContext,
     user_content: ChatUserContent,
 ) -> ChatRuntimeResult | None:
+    local_time_request = resolve_local_time_request(
+        clean_text(event),
+        timezone_name=config.bot_timezone,
+    )
+    llm_history = list(prompt_context.history)
+    if local_time_request is not None:
+        llm_history = history_with_trusted_local_time_context(
+            prompt_context.history,
+            local_time_request,
+        )
     try:
         reply = await ask_llm(
             config,
-            prompt_context.history,
+            llm_history,
             llm_user_text(event, user_content.for_llm),
         )
     except Exception as exc:
         log_ai_event_error(exc, event)
+        if local_time_request is not None:
+            fallback = local_time_request.deterministic_reply
+            return ChatRuntimeResult(reply=fallback, stored_assistant=fallback)
         await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
         return None
+
+    if local_time_request is not None:
+        reply = finalize_local_time_chat_reply(local_time_request, reply)
 
     return ChatRuntimeResult(reply=reply, stored_assistant=reply)
 
@@ -4593,6 +4628,8 @@ def main_agent_help_reply() -> str:
             "/agent 执行系统诊断任务：视觉",
             "/agent 执行系统诊断任务：语音",
             "/agent 执行系统诊断任务：记忆与RAG",
+            "/agent 执行外部只读查询：<问题>（主人私聊严格命令）",
+            "/agent 联网状态（纯本地，不发起外部请求）",
             "/agent 新增任务：<目标>",
             "/agent 把“目标”加入任务",
             "/agent 任务状态",
@@ -4748,6 +4785,7 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊显式 /agent 执行系统诊断任务：视觉，同步执行已注册的 system_diagnostics_report/vision；按首故障层返回确定性视觉区详情，不做真实视觉推理。",
             "允许：主人私聊显式 /agent 执行系统诊断任务：语音，同步执行已注册的 system_diagnostics_report/voice；按首故障层返回确定性语音区详情，不生成或发送测试语音。",
             "允许：主人私聊显式 /agent 执行系统诊断任务：记忆与RAG，同步执行已注册的 system_diagnostics_report/memory_rag；按首故障层返回本地索引和安全观测，不执行 embedding、召回或重建。",
+            "预留：主人私聊严格命令 /agent 执行外部只读查询：<问题>；必须同时启用 ENABLE_AGENT_WEB 并配置固定 provider，当前不由 Main LLM 选择，也不接受任意 URL。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
@@ -5112,6 +5150,30 @@ async def run_system_diagnostics_report_for_event(
     return build_system_diagnostics_overview(evidence)
 
 
+def _configured_external_read_report_for_event():
+    if not config.enable_agent_web:
+        return None
+
+    # Keep the reviewed HTTP stack out of the default-disabled startup path.
+    try:
+        from .tavily_external_read import create_configured_tavily_external_read_executor
+    except ImportError:
+        return None
+
+    executor = create_configured_tavily_external_read_executor(
+        feature_enabled=config.enable_agent_web,
+        api_key=config.tavily_api_key,
+        timeout_seconds=config.tavily_timeout_seconds,
+    )
+    if executor is None:
+        return None
+
+    async def execute_for_event(_event, query: str):
+        return await executor(query)
+
+    return execute_for_event
+
+
 def owner_runtime_factory() -> OwnerRuntimeFactory:
     return OwnerRuntimeFactory(
         session_key_from_event=session_key,
@@ -5147,7 +5209,58 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         preference_memory_type=MANUAL_PREFERENCE_TYPE,
         development_context_report_for_event=run_development_context_report_for_event,
         system_diagnostics_report_for_event=run_system_diagnostics_report_for_event,
+        external_read_report_for_event=_configured_external_read_report_for_event(),
     )
+
+
+def external_read_status_reply(event: MessageEvent) -> str:
+    factory = owner_runtime_factory()
+    executor_configured = factory.external_read_report_for_event is not None
+    timeout_valid = (
+        isinstance(config.tavily_timeout_seconds, int)
+        and not isinstance(config.tavily_timeout_seconds, bool)
+        and 1 <= config.tavily_timeout_seconds <= 15
+    )
+    try:
+        httpx_version = package_version("httpx")
+    except PackageNotFoundError:
+        httpx_version = "未安装"
+    try:
+        httpcore_version = package_version("httpcore")
+    except PackageNotFoundError:
+        httpcore_version = "未安装"
+    http_stack_compatible = (
+        httpx_version.startswith("0.28.")
+        and httpcore_version.startswith("1.0.")
+    )
+    task_snapshot = latest_external_read_task_snapshot(
+        session_key=session_key(event),
+        user_id=user_id(event),
+    )
+    lines = [
+        "MainAgent 联网状态：",
+        f"开关：{'开启' if config.enable_agent_web else '关闭'}",
+        "Provider：Tavily Basic（固定）",
+        f"凭据：{'已配置' if config.tavily_api_key else '未配置'}",
+        f"Executor：{'已装配' if executor_configured else '未装配'}",
+        f"超时：{config.tavily_timeout_seconds} 秒（{'有效' if timeout_valid else '无效'}）",
+        f"HTTP 栈：httpx {httpx_version} / httpcore {httpcore_version}",
+        f"HTTP 栈兼容性：{'已验证范围' if http_stack_compatible else '未验证范围'}",
+        "搜索深度：basic",
+        "最多结果：3",
+        "AI answer：关闭",
+        "Raw content：关闭",
+        "Images：关闭",
+        "每 operation 请求：1",
+        "自动重试：关闭",
+        "Fallback：关闭",
+        "任意 URL 抓取：关闭",
+        "普通聊天可触发：否",
+        "Main LLM 可见：否",
+        "Live 探针：未执行；本状态查询不访问 Tavily、不消耗 credit。",
+    ]
+    lines.extend(external_read_task_snapshot_lines(task_snapshot))
+    return "\n".join(lines)
 
 
 async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
@@ -5177,6 +5290,13 @@ async def run_main_agent_explicit_work_command(
     event: MessageEvent,
     query: str,
 ) -> str | None:
+    if query.strip() in {"联网状态", "外部只读查询状态"}:
+        if not isinstance(event, PrivateMessageEvent):
+            return "联网状态只允许主人私聊通过 /agent 显式查看。"
+        if not is_owner(config, event):
+            return "联网状态查询被拒绝：需要主人权限。"
+        return external_read_status_reply(event)
+
     work_query = parse_development_context_report_command(query)
     if work_query is not None:
         if not isinstance(event, PrivateMessageEvent):
@@ -5189,6 +5309,24 @@ async def run_main_agent_explicit_work_command(
         execution = await owner_runtime_factory().execute_development_context_report(
             event,
             work_query,
+        )
+        return format_owner_agent_work_execution(execution)
+
+    external_query = parse_external_read_report_command(query)
+    if external_query is not None:
+        factory = owner_runtime_factory()
+        decision = prepare_external_read_command(
+            external_query,
+            is_private_session=isinstance(event, PrivateMessageEvent),
+            owner_authorized=is_owner(config, event),
+            feature_enabled=config.enable_agent_web,
+            executor_configured=(factory.external_read_report_for_event is not None),
+        )
+        if not decision.allowed:
+            return decision.reply_text
+        execution = await factory.execute_external_read_report(
+            event,
+            decision.normalized_query,
         )
         return format_owner_agent_work_execution(execution)
 
