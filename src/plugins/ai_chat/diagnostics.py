@@ -403,6 +403,19 @@ def _vision_inference_check_for_status(
     return check_vision_inference(config)
 
 
+def vision_runner_recovery_suggestion(model: str) -> list[str]:
+    selected_model = model.strip() or "<视觉模型>"
+    return [
+        "服务和模型均可用，但推理返回低质量重复内容；当前视觉 runner 可能处于异常状态。",
+        f"可在 Bot 所在机器手动执行：ollama stop {selected_model}",
+        "该命令只卸载当前模型，下一次视觉请求会重新加载；本次诊断未执行该命令，也未自动重试。",
+    ]
+
+
+def _vision_inference_is_low_quality_repeat(inference: VisionInferenceCheck) -> bool:
+    return "低质量重复内容" in inference.detail
+
+
 def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]) -> str:
     status = check_ollama(config) if config.enable_vision else OllamaStatus(CheckResult(False, "视觉未开启"), None)
     lines = [
@@ -424,7 +437,20 @@ def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]
     ]
     inference = _vision_inference_check_for_status(config, status)
     lines.insert(7, f"推理自检：{inference.detail}")
-    if config.enable_vision and not status.service.ok:
+    if (
+        config.enable_vision
+        and status.service.ok
+        and status.model_exists is True
+        and _vision_inference_is_low_quality_repeat(inference)
+    ):
+        lines.extend(
+            [
+                "",
+                "Runner 恢复建议：",
+                *vision_runner_recovery_suggestion(config.vision_model),
+            ]
+        )
+    elif config.enable_vision and not status.service.ok:
         lines.extend(
             [
                 "",
@@ -494,9 +520,14 @@ def vision_troubleshoot_findings(
             findings.append(f"视觉模型不存在或未拉取：{model_line or '请检查视觉模型配置'}")
         inference_line = _first_line_with_prefix(vision_lines, "推理自检：")
         if inference_line and not any(
-            marker in inference_line.lower() for marker in ("ok", "成功", "跳过")
+            marker in inference_line.lower()
+            for marker in ("ok", "正常", "成功", "跳过")
         ):
             findings.append(f"视觉推理自检需要关注：{inference_line}")
+            if "低质量重复内容" in inference_line and "模型存在：是" in joined_vision:
+                model_line = _first_line_with_prefix(vision_lines, "视觉模型：")
+                model = model_line.partition("：")[2].strip()
+                findings.extend(vision_runner_recovery_suggestion(model))
 
     if _vision_detail_metric_positive(root_lines, "errors"):
         findings.append("最近 RootGraph 视觉观测里出现过识图错误计数，请查看 RootGraph 证据。")

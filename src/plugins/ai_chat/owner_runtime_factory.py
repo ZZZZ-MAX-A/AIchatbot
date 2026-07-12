@@ -14,6 +14,8 @@ from .owner_agent_runtime import (
 )
 from .owner_agent_work_runtime import (
     DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
+    EXTERNAL_READ_REPORT_WORK_TYPE,
+    ExternalReadReportPayload,
     SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
     OwnerAgentWorkContext,
     OwnerAgentWorkExecution,
@@ -45,6 +47,10 @@ DevelopmentContextReportForEvent: TypeAlias = Callable[
 SystemDiagnosticsReportForEvent: TypeAlias = Callable[
     [Any, str],
     SystemDiagnosticsPayload | Awaitable[SystemDiagnosticsPayload],
+]
+ExternalReadReportForEvent: TypeAlias = Callable[
+    [Any, str],
+    ExternalReadReportPayload | Awaitable[ExternalReadReportPayload],
 ]
 
 
@@ -83,6 +89,7 @@ class OwnerRuntimeFactory:
     preference_memory_type: str = "preference_summary"
     development_context_report_for_event: DevelopmentContextReportForEvent | None = None
     system_diagnostics_report_for_event: SystemDiagnosticsReportForEvent | None = None
+    external_read_report_for_event: ExternalReadReportForEvent | None = None
 
     def agent_context(self, event: Any) -> OwnerAgentContext:
         return OwnerAgentContext(
@@ -158,6 +165,7 @@ class OwnerRuntimeFactory:
         if diagnostics_executor is None:
             raise RuntimeError("system_diagnostics_report executor was not injected")
         context = self.agent_context(event)
+        external_executor = self.external_read_report_for_event
         return OwnerAgentWorkRuntime(
             context=OwnerAgentWorkContext(
                 session_key=context.session_key,
@@ -170,6 +178,11 @@ class OwnerRuntimeFactory:
             system_diagnostics_report_executor=lambda scope: diagnostics_executor(
                 event,
                 scope,
+            ),
+            external_read_report_executor=(
+                (lambda query: external_executor(event, query))
+                if external_executor is not None
+                else None
             ),
         )
 
@@ -191,6 +204,18 @@ class OwnerRuntimeFactory:
         return await self.work_runtime(event).execute(
             work_type=SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE,
             query=scope,
+        )
+
+    async def execute_external_read_report(
+        self,
+        event: Any,
+        query: str,
+    ) -> OwnerAgentWorkExecution:
+        if self.external_read_report_for_event is None:
+            raise RuntimeError("external_read_report executor was not injected")
+        return await self.work_runtime(event).execute(
+            work_type=EXTERNAL_READ_REPORT_WORK_TYPE,
+            query=query,
         )
 
     def run_task_command(

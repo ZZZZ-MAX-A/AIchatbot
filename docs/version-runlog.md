@@ -18,6 +18,127 @@
   docs/project-rag-usage.md 保留为本地 RAG / DevContextGraph / Codex 恢复上下文手册。
 ```
 
+## 2026-07-11 MainAgent external-read 安全设计
+
+状态：设计和前三刀本地合同已建立，未新增阶段编号；未启用任何真实联网工具。
+
+本次完成：
+
+```text
+确认 system_diagnostics_report 是第二个正式只读工作任务；其基本稳定后的原主线是 external-read security design，而不是第二个审批写操作。
+确认 RiskLevel.READ_EXTERNAL、PolicyEngine enable_external_read 和 ENABLE_AGENT_WEB 已存在，但当前没有 external-read ToolSpec/provider/executor/sanitizer。
+新增 docs/main-agent-external-read-security-design.md。
+第一版建议固定 external_search provider，禁止 arbitrary URL fetch。
+第一版建议 llm_visible=false，只允许主人私聊严格命令；外部读取不创建写审批，也不保存 pending intent。
+定义三重门控：工具注册、ENABLE_AGENT_WEB、严格主人命令。
+定义 query 数据最小化、HTTPS/provider allowlist、IPv4/IPv6/metadata 阻断、redirect/DNS rebinding、响应预算和 prompt injection 边界。
+定义 external_read_report 候选 work type 和独立 sanitizer；不得复用 external_request_count=0 的 system diagnostics sanitizer。
+定义从纯策略、fake provider、正式 work、严格 QQ 命令到真实固定 provider live 的分步路线。
+第一刀纯安全策略随后已实现：新增 external_read_security.py 和无网络参数化测试。
+query 规范化后限制 300 字，并拒绝 URL、本地路径、API key/token/Authorization/cookie/JWT 等常见秘密形态。
+固定 endpoint 只允许 HTTPS/443、无 userinfo/query/fragment，且 host 必须精确命中 allowlist。
+解析后地址必须为公网 IPv4/IPv6；除 is_global 外显式拒绝 private、loopback、link-local、multicast、reserved 和 unspecified。
+ExternalReadBudget 固定单请求、0 redirect、0 retry，最多 3 结果、256 KiB 和 15 秒。
+实现不执行 DNS、HTTP、provider 调用或 ToolRegistry 注册。
+第二刀 fake provider 链随后已实现：新增 external_search.py、async ExternalSearchProvider 协议、结构化 response/result、确定性 sanitizer 和 execute_external_search。
+executor 在 provider 前执行 query policy，provider 只调用一次，并按 budget 强制总超时和 response_bytes 上限。
+外部结果移除 HTML/script/style/template/noscript、控制字符和双向控制符；title/snippet/time 限长。
+提示注入结果替换为中性占位；输出只显示 source_host，不显示完整 URL/query/fragment。
+结果按 title + host 去重并最多保留 3 条；非法结果按条丢弃，全无可用结果时返回证据不足而不扩大查询或重试。
+确定性 formatter 不调用 LLM，不写 RAG/记忆，不打开来源页面，也不发送额外 QQ。
+fake provider 只存在于测试；生产模块没有 DNS/HTTP client、ToolSpec 或 QQ 接线。
+第三刀正式 work runtime 随后已实现：新增可选注入的 external_read_report，risk_level=read_external，requires_approval=false。
+未注入 external executor 时，生产 OwnerRuntimeFactory 仍只注册既有两个本地只读 work；当前 QQ 不会看到 external-read。
+独立 ExternalReadReportPayload/sanitizer 强制单次外部请求、最多 3 条结果、合法 provider 枚举、来源/丢弃计数和成功/无结果状态一致性。
+外部 query 只传给本次 executor；任务 goal 和 work event 使用固定占位摘要，不保存 query 原文。
+title、snippet 和 source host 明细只进入本次经过清理的临时回复；持久化结果只包含 provider 名称和安全计数。
+无结果为 done；执行器原始异常只保存异常类型和固定错误类别，不保存异常正文。
+第三刀仍只注入 fake executor 做 runtime 测试，没有严格 QQ parser、ToolSpec、DNS、HTTP 或真实 provider。
+第四刀严格 QQ 命令随后已实现：只接受 /agent 执行外部只读查询：<问题>。
+命令按主人私聊、ENABLE_AGENT_WEB、固定 executor 和 query policy 顺序门控；任何拒绝都发生在任务创建和 provider 调用之前。
+生产 OwnerRuntimeFactory 仍不注入 external executor，ENABLE_AGENT_WEB 默认 false；因此当前命令只返回关闭或 provider 未配置提示。
+fake executor 只用于测试可选注册和 work 合同；未给普通聊天或 Main LLM ToolRegistry 注册 external-read。
+没有 pending intent、模糊“可以”确认、额外 QQ、DNS、HTTP、真实 provider 或自动重试。
+```
+
+当前边界：
+
+```text
+ENABLE_AGENT_WEB 继续 false。
+不注册 web_search、web_fetch 或 arbitrary URL 工具。
+不发起真实外部请求。
+不让 Main LLM 自由选择 external read。
+不把外部内容写入 MemoryRAG、ProjectDocRAG 或长期记忆。
+不新增额外 QQ、自动 retry、浏览器自动化、下载、Web 写操作或诊断自动修复。
+P2.40b、P2.41 和 P2.42 继续未批准。
+```
+
+第一刀验证：
+
+```text
+external-read 纯策略：11 tests OK
+现有 PolicyEngine：10 tests OK
+external-search fake executor：9 tests OK
+MainAgent bridge：54 tests OK
+external-read 正式 work runtime：22 tests OK
+全量回归：438 tests OK
+Python AST：108 files OK
+git diff --check：通过
+第四刀严格入口聚焦：OwnerAgentWorkRuntime 25 tests、MainAgent bridge 54 tests、QQ 边界 12 tests OK
+第四刀完成后全量回归：442 tests OK
+```
+
+## 2026-07-11 MainAgent 局部诊断按 view 采集收口
+
+状态：本地实现和回归已完成，未新增阶段编号；尚未单独进行主人 QQ live。
+
+本次完成：
+
+```text
+新增内部 docs/main-agent-command-capability-audit.md，逐项记录 /agent 路由、工具、provider、读写、LLM/RAG、副作用、输出和测试。
+DiagnosticsGraph 从所有 view 共用全量节点序列，改为完整的 DiagnosticsView -> node sequence 映射。
+FULL 保持原有 config/runtime/TTS/errors/memory/image cache 全量采集。
+CONFIG 只经过 config 和 render。
+VISION 只经过 config、image cache 和 render；既有视觉 formatter 继续负责视觉检查。
+RECENT_ERRORS 只经过 errors 和 render。
+IMAGE_CACHE 只经过 config、image cache 和 render。
+MEMORY 只经过 memory stats 和 render，并把已采集 stats 传给 formatter，避免基础统计重复查询。
+TTS 只经过 config、TTS health 和 render。
+所有 DiagnosticsView 枚举成员都必须出现在显式映射中；新增参数化测试验证局部 view 不调用无关 handler。
+```
+
+边界：
+
+```text
+不改变 QQ 命令名称、确定性语义分类或现有输出格式。
+不改变正式 system_diagnostics_report 的四个 scope。
+不增加外部请求、深度探针、自动下钻、修复、写操作或额外 QQ。
+formatter 自身已有的合法读取仍保留；node trace 不能被误读为 renderer 内部零读取。
+```
+
+测试：
+
+```text
+Graph 合同：21 tests OK
+Graph runner：46 tests OK
+诊断 formatter：10 tests OK
+MainAgent bridge + QQ/RAG boundary + system diagnostics + formal work runtime：124 tests OK
+全量回归：412 tests OK（补充 runner 建议后）
+Python AST：104 files OK
+git diff --check：通过
+```
+
+补充 live 现象与提示边界：
+
+```text
+主人确认 Ollama Model location 已指向 D:\OllamaModels，单实例、模型存在和显存余量均正常。
+qwen2.5vl:3b 曾在真实图片后持续返回低质量重复内容；手动执行 ollama stop qwen2.5vl:3b 后，固定自检恢复为正常、返回 74 字，随后真实 QQ 图片和再次自检均成功。
+/agent 查看视觉状态 和 /agent 完整排查图片识别问题 现在只在服务/模型可用且推理明确为低质量重复内容时提示“runner 可能处于异常状态”。
+提示给出手动命令 ollama stop qwen2.5vl:3b，并明确只卸载模型、下次请求重新加载；诊断不自动执行、不自动重试。
+超时、服务不可达、模型不存在等其他失败不会误用 runner 恢复建议。
+相关聚焦回归 121 tests OK；全量回归 412 tests OK。
+```
+
 ## v1.5 MemoryRAG embedding 自检
 
 状态：已落地。`/记忆状态` 和 `/RAG状态` 现在会显示当前 MemoryRAG embedding 链路的真实自检结果。
@@ -6547,6 +6668,165 @@ chat_commit 新增视觉描述统计字段：
 ```text
 $env:PYTHONPATH='tests'; .\.venv\Scripts\python.exe -m unittest tests.test_memory_rag_qq_boundary -v
 Ran 6 tests OK
+```
+
+## MainAgent external-read：Tavily 配置与 executor 装配
+
+状态：生产条件接线已打开，认证 executor 和主人 QQ strict command live 均已完成。
+
+本次完成：
+```text
+新增 TAVILY_API_KEY（配置 repr 脱敏）和 TAVILY_TIMEOUT_SECONDS=10。
+现有 OpenAI/Main/Chat API Key 同步改为不进入配置 repr。
+新增未注册的 create_tavily_external_read_executor 装配 factory。
+固定把 ExternalSearchExecution 映射为 ExternalReadReportPayload。
+成功和无结果均保持 external_request_count=1；无二次请求、retry 或 fallback。
+fake transport 集成测试验证 Basic 固定参数、最多 3 条、关闭 answer/raw content/images。
+测试验证 Key、raw_content、完整 URL 不进入临时 report。
+为内部 AutoBackend 路径声明 httpx 0.28.x / httpcore 1.0.x 兼容窗口。
+最新定向配置/Tavily/QQ 边界/MainAgent bridge 92 tests OK。
+全量回归 465 tests OK；115 个 Python 文件 AST/尾随空白检查通过；git diff --check 通过。
+生产 OwnerRuntimeFactory 已增加延迟、条件接线：默认关闭时不导入 Tavily HTTP 模块。
+开关 true 但 Key/超时非法或 Tavily 依赖导入失败时失败关闭，不创建任务或网络请求。
+TAVILY_TIMEOUT_SECONDS 非数字时配置加载为安全哨兵 0，Bot 可启动但 executor 保持未配置。
+普通聊天和 Main LLM ToolRegistry 仍无 external-read 工具。
+```
+
+生产边界：
+```text
+ENABLE_AGENT_WEB 已由主人明确批准在本地 .env 打开。
+真实 TAVILY_API_KEY 仅存在于被 Git 忽略的本地 .env；示例文件继续为空。
+插件入口只在 ENABLE_AGENT_WEB=true 时延迟导入并条件注入 Tavily executor。
+普通聊天和 Main LLM ToolRegistry 不可触发。
+已按主人预算发起唯一一次 Tavily Basic 认证请求：3 条结果、3 个来源、0 丢弃、external_request_count=1。
+认证 harness 与随后主人 QQ live 是两个独立 operation；每个 operation 均为一次请求，无自动 retry、fallback 或来源页抓取；未 commit 或 push。
+tracked files 和 Bot 日志均未发现真实 Key 或 Authorization header。
+主人随后反馈 QQ live 能够成功发送；正式 external-read 任务 #43 为 done。
+任务 #43 事件链为 created、work_claimed、work_started、work_finished。
+持久化 goal/event input 使用固定原文未持久化占位，只保存 provider、请求数和状态等安全元数据；未发现 URL、Bearer 或 Key 前缀。
+```
+
+## MainAgent external-read：QQ live 后结果质量优化
+
+状态：已落地，未新增联网请求。
+
+```text
+新增保守来源类型：中国政府域名、已识别的官方文档域名、中央媒体域名、一般公开来源。
+域名匹配使用 host/subdomain 边界，docs.python.org.evil.example 不会被标为官方文档。
+时间敏感 query 增加临时核验提示；缺失 published_at 明确显示未提供。
+QQ 结果改为标题、类型、来源、时间、摘要分层格式，继续不展示完整 URL。
+Tavily content 额外清理反引号和 ¶，仍固定最多 360 字符。
+request_timeout、provider_unavailable、response_too_large、invalid response 和 sanitizer 等错误改为中文安全回复。
+新增 /agent 联网状态：仅主人私聊、纯本地、不请求 Tavily、不消耗 credit。
+ChatAgent、普通聊天、角色卡、情感表达、Main LLM external-read 可见性均未改变。
+定向 external-search/Tavily/work/QQ 边界 59 tests OK；MainAgent/config 80 tests OK。
+全量回归 469 tests OK。
+```
+
+## MainAgent external-read：个人信息、日期与 provider 错误收口
+
+状态：已落地，未新增 Tavily 请求。
+
+```text
+Query policy 新增邮箱、明确手机号/电话、QQ号和身份证号拒绝。
+保留 RFC 9110、CVE-2026-12345 和无标签产品编号，避免宽泛长数字误伤。
+published_at 只接受有效 ISO 类日期并规范为 YYYY-MM-DD；无效日期不展示。
+发布日期字段加入提示注入检测，命中时整条外部结果中和。
+Tavily 401/403 -> authentication_failed；429 -> rate_limited；503 等 -> provider_unavailable。
+鉴权失败和限流分别使用中文安全回复，不记录 response body 或原始异常。
+/agent 联网状态新增 httpx/httpcore 实际版本和已验证兼容范围判断；状态查询仍不联网。
+ChatAgent、普通聊天、角色卡、情感表达和 Main LLM external-read 可见性未改变。
+定向 security/search/Tavily/work/QQ 边界 74 tests OK。
+全量回归 473 tests OK。
+```
+
+## MainAgent external-read：Unicode 注入与最近任务安全快照
+
+状态：已落地，未新增 Tavily 请求。
+
+```text
+外部可见文本新增 Unicode NFKC 规范化。
+提示注入检测新增 compact 检测副本，覆盖全角英文、拆分空白、零宽字符、有限标点、双向字符和 HTML 标签分段。
+新增 external_read_status 纯只读模块，SQLite mode=ro、当前 session/user、固定任务标题、limit 1。
+最近任务只展示 ID、白名单状态、provider、安全计数、类别和合法 ISO 更新时间。
+数据库任意 status/updated_at 污染文本不会回显；缺失或损坏时安全显示无可用元数据。
+/agent 联网状态不读取 query、goal、事件正文或结果详情，不访问 Tavily、不消耗 credit。
+ChatAgent、普通聊天、角色卡、情感表达和 Main LLM external-read 可见性未改变。
+定向 external-search/status/QQ/work 60 tests OK。
+全量回归 479 tests OK。
+主人随后在 QQ live 验证 /agent 联网状态成功；本地兼容性与最近正式任务安全快照已加载生效。
+该状态命令未发起 Tavily 请求，不消耗 credit；主人未提供新的 external-read 任务 ID，因此不臆造编号。
+```
+
+## Owner Console：external-read 只读观测页
+
+状态：已落地，未新增 Tavily 请求或 Web 写操作。
+
+```text
+新增 GET /api/v1/owner-console/external-read，并纳入统一 HTTP/read-model 路由契约。
+新增独立“联网查询”页面、侧栏入口和 Dashboard 摘要卡片。
+页面展示 Tavily Basic、本地开关、凭据存在性、executor 就绪状态、timeout、httpx/httpcore 兼容性和最近正式任务安全元数据。
+接口不返回 Key、query、goal、标题、摘要、完整 URL、事件正文、原始响应或原始异常。
+接口通过 SQLite mode=ro 按当前主人 session/user 和固定任务标题读取最近任务，不执行实时 Tavily probe，不消耗 credit。
+安全边界明确显示 Main LLM/普通聊天/任意 URL/retry/fallback/AI answer/raw content/images 均未开放。
+修复正式 work 持久化把换行压为空格后，最近任务安全元数据无法解析的问题；解析仍只接受 provider、计数、状态类别、错误类别和合法时间白名单。
+Owner Console 继续只有 GET；/docs、/redoc、/openapi.json 继续关闭；web/owner-console/dist 继续不提交。
+全量回归 481 tests OK；Python AST 116 files OK。
+前端生产构建、GET-only guard、12 tests 和 git diff --check 通过。
+受当前会话浏览器控制接口缺失影响，本轮未完成真实浏览器视觉点击验收；生产构建和路由/组件契约已验证。
+```
+
+## Owner Console：任务 work type 标签与筛选
+
+状态：已落地，未新增外部请求或 Web 写操作。
+
+```text
+OwnerConsoleTaskRow 新增 work_type，OwnerConsoleTaskList 新增 work_type_filter。
+只展示 development_context_report、system_diagnostics_report、external_read_report 三个正式只读 work type。
+未知、污染或未注册的事件 tool_name 不作为类型标签回显。
+GET /api/v1/owner-console/tasks 新增可选 work_type 参数，并严格拒绝白名单外值。
+数据库查询通过 agent_task_events 的 work_claimed 精确 EXISTS 条件先筛选再 LIMIT，避免较旧联网任务被较新普通任务挤出。
+前端任务页增加研发上下文、系统诊断、联网查询类型筛选和类型 badge；任务详情摘要同步展示安全 work type。
+筛选只读取本地 SQLite，不访问 Tavily、不消耗 credit。
+全量回归 482 tests OK；Python AST 116 files OK。
+前端生产构建、GET-only guard、12 tests 和 git diff --check 通过。
+```
+
+## ChatAgent：本地日期、星期和时间
+
+状态：已落地，已改为 ChatAgent 角色化表达，尚待主人 QQ live 验收。
+
+```text
+新增 BOT_TIMEZONE，第一版只允许 Asia/Shanghai，默认无需修改现有 .env。
+当前 Windows Python 环境缺少 IANA tzdata，因此采用等价的固定中国标准时间 UTC+8，不新增依赖或网络下载。
+新增纯本地 LocalTimeSnapshot、显式意图解析、可信 Prompt 上下文和确定性回退格式化。
+支持今天星期几/周几/礼拜几、今天几号/几月几日、日期+星期、现在几点、当前年份。
+明确时间问题在 generate_chat_text_response 内生成可信本地事实，并把 system context 追加到本轮 history 副本后正常调用 ChatAgent；当前角色卡负责自然表达。
+原 ChatPromptContext history 不被修改，内部时间事实不作为用户文本、聊天历史或 RAG 内容持久化。
+模型回复按 intent 校验正确日期、星期、年份或小时分钟；错误值、冲突值、空回复或超长回复统一回退到确定性答案。
+Chat LLM 调用异常时记录既有安全错误并直接使用本地回退，不把简单日期问题变成 AI 调用失败提示。
+日期能力调用现有 Chat LLM，但不调用 MainAgent、Tavily、MemoryRAG 或 ProjectDocRAG，不消耗 Tavily credit；远程 Chat LLM 不增加本地 GPU 显存。
+每条命中消息只读取一次时钟，先转换为 Asia/Shanghai，再从同一不可变快照生成日期和星期。
+命令消息、明天星期几、指定历史日期和更宽泛的自然问题不被第一版误拦截。
+无效时区配置和 naive 测试时钟明确失败，不静默使用系统时区。
+全量回归 490 tests OK；Python AST 118 files OK；git diff --check 通过。
+```
+
+## ChatAgent：爱可角色卡表达与外观补充
+
+状态：已落地，尚待主人 QQ live 验收。
+
+```text
+当前 active role card 仍为 aike，没有修改 MainAgent、系统提示或其他角色卡。
+外观新增：身高约 155 厘米、胸围约 B 罩杯，保留经典黑白女仆装和 18 岁既有设定。
+主人和非主人普通回复默认写得稍长，通常使用 2 到 3 句；明确极简、详细格式或安全边界时可按请求调整。
+普通回复至少包含一处中文圆括号动作或内心描述。
+括号内凡指代角色自身，只能使用“爱可”或“爱可的”，禁止“我”“我的”“我们”等第一人称代词。
+括号外对白继续按主人/非主人模式使用既有称谓、自称、结巴和距离感规则。
+主人和非主人全部示例已同步改写，避免旧的一句式、无动作示例覆盖新规则。
+新增角色卡合同测试，扫描外观、句数规则、括号自称和所有示例动作描述。
+MainAgent 继续保持中性、无角色身份、无括号动作旁白；本次角色卡修改只影响普通 ChatAgent。
+全量回归 493 tests OK；Python AST 119 files OK；git diff --check 通过。
 ```
 
 ## 后续整理规则

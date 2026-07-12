@@ -20,6 +20,11 @@ from .development_context_report import (
     DevelopmentContextReportPayload,
     redact_development_context_sensitive_text,
 )
+from .external_read_security import (
+    ExternalReadPolicyCategory,
+    ExternalReadPolicyError,
+    normalize_external_read_query,
+)
 from .system_diagnostics_report import (
     STATUS_LABELS,
     STATUS_ORDER,
@@ -58,6 +63,12 @@ SYSTEM_DIAGNOSTICS_REPORT_DISPLAY_NAME = "系统诊断报告"
 SYSTEM_DIAGNOSTICS_REPORT_RISK_LEVEL = "read_local"
 SYSTEM_DIAGNOSTICS_REPORT_COMMAND_PREFIX = "执行系统诊断任务"
 SYSTEM_DIAGNOSTICS_UNSUPPORTED_SCOPE = "unsupported"
+EXTERNAL_READ_REPORT_WORK_TYPE = "external_read_report"
+EXTERNAL_READ_REPORT_DISPLAY_NAME = "外部只读查询报告"
+EXTERNAL_READ_REPORT_RISK_LEVEL = "read_external"
+EXTERNAL_READ_REPORT_RESPONSE_LIMIT = 3200
+EXTERNAL_READ_REPORT_QUERY_SUMMARY = "主人显式提供的外部只读查询（原文未持久化）"
+EXTERNAL_READ_REPORT_COMMAND_PREFIX = "执行外部只读查询"
 
 SYSTEM_DIAGNOSTICS_SCOPE_ALIASES = {
     "overview": SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
@@ -92,7 +103,75 @@ class SanitizedAgentWorkResult:
     response_text: str
 
 
+@dataclass(frozen=True)
+class ExternalReadReportPayload:
+    provider_name: str
+    result_count: int
+    source_host_count: int
+    dropped_result_count: int
+    external_request_count: int
+    response_truncated: bool
+    status_category: str
+    error_category: str
+    report_text: str
+
+
+@dataclass(frozen=True)
+class ExternalReadCommandDecision:
+    allowed: bool
+    normalized_query: str = ""
+    reply_text: str = ""
+
+
 WorkResultSanitizer = Callable[[object], SanitizedAgentWorkResult]
+
+
+_EXTERNAL_READ_ERROR_REPLIES = {
+    ExternalReadPolicyCategory.REQUEST_TIMEOUT: (
+        "外部只读查询未完成：固定搜索 provider 请求超时。"
+        "本次未自动重试，也未切换其他 provider。"
+    ),
+    ExternalReadPolicyCategory.PROVIDER_UNAVAILABLE: (
+        "外部只读查询未完成：固定搜索 provider 当前不可用。"
+        "本次未自动重试，也未回退其他服务。"
+    ),
+    ExternalReadPolicyCategory.AUTHENTICATION_FAILED: (
+        "外部只读查询未完成：Tavily 凭据未通过鉴权。"
+        "请检查本地 Key 或在官方控制台轮换凭据；本次未自动重试。"
+    ),
+    ExternalReadPolicyCategory.RATE_LIMITED: (
+        "外部只读查询未完成：Tavily 当前返回限流。"
+        "本次未自动重试，也未切换其他 provider。"
+    ),
+    ExternalReadPolicyCategory.RESPONSE_TOO_LARGE: (
+        "外部只读查询未完成：provider 响应超过本地安全上限，已拒绝处理。"
+        "原始响应未持久化。"
+    ),
+    ExternalReadPolicyCategory.INVALID_PROVIDER_RESPONSE: (
+        "外部只读查询未完成：provider 返回结构不符合固定协议，已安全拒绝。"
+        "原始响应和异常未写入任务记录。"
+    ),
+    ExternalReadPolicyCategory.SANITIZATION_FAILED: (
+        "外部只读查询未完成：外部内容未通过安全清洗，已拒绝返回。"
+        "原始内容未持久化。"
+    ),
+    ExternalReadPolicyCategory.UNSAFE_RESOLVED_ADDRESS: (
+        "外部只读查询未完成：provider 地址未通过公网安全校验，本次未发送请求。"
+    ),
+    ExternalReadPolicyCategory.UNSAFE_PROVIDER_ENDPOINT: (
+        "外部只读查询未完成：固定 provider endpoint 未通过安全校验，本次未发送请求。"
+    ),
+    ExternalReadPolicyCategory.INVALID_BUDGET: (
+        "外部只读查询未完成：本地请求预算配置无效，本次未发送请求。"
+    ),
+}
+
+
+def format_external_read_policy_error(error: ExternalReadPolicyError) -> str:
+    return _EXTERNAL_READ_ERROR_REPLIES.get(
+        error.category,
+        "外部只读查询未完成：请求未通过本地安全策略。未自动重试或回退其他服务。",
+    )
 
 
 @dataclass(frozen=True)
@@ -111,6 +190,7 @@ class AgentWorkSpec:
     result_sanitizer: WorkResultSanitizer
     requires_approval: bool
     result_limit: int
+    persisted_query_summary: str | None
 
 
 @dataclass(frozen=True)
@@ -150,10 +230,85 @@ def parse_system_diagnostics_report_command(query: str) -> str | None:
     return None
 
 
+def parse_external_read_report_command(query: str) -> str | None:
+    stripped = query.strip()
+    if stripped == EXTERNAL_READ_REPORT_COMMAND_PREFIX:
+        return ""
+    for separator in ("：", ":"):
+        prefix = f"{EXTERNAL_READ_REPORT_COMMAND_PREFIX}{separator}"
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return None
+
+
+def prepare_external_read_command(
+    query: str,
+    *,
+    is_private_session: bool,
+    owner_authorized: bool,
+    feature_enabled: bool,
+    executor_configured: bool,
+) -> ExternalReadCommandDecision:
+    if not is_private_session:
+        return ExternalReadCommandDecision(
+            allowed=False,
+            reply_text="外部只读查询只允许主人私聊通过 /agent 严格命令执行。",
+        )
+    if not owner_authorized:
+        return ExternalReadCommandDecision(
+            allowed=False,
+            reply_text="外部只读查询被拒绝：需要主人权限。",
+        )
+    if not feature_enabled:
+        return ExternalReadCommandDecision(
+            allowed=False,
+            reply_text=(
+                "外部只读查询未启用：ENABLE_AGENT_WEB=false；"
+                "未创建任务，也未调用 provider。"
+            ),
+        )
+    if not executor_configured:
+        return ExternalReadCommandDecision(
+            allowed=False,
+            reply_text=(
+                "外部只读查询暂不可用：固定 provider 尚未配置；"
+                "未创建任务，也未发起外部请求。"
+            ),
+        )
+    try:
+        normalized_query = normalize_external_read_query(query)
+    except ExternalReadPolicyError as exc:
+        reason = {
+            ExternalReadPolicyCategory.INVALID_QUERY: (
+                "查询格式无效；请只提交明确的公开信息问题，不要包含 URL"
+            ),
+            ExternalReadPolicyCategory.SENSITIVE_QUERY: (
+                "查询疑似包含凭据、本地路径或其他敏感内容；请移除后重试"
+            ),
+        }.get(exc.category, "查询未通过本地安全策略")
+        return ExternalReadCommandDecision(
+            allowed=False,
+            reply_text=(
+                f"外部只读查询被拒绝：{exc.category.value}（{reason}）；"
+                "未创建任务，也未调用 provider。"
+            ),
+        )
+    return ExternalReadCommandDecision(
+        allowed=True,
+        normalized_query=normalized_query,
+    )
+
+
 def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str:
     task = execution.task
     is_system_diagnostics = execution.work_type == SYSTEM_DIAGNOSTICS_REPORT_WORK_TYPE
-    task_label = "系统诊断任务" if is_system_diagnostics else "研发上下文任务"
+    is_external_read = execution.work_type == EXTERNAL_READ_REPORT_WORK_TYPE
+    if is_system_diagnostics:
+        task_label = "系统诊断任务"
+    elif is_external_read:
+        task_label = "外部只读查询任务"
+    else:
+        task_label = "研发上下文任务"
     if task is None:
         return f"{task_label}未创建；未执行任何执行器。"
 
@@ -169,7 +324,12 @@ def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str
         "记忆与RAG区详情；"
         "未开放深度探针、外部请求、自动重试或修复。"
         if is_system_diagnostics
-        else "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。"
+        else (
+            "边界：只执行已注册的单次固定 provider 外部读取；未自动重试、打开来源页面、"
+            "写入 RAG/记忆或发送额外 QQ。"
+            if is_external_read
+            else "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。"
+        )
     )
 
     return "\n".join(
@@ -572,6 +732,108 @@ def _sanitize_system_diagnostics_report(
     raise ValueError("system diagnostics executor returned invalid payload")
 
 
+def _validate_external_read_count(
+    value: object,
+    *,
+    field_name: str,
+    maximum: int | None = None,
+) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"external read {field_name} is invalid")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"external read {field_name} exceeded its limit")
+    return value
+
+
+def _sanitize_external_read_response(text: str) -> str:
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("external read report response must be non-empty")
+    normalized_lines: list[str] = []
+    for line in text.splitlines():
+        without_controls = "".join(
+            " " if ord(character) < 32 else character for character in line
+        )
+        normalized_lines.append(without_controls.rstrip())
+    normalized = redact_development_context_sensitive_text(
+        "\n".join(normalized_lines).strip()
+    )
+    if not normalized:
+        raise ValueError("external read report response became empty")
+    return normalized[:EXTERNAL_READ_REPORT_RESPONSE_LIMIT].rstrip()
+
+
+def _sanitize_external_read_report(
+    raw_result: object,
+) -> SanitizedAgentWorkResult:
+    if not isinstance(raw_result, ExternalReadReportPayload):
+        raise ValueError("external read executor returned invalid payload")
+
+    if not isinstance(raw_result.provider_name, str):
+        raise ValueError("external read provider name is invalid")
+    provider_name = raw_result.provider_name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", provider_name):
+        raise ValueError("external read provider name is invalid")
+
+    result_count = _validate_external_read_count(
+        raw_result.result_count,
+        field_name="result count",
+        maximum=3,
+    )
+    source_host_count = _validate_external_read_count(
+        raw_result.source_host_count,
+        field_name="source host count",
+        maximum=3,
+    )
+    dropped_result_count = _validate_external_read_count(
+        raw_result.dropped_result_count,
+        field_name="dropped result count",
+    )
+    external_request_count = _validate_external_read_count(
+        raw_result.external_request_count,
+        field_name="external request count",
+    )
+    if external_request_count != 1:
+        raise ValueError("external read must use exactly one external request")
+    if source_host_count > result_count:
+        raise ValueError("external read source host count exceeds result count")
+    if not isinstance(raw_result.response_truncated, bool):
+        raise ValueError("external read response truncated flag is invalid")
+
+    if not isinstance(raw_result.status_category, str):
+        raise ValueError("external read status category is invalid")
+    status_category = raw_result.status_category.strip().lower()
+    if status_category not in {"completed", "no_results"}:
+        raise ValueError("external read status category is invalid")
+    if (result_count == 0) != (status_category == "no_results"):
+        raise ValueError("external read status category does not match result count")
+    if not isinstance(raw_result.error_category, str):
+        raise ValueError("external read error category is invalid")
+    error_category = raw_result.error_category.strip().lower()
+    if error_category != "none":
+        raise ValueError("external read successful payload has an invalid error category")
+
+    response_text = _sanitize_external_read_response(raw_result.report_text)
+    persisted_summary = "\n".join(
+        [
+            "外部只读查询已完成。",
+            f"Provider：{provider_name}。",
+            f"结果数：{result_count}。",
+            f"来源主机数：{source_host_count}。",
+            f"丢弃结果数：{dropped_result_count}。",
+            f"外部请求：{external_request_count}。",
+            f"响应截断：{'是' if raw_result.response_truncated else '否'}。",
+            f"状态类别：{status_category}。",
+            f"错误类别：{error_category}。",
+            "详细回复仅在本次主人私聊返回。",
+            "任务记录未保存 query、标题、摘要、URL、来源主机明细、provider endpoint 或原始异常。",
+        ]
+    )[:AGENT_TASK_RESULT_LIMIT].rstrip()
+    return SanitizedAgentWorkResult(
+        persisted_summary=persisted_summary,
+        response_text=response_text,
+    )
+
+
 def _development_context_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
     return AgentWorkSpec(
         name=DEVELOPMENT_CONTEXT_REPORT_WORK_TYPE,
@@ -582,6 +844,7 @@ def _development_context_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
         result_sanitizer=_sanitize_development_context_report,
         requires_approval=False,
         result_limit=AGENT_TASK_RESULT_LIMIT,
+        persisted_query_summary=None,
     )
 
 
@@ -595,6 +858,21 @@ def _system_diagnostics_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
         result_sanitizer=_sanitize_system_diagnostics_report,
         requires_approval=False,
         result_limit=AGENT_TASK_RESULT_LIMIT,
+        persisted_query_summary=None,
+    )
+
+
+def _external_read_report_spec(executor: WorkExecutor) -> AgentWorkSpec:
+    return AgentWorkSpec(
+        name=EXTERNAL_READ_REPORT_WORK_TYPE,
+        display_name=EXTERNAL_READ_REPORT_DISPLAY_NAME,
+        risk_level=EXTERNAL_READ_REPORT_RISK_LEVEL,
+        required_arguments=("query",),
+        executor=executor,
+        result_sanitizer=_sanitize_external_read_report,
+        requires_approval=False,
+        result_limit=AGENT_TASK_RESULT_LIMIT,
+        persisted_query_summary=EXTERNAL_READ_REPORT_QUERY_SUMMARY,
     )
 
 
@@ -607,12 +885,15 @@ class OwnerAgentWorkRuntime:
         context: OwnerAgentWorkContext,
         development_context_report_executor: WorkExecutor,
         system_diagnostics_report_executor: WorkExecutor,
+        external_read_report_executor: WorkExecutor | None = None,
     ) -> None:
         self.context = context
-        specs = (
+        specs = [
             _development_context_report_spec(development_context_report_executor),
             _system_diagnostics_report_spec(system_diagnostics_report_executor),
-        )
+        ]
+        if external_read_report_executor is not None:
+            specs.append(_external_read_report_spec(external_read_report_executor))
         self._work_specs = {spec.name: spec for spec in specs}
 
     @property
@@ -629,18 +910,21 @@ class OwnerAgentWorkRuntime:
     async def execute(self, *, work_type: str, query: str) -> OwnerAgentWorkExecution:
         spec = self.work_spec(work_type)
         normalized_query = _normalize_query(query)
+        persisted_query_summary = (
+            spec.persisted_query_summary or normalized_query
+        )
         task_id = create_agent_task(
             session_key=self.context.session_key,
             user_id=self.context.user_id,
             title=spec.display_name,
-            goal=f"{spec.display_name}：{normalized_query}",
+            goal=f"{spec.display_name}：{persisted_query_summary}",
         )
         task, claimed = claim_agent_task_for_work(
             task_id=task_id,
             session_key=self.context.session_key,
             user_id=self.context.user_id,
             work_type=spec.name,
-            query_summary=normalized_query,
+            query_summary=persisted_query_summary,
         )
         if not claimed:
             return OwnerAgentWorkExecution(
@@ -656,7 +940,18 @@ class OwnerAgentWorkRuntime:
             raw_result = await value if inspect.isawaitable(value) else value
             sanitized_result = spec.result_sanitizer(raw_result)
         except Exception as exc:
-            safe_error = f"{type(exc).__name__}: {spec.name} execution failed."
+            external_policy_error = (
+                exc
+                if spec.name == EXTERNAL_READ_REPORT_WORK_TYPE
+                and isinstance(exc, ExternalReadPolicyError)
+                else None
+            )
+            safe_error = (
+                f"ExternalReadPolicyError: {spec.name} execution failed "
+                f"({external_policy_error.category.value})."
+                if external_policy_error is not None
+                else f"{type(exc).__name__}: {spec.name} execution failed."
+            )
             failed_task, _ = fail_agent_task_work(
                 task_id=task_id,
                 session_key=self.context.session_key,
@@ -669,7 +964,11 @@ class OwnerAgentWorkRuntime:
                 task=failed_task,
                 outcome="failed",
                 result_summary=safe_error,
-                response_text=safe_error,
+                response_text=(
+                    format_external_read_policy_error(external_policy_error)
+                    if external_policy_error is not None
+                    else safe_error
+                ),
             )
 
         result_summary = sanitized_result.persisted_summary

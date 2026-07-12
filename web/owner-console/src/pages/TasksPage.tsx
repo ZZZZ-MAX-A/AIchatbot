@@ -15,6 +15,11 @@ import { ErrorState } from "../components/ErrorState";
 import { StatusBadge } from "../components/StatusBadge";
 
 type TaskStatusFilter = "all" | "pending" | "done" | "failed" | "cancelled";
+type TaskWorkTypeFilter =
+  | "all"
+  | "development_context_report"
+  | "system_diagnostics_report"
+  | "external_read_report";
 
 type TasksPageState = {
   loading: boolean;
@@ -29,6 +34,17 @@ const statusFilters: Array<{ label: string; value: TaskStatusFilter }> = [
   { label: "失败", value: "failed" },
   { label: "已取消", value: "cancelled" },
 ];
+
+const workTypeFilters: Array<{ label: string; value: TaskWorkTypeFilter }> = [
+  { label: "全部类型", value: "all" },
+  { label: "研发上下文", value: "development_context_report" },
+  { label: "系统诊断", value: "system_diagnostics_report" },
+  { label: "联网查询", value: "external_read_report" },
+];
+
+function workTypeLabel(workType: string): string {
+  return workTypeFilters.find((item) => item.value === workType)?.label ?? "普通任务";
+}
 
 function apiErrorDescription(error: Error): string {
   if (error instanceof OwnerConsoleApiError) {
@@ -78,6 +94,7 @@ function TaskRows({ rows }: { rows: OwnerConsoleTaskRow[] }) {
       <div className="task-table__row task-table__row--head" role="row">
         <span role="columnheader">任务 ID</span>
         <span role="columnheader">目标摘要</span>
+        <span role="columnheader">工作类型</span>
         <span role="columnheader">状态</span>
         <span role="columnheader">最近事件</span>
         <span role="columnheader">待审批</span>
@@ -88,6 +105,9 @@ function TaskRows({ rows }: { rows: OwnerConsoleTaskRow[] }) {
         <div className="task-table__row" role="row" key={task.task_id}>
           <span role="cell">{task.task_id}</span>
           <span role="cell">{task.goal_preview || task.title}</span>
+          <span role="cell">
+            <StatusBadge label="类型" value={workTypeLabel(task.work_type)} />
+          </span>
           <span role="cell">
             <StatusBadge
               label="状态"
@@ -113,6 +133,7 @@ function TaskRows({ rows }: { rows: OwnerConsoleTaskRow[] }) {
 
 export function TasksPage() {
   const [status, setStatus] = useState<TaskStatusFilter>("all");
+  const [workType, setWorkType] = useState<TaskWorkTypeFilter>("all");
   const [state, setState] = useState<TasksPageState>({
     loading: true,
     tasks: null,
@@ -120,6 +141,7 @@ export function TasksPage() {
   });
 
   const selectedStatus = status === "all" ? null : status;
+  const selectedWorkType = workType === "all" ? null : workType;
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -132,6 +154,7 @@ export function TasksPage() {
         const tasks = await ownerConsoleApi.getTasks(
           {
             status: selectedStatus,
+            work_type: selectedWorkType,
             limit: 20,
           },
           signal,
@@ -155,7 +178,7 @@ export function TasksPage() {
         });
       }
     },
-    [selectedStatus],
+    [selectedStatus, selectedWorkType],
   );
 
   useEffect(() => {
@@ -169,6 +192,10 @@ export function TasksPage() {
   const activeLabel = useMemo(
     () => statusFilters.find((item) => item.value === status)?.label ?? "全部",
     [status],
+  );
+  const activeWorkTypeLabel = useMemo(
+    () => workTypeFilters.find((item) => item.value === workType)?.label ?? "全部类型",
+    [workType],
   );
 
   return (
@@ -192,7 +219,23 @@ export function TasksPage() {
       <section className="data-toolbar" aria-label="任务筛选">
         <div>
           <p>当前筛选</p>
-          <strong>{activeLabel}</strong>
+          <strong>{activeLabel} · {activeWorkTypeLabel}</strong>
+        </div>
+        <div className="filter-tabs" role="group" aria-label="任务工作类型">
+          {workTypeFilters.map((filter) => (
+            <button
+              key={filter.value}
+              className={
+                filter.value === workType
+                  ? "filter-tabs__item is-active"
+                  : "filter-tabs__item"
+              }
+              type="button"
+              onClick={() => setWorkType(filter.value)}
+            >
+              {filter.label}
+            </button>
+          ))}
         </div>
         <div className="filter-tabs" role="group" aria-label="任务状态">
           {statusFilters.map((filter) => (

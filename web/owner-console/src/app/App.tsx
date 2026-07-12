@@ -6,6 +6,7 @@ import { ApprovalDetailPage } from "../pages/ApprovalDetailPage";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
+import { ExternalReadPage } from "../pages/ExternalReadPage";
 import { MemoryPage } from "../pages/MemoryPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
@@ -36,6 +37,10 @@ export function App() {
           <Route
             path="/owner-console/diagnostics"
             element={<DiagnosticsPage />}
+          />
+          <Route
+            path="/owner-console/external-read"
+            element={<ExternalReadPage />}
           />
           <Route path="/owner-console/memory" element={<MemoryPage />} />
           <Route

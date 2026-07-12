@@ -26,7 +26,7 @@ from .owner_console_http_models import (
     owner_console_http_error_response,
     owner_console_http_success_response,
 )
-from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT
+from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT, OWNER_CONSOLE_WORK_TYPES
 
 
 OWNER_CONSOLE_FASTAPI_APP_TITLE = "AIchatbot Owner Console API"
@@ -46,6 +46,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
         "settings",
         "memory",
         "diagnostics",
+        "external-read",
     }
 )
 OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
@@ -60,6 +61,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics",
+    f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read",
 )
 
 
@@ -346,6 +348,7 @@ def create_owner_console_fastapi_app() -> FastAPI:
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks", response_model=None)
     async def owner_console_tasks(
         status: str | None = None,
+        work_type: str | None = None,
         limit: str | None = None,
     ) -> Any:
         try:
@@ -358,12 +361,18 @@ def create_owner_console_fastapi_app() -> FastAPI:
                 default=20,
                 field_name="limit",
             )
+            parsed_work_type = parse_owner_console_optional_status(
+                work_type,
+                allowed_statuses=OWNER_CONSOLE_WORK_TYPES,
+                field_name="work_type",
+            )
             config = load_config()
             context = build_owner_console_context_from_config(config)
             runtime = _owner_console_runtime_from_config(config)
             task_list = runtime.build_task_list(
                 context,
                 status=parsed_status,
+                work_type=parsed_work_type,
                 limit=parsed_limit,
             )
         except OwnerConsoleHttpAdapterError as exc:
@@ -605,6 +614,29 @@ def create_owner_console_fastapi_app() -> FastAPI:
         return _owner_console_success(
             "memory",
             memory,
+        )
+
+    @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read", response_model=None)
+    async def owner_console_external_read() -> Any:
+        try:
+            config = load_config()
+            context = build_owner_console_context_from_config(config)
+            runtime = _owner_console_runtime_from_config(config)
+            snapshot = runtime.build_external_read_snapshot(context)
+        except OwnerConsoleHttpAdapterError as exc:
+            return _owner_console_adapter_error(
+                "external-read",
+                exc,
+            )
+        except Exception as exc:
+            return _owner_console_internal_error(
+                "external-read",
+                message="failed to build owner console external read snapshot",
+                exc=exc,
+            )
+        return _owner_console_success(
+            "external-read",
+            snapshot,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics", response_model=None)

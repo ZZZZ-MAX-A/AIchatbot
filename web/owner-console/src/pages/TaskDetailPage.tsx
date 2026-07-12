@@ -78,6 +78,10 @@ function DetailSummary({ task }: { task: OwnerConsoleTaskRow }) {
           </dd>
         </div>
         <div>
+          <dt>工作类型</dt>
+          <dd>{task.work_type || "普通任务"}</dd>
+        </div>
+        <div>
           <dt>创建时间</dt>
           <dd>{task.created_at || "未知"}</dd>
         </div>

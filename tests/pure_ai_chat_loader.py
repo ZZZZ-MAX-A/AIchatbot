@@ -178,6 +178,10 @@ def load_pure_graph_modules():
         "src.plugins.ai_chat.owner_write_runtime",
         AI_CHAT_ROOT / "owner_write_runtime.py",
     )
+    modules["owner_agent_work_runtime"] = load_module(
+        "src.plugins.ai_chat.owner_agent_work_runtime",
+        AI_CHAT_ROOT / "owner_agent_work_runtime.py",
+    )
     modules["owner_runtime_factory"] = load_module(
         "src.plugins.ai_chat.owner_runtime_factory",
         AI_CHAT_ROOT / "owner_runtime_factory.py",
@@ -230,6 +234,60 @@ def load_pure_policy_modules():
     modules["engine"] = load_module(
         "src.plugins.ai_chat.policy.engine",
         AI_CHAT_ROOT / "policy" / "engine.py",
+    )
+    return modules
+
+
+def load_external_read_security_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.external_read_security",
+        AI_CHAT_ROOT / "external_read_security.py",
+    )
+
+
+def load_external_search_modules():
+    security = load_external_read_security_module()
+    search = load_module(
+        "src.plugins.ai_chat.external_search",
+        AI_CHAT_ROOT / "external_search.py",
+    )
+    return {"security": security, "search": search}
+
+
+def load_external_read_status_module():
+    ensure_ai_chat_packages()
+    load_module(
+        "src.plugins.ai_chat.database",
+        AI_CHAT_ROOT / "database.py",
+    )
+    return load_module(
+        "src.plugins.ai_chat.external_read_status",
+        AI_CHAT_ROOT / "external_read_status.py",
+    )
+
+
+def load_local_time_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.local_time",
+        AI_CHAT_ROOT / "local_time.py",
+    )
+
+
+def load_tavily_search_modules():
+    modules = load_external_search_modules()
+    modules["tavily"] = load_module(
+        "src.plugins.ai_chat.tavily_search",
+        AI_CHAT_ROOT / "tavily_search.py",
+    )
+    modules["tavily_http"] = load_module(
+        "src.plugins.ai_chat.tavily_http_transport",
+        AI_CHAT_ROOT / "tavily_http_transport.py",
+    )
+    modules["tavily_executor"] = load_module(
+        "src.plugins.ai_chat.tavily_external_read",
+        AI_CHAT_ROOT / "tavily_external_read.py",
     )
     return modules
 

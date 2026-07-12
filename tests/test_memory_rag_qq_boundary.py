@@ -11,6 +11,7 @@ OWNER_AGENT_WORK_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_ag
 SYSTEM_DIAGNOSTICS_REPORT = REPO_ROOT / "src" / "plugins" / "ai_chat" / "system_diagnostics_report.py"
 OWNER_READ_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_read_runtime.py"
 OWNER_WRITE_RUNTIME = REPO_ROOT / "src" / "plugins" / "ai_chat" / "owner_write_runtime.py"
+MAIN_AGENT_BRIDGE = REPO_ROOT / "src" / "plugins" / "ai_chat" / "graph" / "main_agent_bridge.py"
 
 
 class MemoryRagQqBoundaryTests(unittest.TestCase):
@@ -73,7 +74,44 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn('command_artifact["explicit_dev_context"]', source)
         self.assertIn("parse_development_context_report_command", source)
         self.assertIn("parse_system_diagnostics_report_command", source)
+        self.assertIn("parse_external_read_report_command", source)
+        self.assertIn("prepare_external_read_command", source)
+        self.assertIn("factory.external_read_report_for_event is not None", source)
+        self.assertIn("def _configured_external_read_report_for_event():", source)
+        self.assertIn("if not config.enable_agent_web:", source)
+        self.assertIn("create_configured_tavily_external_read_executor", source)
+        self.assertIn("api_key=config.tavily_api_key", source)
+        self.assertIn("timeout_seconds=config.tavily_timeout_seconds", source)
+        self.assertIn(
+            "external_read_report_for_event=_configured_external_read_report_for_event()",
+            source,
+        )
+        external_factory_start = source.index(
+            "def _configured_external_read_report_for_event():"
+        )
+        owner_factory_start = source.index(
+            "\ndef owner_runtime_factory()",
+            external_factory_start,
+        )
+        external_factory_source = source[external_factory_start:owner_factory_start]
+        self.assertLess(
+            external_factory_source.index("if not config.enable_agent_web:"),
+            external_factory_source.index("from .tavily_external_read import"),
+        )
+        self.assertIn("except ImportError:", external_factory_source)
+        self.assertNotIn("tavily_external_read", source[:external_factory_start])
         self.assertIn("execute_system_diagnostics_report", factory_source)
+        self.assertIn("execute_external_read_report", factory_source)
+        self.assertIn("/agent 执行外部只读查询：<问题>", source)
+        self.assertIn("/agent 联网状态（纯本地，不发起外部请求）", source)
+        self.assertIn("def external_read_status_reply(event: MessageEvent) -> str:", source)
+        self.assertIn('if query.strip() in {"联网状态", "外部只读查询状态"}:', source)
+        self.assertIn("本状态查询不访问 Tavily、不消耗 credit", source)
+        self.assertIn('package_version("httpx")', source)
+        self.assertIn('package_version("httpcore")', source)
+        self.assertIn("HTTP 栈兼容性", source)
+        self.assertIn("latest_external_read_task_snapshot", source)
+        self.assertIn("external_read_task_snapshot_lines", source)
         self.assertIn("if not isinstance(event, PrivateMessageEvent):", source)
         self.assertIn("if not is_owner(config, event):", source)
         self.assertIn("OwnerRuntimeFactory", source)
@@ -183,6 +221,12 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
 
         self.assertIn("is_owner=is_owner(config, event)", source)
         self.assertNotIn("is_owner=is_owner(event)", source)
+
+    def test_external_read_strict_entry_is_not_registered_for_main_llm(self):
+        bridge_source = MAIN_AGENT_BRIDGE.read_text(encoding="utf-8")
+
+        self.assertNotIn("external_read_report", bridge_source)
+        self.assertNotIn("execute_external_search", bridge_source)
 
     def test_memory_rag_status_includes_embedding_self_check(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

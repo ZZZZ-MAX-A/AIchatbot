@@ -5,6 +5,10 @@ description = "A QQ AI chatbot powered by NoneBot2, OneBot, and DeepSeek."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # tavily_http_transport uses httpcore's AutoBackend implementation path;
+    # keep the reviewed compatibility window explicit until that API is public.
+    "httpcore>=1.0.9,<1.1",
+    "httpx>=0.28.1,<0.29",
     "langchain>=1.0.0",
     "langchain-openai>=1.0.0",
     "langgraph>=1.0.0",

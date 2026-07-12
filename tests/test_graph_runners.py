@@ -1565,6 +1565,52 @@ class DiagnosticsGraphRunnerTests(unittest.TestCase):
             (self.diagnostics.DiagnosticsNode.READ_CONFIG_SNAPSHOT,),
         )
 
+    def test_diagnostics_graph_runner_skips_unrelated_providers_for_each_view(self):
+        node = self.diagnostics.DiagnosticsNode
+        view = self.diagnostics.DiagnosticsView
+        expected_calls = {
+            view.CONFIG: ["config", "render"],
+            view.VISION: ["config", "images", "render"],
+            view.RECENT_ERRORS: ["errors", "render"],
+            view.IMAGE_CACHE: ["config", "images", "render"],
+            view.MEMORY: ["memory", "render"],
+            view.TTS: ["config", "tts", "render"],
+        }
+
+        for selected_view, selected_calls in expected_calls.items():
+            calls = []
+
+            def handler(name):
+                async def run(diag_state):
+                    calls.append(name)
+                    if name == "render":
+                        diag_state.reply_text = selected_view.value
+                    return diag_state
+
+                return run
+
+            runner = self.diagnostics.DiagnosticsGraphRunner(
+                read_config_snapshot=handler("config"),
+                read_runtime_flags=handler("runtime"),
+                check_tts_health=handler("tts"),
+                read_recent_errors=handler("errors"),
+                read_memory_stats=handler("memory"),
+                read_image_cache_stats=handler("images"),
+                render_diagnostic_reply=handler("render"),
+            )
+
+            with self.subTest(view=selected_view):
+                execution = asyncio.run(
+                    runner.run(self.diagnostics.DiagnosticsState(view=selected_view))
+                )
+                self.assertEqual(calls, selected_calls)
+                self.assertEqual(
+                    execution.node_trace,
+                    self.diagnostics.diagnostics_node_sequence_for_view(selected_view),
+                )
+                self.assertEqual(execution.node_trace[-1], node.RENDER_DIAGNOSTIC_REPLY)
+                self.assertEqual(execution.result.reply_text, selected_view.value)
+
 
 class NotificationGraphRunnerTests(unittest.TestCase):
     @classmethod

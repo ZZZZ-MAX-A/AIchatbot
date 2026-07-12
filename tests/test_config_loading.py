@@ -21,11 +21,14 @@ class ConfigLoadingTests(unittest.TestCase):
         config = self.load_with_env({})
 
         self.assertFalse(config.enable_main_agent)
+        self.assertEqual(config.bot_timezone, "Asia/Shanghai")
         self.assertFalse(config.main_agent_use_llm)
         self.assertTrue(config.main_agent_owner_only)
         self.assertFalse(config.main_agent_allow_group)
         self.assertTrue(config.main_agent_require_approval_for_writes)
         self.assertFalse(config.enable_agent_web)
+        self.assertEqual(config.tavily_api_key, "")
+        self.assertEqual(config.tavily_timeout_seconds, 10)
         self.assertFalse(config.enable_agent_local_write)
         self.assertFalse(config.enable_agent_external_write)
         self.assertFalse(config.enable_agent_shell)
@@ -89,6 +92,29 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_llm_base_url, "https://chat.example/v1")
         self.assertEqual(config.chat_llm_model, "chat-model")
         self.assertEqual(config.chat_llm_timeout_seconds, 22)
+        config_repr = repr(config)
+        self.assertNotIn("main-key", config_repr)
+        self.assertNotIn("chat-key", config_repr)
+
+    def test_invalid_tavily_timeout_loads_fail_closed_sentinel(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_AGENT_WEB": "true",
+                "TAVILY_API_KEY": "tvly-unit-secret",
+                "TAVILY_TIMEOUT_SECONDS": "not-a-number",
+            }
+        )
+
+        self.assertTrue(config.enable_agent_web)
+        self.assertEqual(config.tavily_timeout_seconds, 0)
+        self.assertNotIn("tvly-unit-secret", repr(config))
+
+    def test_bot_timezone_is_fixed_to_supported_china_standard_time(self):
+        configured = self.load_with_env({"BOT_TIMEZONE": "Asia/Shanghai"})
+        self.assertEqual(configured.bot_timezone, "Asia/Shanghai")
+
+        with self.assertRaisesRegex(ValueError, "unsupported bot timezone"):
+            self.load_with_env({"BOT_TIMEZONE": "UTC"})
 
     def test_boolean_numeric_and_csv_env_values_are_parsed(self):
         config = self.load_with_env(
@@ -100,6 +126,8 @@ class ConfigLoadingTests(unittest.TestCase):
                 "MAIN_AGENT_MAX_STEPS": "9",
                 "MAIN_AGENT_REQUIRE_APPROVAL_FOR_WRITES": "0",
                 "ENABLE_AGENT_WEB": "true",
+                "TAVILY_API_KEY": "tvly-unit-secret",
+                "TAVILY_TIMEOUT_SECONDS": "7",
                 "ENABLE_AGENT_LOCAL_WRITE": "1",
                 "ENABLE_AGENT_EXTERNAL_WRITE": "yes",
                 "ENABLE_AGENT_SHELL": "on",
@@ -138,6 +166,9 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.main_agent_max_steps, 9)
         self.assertFalse(config.main_agent_require_approval_for_writes)
         self.assertTrue(config.enable_agent_web)
+        self.assertEqual(config.tavily_api_key, "tvly-unit-secret")
+        self.assertEqual(config.tavily_timeout_seconds, 7)
+        self.assertNotIn("tvly-unit-secret", repr(config))
         self.assertTrue(config.enable_agent_local_write)
         self.assertTrue(config.enable_agent_external_write)
         self.assertTrue(config.enable_agent_shell)

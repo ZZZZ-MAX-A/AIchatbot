@@ -7,6 +7,7 @@ import {
 } from "../api/ownerConsoleApi";
 import type {
   OwnerConsoleDiagnosticsEnvelope,
+  OwnerConsoleExternalReadEnvelope,
   OwnerConsoleOverviewEnvelope,
   OwnerConsoleTaskRow,
   OwnerConsoleApprovalRow,
@@ -20,16 +21,20 @@ type DashboardState = {
   loading: boolean;
   overview: OwnerConsoleOverviewEnvelope | null;
   diagnostics: OwnerConsoleDiagnosticsEnvelope | null;
+  externalRead: OwnerConsoleExternalReadEnvelope | null;
   overviewError: Error | null;
   diagnosticsError: Error | null;
+  externalReadError: Error | null;
 };
 
 const initialState: DashboardState = {
   loading: true,
   overview: null,
   diagnostics: null,
+  externalRead: null,
   overviewError: null,
   diagnosticsError: null,
+  externalReadError: null,
 };
 
 function formatCount(value: number | undefined): string {
@@ -148,9 +153,10 @@ export function DashboardPage() {
       loading: true,
       overviewError: null,
       diagnosticsError: null,
+      externalReadError: null,
     }));
 
-    const [overviewResult, diagnosticsResult] = await Promise.allSettled([
+    const [overviewResult, diagnosticsResult, externalReadResult] = await Promise.allSettled([
       ownerConsoleApi.getOverview(
         {
           task_limit: 5,
@@ -159,6 +165,7 @@ export function DashboardPage() {
         signal,
       ),
       ownerConsoleApi.getDiagnostics(signal),
+      ownerConsoleApi.getExternalRead(signal),
     ]);
 
     if (signal?.aborted) {
@@ -173,6 +180,10 @@ export function DashboardPage() {
         diagnosticsResult.status === "fulfilled"
           ? diagnosticsResult.value
           : null,
+      externalRead:
+        externalReadResult.status === "fulfilled"
+          ? externalReadResult.value
+          : null,
       overviewError:
         overviewResult.status === "rejected"
           ? overviewResult.reason instanceof Error
@@ -185,6 +196,12 @@ export function DashboardPage() {
             ? diagnosticsResult.reason
             : new Error("诊断加载失败")
           : null,
+      externalReadError:
+        externalReadResult.status === "rejected"
+          ? externalReadResult.reason instanceof Error
+            ? externalReadResult.reason
+            : new Error("联网状态加载失败")
+          : null,
     });
   }, []);
 
@@ -196,6 +213,7 @@ export function DashboardPage() {
 
   const overview = state.overview?.data;
   const diagnostics = state.diagnostics?.data;
+  const externalRead = state.externalRead?.data;
 
   return (
     <section className="page dashboard-page">
@@ -332,6 +350,40 @@ export function DashboardPage() {
           title="诊断快照暂不可用"
           description={apiErrorDescription(state.diagnosticsError)}
         />
+      ) : null}
+
+      {state.externalReadError ? (
+        <ErrorState
+          title="联网状态暂不可用"
+          description={apiErrorDescription(state.externalReadError)}
+        />
+      ) : null}
+
+      {externalRead ? (
+        <section className="dashboard-panel">
+          <div className="detail-panel__header">
+            <h2>外部只读查询</h2>
+            <StatusBadge
+              label="本地配置"
+              value={externalRead.executor_configured ? "正常" : "未就绪"}
+              tone={externalRead.executor_configured ? "success" : "warning"}
+            />
+          </div>
+          <div className="boundary-grid">
+            <StatusBadge label="Provider" value={`${externalRead.provider_name} ${externalRead.search_depth}`} />
+            <StatusBadge label="最多结果" value={String(externalRead.max_results)} />
+            <StatusBadge
+              label="最近任务"
+              value={externalRead.recent_task.available ? `#${externalRead.recent_task.task_id} ${externalRead.recent_task.task_status}` : "暂无"}
+            />
+            <StatusBadge
+              label="实时探测"
+              value={externalRead.boundary.live_probe_executed ? "已执行" : "未执行"}
+              tone={externalRead.boundary.live_probe_executed ? "warning" : "success"}
+            />
+          </div>
+          <p className="panel-note">刷新此卡片只读取本地配置和安全任务元数据，不访问 Tavily，也不消耗 credit。</p>
+        </section>
       ) : null}
 
       {diagnostics ? (

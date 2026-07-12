@@ -453,6 +453,7 @@ def list_agent_tasks(
     session_key: str | None = None,
     user_id: str | None = None,
     status: str | None = None,
+    work_type: str | None = None,
     limit: int = 5,
 ) -> list[AgentTask]:
     ensure_database()
@@ -470,6 +471,19 @@ def list_agent_tasks(
             raise ValueError(f"unsupported agent task status: {status}")
         clauses.append("status = ?")
         params.append(normalized_status)
+    if work_type:
+        normalized_work_type = work_type.strip()
+        if not normalized_work_type or len(normalized_work_type) > AGENT_TASK_WORK_TYPE_LIMIT:
+            raise ValueError("unsupported agent task work type")
+        clauses.append(
+            "EXISTS ("
+            "SELECT 1 FROM agent_task_events AS work_event "
+            "WHERE work_event.task_id = agent_tasks.id "
+            "AND work_event.kind = 'work_claimed' "
+            "AND work_event.tool_name = ?"
+            ")"
+        )
+        params.append(normalized_work_type)
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(max(1, limit))
 
@@ -492,6 +506,7 @@ def count_agent_tasks(
     session_key: str | None = None,
     user_id: str | None = None,
     status: str | None = None,
+    work_type: str | None = None,
 ) -> int:
     ensure_database()
     clauses: list[str] = []
@@ -508,6 +523,19 @@ def count_agent_tasks(
             raise ValueError(f"unsupported agent task status: {status}")
         clauses.append("status = ?")
         params.append(normalized_status)
+    if work_type:
+        normalized_work_type = work_type.strip()
+        if not normalized_work_type or len(normalized_work_type) > AGENT_TASK_WORK_TYPE_LIMIT:
+            raise ValueError("unsupported agent task work type")
+        clauses.append(
+            "EXISTS ("
+            "SELECT 1 FROM agent_task_events AS work_event "
+            "WHERE work_event.task_id = agent_tasks.id "
+            "AND work_event.kind = 'work_claimed' "
+            "AND work_event.tool_name = ?"
+            ")"
+        )
+        params.append(normalized_work_type)
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     with connect() as connection:
@@ -585,6 +613,22 @@ def latest_agent_task_event(task_id: int) -> AgentTaskEvent | None:
             (task_id,),
         ).fetchone()
     return _event_from_row(row) if row else None
+
+
+def agent_task_work_type(task_id: int) -> str:
+    ensure_database()
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT tool_name
+            FROM agent_task_events
+            WHERE task_id = ? AND kind = 'work_claimed'
+            ORDER BY step_index DESC, id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+    return str(row["tool_name"] or "") if row else ""
 
 
 def create_agent_approval(

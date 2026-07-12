@@ -114,6 +114,8 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 
 **MainAgent 与研发上下文**
 
+- [main-agent-command-capability-audit.md](main-agent-command-capability-audit.md)：`/agent` 严格命令、语义路由、工具/provider、真实读写、LLM/RAG、副作用、输出和测试覆盖的内部能力审计；不等同于 `/权限帮助`。
+- [main-agent-external-read-security-design.md](main-agent-external-read-security-design.md)：`system_diagnostics_report` 之后的外部只读安全设计；定义固定 provider、查询最小化、SSRF/redirect/DNS、内容注入、任务持久化与分步实现边界，当前不开放联网工具。
 - [main-agent-first-readonly-work-task-design.md](main-agent-first-readonly-work-task-design.md)
 - [main-agent-useful-development-context-report-design.md](main-agent-useful-development-context-report-design.md)
 - [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：MainAgent 分区分层系统诊断；当前已注册 overview、vision、voice、memory_rag，并完成主人 QQ live 与语音服务层输出复验。

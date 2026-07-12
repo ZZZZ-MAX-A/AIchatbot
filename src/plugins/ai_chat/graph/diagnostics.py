@@ -38,6 +38,47 @@ DIAGNOSTICS_NODE_SEQUENCE: tuple[DiagnosticsNode, ...] = (
 )
 
 
+_DIAGNOSTICS_NODE_SEQUENCES_BY_VIEW: dict[
+    DiagnosticsView,
+    tuple[DiagnosticsNode, ...],
+] = {
+    DiagnosticsView.FULL: DIAGNOSTICS_NODE_SEQUENCE,
+    DiagnosticsView.CONFIG: (
+        DiagnosticsNode.READ_CONFIG_SNAPSHOT,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+    DiagnosticsView.VISION: (
+        DiagnosticsNode.READ_CONFIG_SNAPSHOT,
+        DiagnosticsNode.READ_IMAGE_CACHE_STATS,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+    DiagnosticsView.RECENT_ERRORS: (
+        DiagnosticsNode.READ_RECENT_ERRORS,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+    DiagnosticsView.IMAGE_CACHE: (
+        DiagnosticsNode.READ_CONFIG_SNAPSHOT,
+        DiagnosticsNode.READ_IMAGE_CACHE_STATS,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+    DiagnosticsView.MEMORY: (
+        DiagnosticsNode.READ_MEMORY_STATS,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+    DiagnosticsView.TTS: (
+        DiagnosticsNode.READ_CONFIG_SNAPSHOT,
+        DiagnosticsNode.CHECK_TTS_HEALTH,
+        DiagnosticsNode.RENDER_DIAGNOSTIC_REPLY,
+    ),
+}
+
+
+def diagnostics_node_sequence_for_view(
+    view: DiagnosticsView,
+) -> tuple[DiagnosticsNode, ...]:
+    return _DIAGNOSTICS_NODE_SEQUENCES_BY_VIEW[view]
+
+
 @dataclass
 class DiagnosticsState:
     view: DiagnosticsView = DiagnosticsView.FULL
@@ -105,7 +146,7 @@ class DiagnosticsGraphRunner:
         node_trace: list[DiagnosticsNode] = []
         current = state
 
-        for node in DIAGNOSTICS_NODE_SEQUENCE:
+        for node in diagnostics_node_sequence_for_view(state.view):
             node_trace.append(node)
             if node == DiagnosticsNode.READ_CONFIG_SNAPSHOT and self.read_config_snapshot is not None:
                 current = await _maybe_await(self.read_config_snapshot(current))
