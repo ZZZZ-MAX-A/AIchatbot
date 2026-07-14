@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .database import connect, ensure_database, utc_now
+from .failure_diagnostics import classify_failure, format_failure_user_message
 from .graph.tool_registry import (
     ToolContext,
     ToolArgumentError,
@@ -1023,6 +1024,11 @@ def resume_agent_approval(
             user_id=user_id,
         )
     except Exception as exc:
+        diagnosis = classify_failure(exc)
+        safe_failure = (
+            f"Approval resume failed: category={diagnosis.category.value} "
+            f"code={diagnosis.code}."
+        )
         with connect() as connection:
             failed_step = _next_agent_task_step(connection, approval.task_id)
             _insert_agent_task_event(
@@ -1034,7 +1040,7 @@ def resume_agent_approval(
                 input_json=started_input_json,
                 output_summary="Approval resume failed.",
                 status=AGENT_TASK_FAILED,
-                error=str(exc),
+                error=safe_failure,
                 created_at=utc_now(),
             )
             connection.execute(
@@ -1045,12 +1051,15 @@ def resume_agent_approval(
                 """,
                 (
                     AGENT_TASK_FAILED,
-                    f"Approval resume failed: {exc}",
+                    safe_failure,
                     utc_now(),
                     approval.task_id,
                 ),
             )
-        return approval, False, f"Approval resume failed: {exc}"
+        return approval, False, format_failure_user_message(
+            exc,
+            component="审批恢复",
+        )
 
     with connect() as connection:
         finished_step = _next_agent_task_step(connection, approval.task_id)

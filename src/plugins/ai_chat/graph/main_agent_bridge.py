@@ -6,6 +6,14 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import TypeAlias
 
+from ..document_artifacts import (
+    DOCUMENT_ARTIFACT_COMMANDS,
+    DOCUMENT_ARTIFACT_MAX_CONTENT_CHARS,
+    DOCUMENT_ARTIFACT_MAX_SLIDES,
+    DOCUMENT_ARTIFACT_MAX_TITLE_CHARS,
+    presentation_slide_count,
+)
+from ..failure_diagnostics import format_failure_user_message
 from ..policy.engine import PolicyDecisionType, ToolPolicyInput, decide_tool_policy
 from ..policy.risk import RiskLevel
 from .main_agent import (
@@ -50,6 +58,7 @@ ApprovalRequestHandler: TypeAlias = Callable[
 
 OWNER_READ_COMMAND_TOOL_NAME = "owner_read_command"
 OWNER_WRITE_COMMAND_TOOL_NAME = "owner_write_command"
+DOCUMENT_DELIVERY_TOOL_NAME = "document_delivery_command"
 AGENT_TASK_READ_TOOL_NAME = "agent_task_read"
 AGENT_TASK_COMMAND_TOOL_NAME = "agent_task_command"
 OWNER_READ_COMMANDS: tuple[str, ...] = (
@@ -110,6 +119,24 @@ OWNER_WRITE_COMMANDS: tuple[str, ...] = (
     "deny_private",
     "block_user",
     "unblock_user",
+    *DOCUMENT_ARTIFACT_COMMANDS,
+)
+DOCUMENT_DELIVERY_COMMANDS: tuple[str, ...] = (
+    "create_and_send_txt_document",
+    "create_and_send_word_document",
+    "create_and_send_presentation",
+)
+DOCUMENT_INTERNAL_SCAFFOLD_MARKERS: tuple[str, ...] = (
+    "Read-only project context:",
+    "Runtime metadata (not user content",
+    "MainAgentGraph read-only local test mode.",
+    "MainAgent runtime metadata; this is not user-provided document content.",
+    "Allowed tools:",
+    "Registered visible tools:",
+    "Disallowed: shell, file writes, QQ sends, external writes.",
+    "Owner query (the only user instruction",
+    "User query:\n",
+    "Return the ActionRequest JSON object now.",
 )
 ACCESS_WRITE_COMMANDS: tuple[str, ...] = (
     "allow_group",
@@ -132,6 +159,7 @@ def create_read_only_main_agent_runner(
     retrieve_dev_context: ReadOnlyDevContextTool,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
+    execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
     execute_agent_task_command: AgentTaskCommandTool | None = None,
     request_approval: ApprovalRequestHandler | None = None,
@@ -139,20 +167,26 @@ def create_read_only_main_agent_runner(
     call_main_agent: MainAgentHandler | None = None,
     summarize_tool_result: MainAgentHandler | None = None,
     render_mode: str = "raw",
+    tool_registry: ToolRegistry | None = None,
+    enable_external_write: bool = False,
 ) -> MainAgentGraphRunner:
-    tool_registry = create_read_only_main_agent_tool_registry(
+    active_tool_registry = tool_registry or create_read_only_main_agent_tool_registry(
         retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
         execute_owner_write_command=execute_owner_write_command,
+        execute_document_delivery_command=execute_document_delivery_command,
         execute_agent_task_read=execute_agent_task_read,
         execute_agent_task_command=execute_agent_task_command,
     )
     agent_call = call_main_agent
     if agent_call is None and llm_call is not None:
-        agent_call = create_main_agent_call_handler(llm_call, tool_registry=tool_registry)
+        agent_call = create_main_agent_call_handler(
+            llm_call,
+            tool_registry=active_tool_registry,
+        )
     if agent_call is None:
         agent_call = call_safe_no_llm_fallback_agent
-    agent_call = create_semantic_first_main_agent_planner(tool_registry, agent_call)
+    agent_call = create_semantic_first_main_agent_planner(active_tool_registry, agent_call)
 
     render_agent_response = (
         render_concise_read_only_agent_response
@@ -167,15 +201,21 @@ def create_read_only_main_agent_runner(
 
     return MainAgentGraphRunner(
         validate_agent_request=validate_read_only_agent_request,
-        build_agent_context=create_read_only_agent_context_builder(tool_registry),
+        build_agent_context=create_read_only_agent_context_builder(active_tool_registry),
         call_main_agent=agent_call,
-        validate_action_request=create_main_agent_action_validator(tool_registry),
+        validate_action_request=create_main_agent_action_validator(active_tool_registry),
         check_tool_policy=create_tool_policy_checker(
-            risk_level_for_tool=lambda state: tool_registry.require(state.requested_tool).risk_level,
-            enable_local_write=execute_owner_write_command is not None,
+            risk_level_for_tool=lambda state: active_tool_registry.require(
+                state.requested_tool
+            ).risk_level,
+            enable_local_write=any(
+                spec.risk_level == RiskLevel.WRITE_LOCAL
+                for spec in active_tool_registry.visible_specs()
+            ),
+            enable_external_write=enable_external_write,
             request_approval=request_approval,
         ),
-        execute_tool=create_tool_registry_executor(tool_registry),
+        execute_tool=create_tool_registry_executor(active_tool_registry),
         render_agent_response=render_agent_response,
     )
 
@@ -185,6 +225,7 @@ def create_read_only_main_agent_runtime_handler(
     retrieve_dev_context: ReadOnlyDevContextTool,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
+    execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
     execute_agent_task_command: AgentTaskCommandTool | None = None,
     request_approval: ApprovalRequestHandler | None = None,
@@ -192,11 +233,14 @@ def create_read_only_main_agent_runtime_handler(
     call_main_agent: MainAgentHandler | None = None,
     summarize_tool_result: MainAgentHandler | None = None,
     render_mode: str = "raw",
+    tool_registry: ToolRegistry | None = None,
+    enable_external_write: bool = False,
 ):
     runner = create_read_only_main_agent_runner(
         retrieve_dev_context=retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
         execute_owner_write_command=execute_owner_write_command,
+        execute_document_delivery_command=execute_document_delivery_command,
         execute_agent_task_read=execute_agent_task_read,
         execute_agent_task_command=execute_agent_task_command,
         request_approval=request_approval,
@@ -204,6 +248,8 @@ def create_read_only_main_agent_runtime_handler(
         call_main_agent=call_main_agent,
         summarize_tool_result=summarize_tool_result,
         render_mode=render_mode,
+        tool_registry=tool_registry,
+        enable_external_write=enable_external_write,
     )
 
     async def handle_main_agent(state: RuntimeState) -> RuntimeResponse:
@@ -269,15 +315,24 @@ def build_read_only_agent_context(state: MainAgentState) -> MainAgentState:
 def create_read_only_agent_context_builder(tool_registry: ToolRegistry) -> MainAgentHandler:
     def build_context(state: MainAgentState) -> MainAgentState:
         visible_tools = tool_registry.visible_tool_names()
+        has_external_document_delivery = tool_registry.get(DOCUMENT_DELIVERY_TOOL_NAME) is not None
         state.metadata["mode"] = "read_only"
         state.metadata["allowed_tools"] = visible_tools
         state.metadata.setdefault(
             "agent_context",
             "\n".join(
                 [
-                    "MainAgentGraph read-only local test mode.",
-                    f"Allowed tools: {', '.join(visible_tools)}.",
-                    "Disallowed: shell, file writes, QQ sends, external writes.",
+                    "MainAgent runtime metadata; this is not user-provided document content.",
+                    f"Registered visible tools: {', '.join(visible_tools)}.",
+                    "Use the owner query as the only user instruction.",
+                    "Never copy these metadata labels, tool lists, or safety text into a document title or body.",
+                    (
+                        "Document delivery is available only through the explicit approval-gated "
+                        "document_delivery_command."
+                        if has_external_document_delivery
+                        else "Document delivery is not currently registered."
+                    ),
+                    "Disallowed: shell, arbitrary paths, project-file writes, and unregistered external actions.",
                 ]
             ),
         )
@@ -291,6 +346,7 @@ def create_read_only_main_agent_tool_registry(
     *,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
+    execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
     execute_agent_task_command: AgentTaskCommandTool | None = None,
 ) -> ToolRegistry:
@@ -394,12 +450,62 @@ def create_read_only_main_agent_tool_registry(
                     "add_fact_memory and add_preference_memory also require arguments.content. "
                     "delete_session_summary also requires arguments.summary_id. "
                     "access-control commands also require numeric arguments.target. "
+                    "create_txt_document, create_word_document, and create_presentation "
+                    "require arguments.title and arguments.content. Generate complete "
+                    "document content before requesting the tool; use Markdown-style "
+                    "headings and bullets, with '## ' headings as slide boundaries for PPT. "
+                    "For PPT, do not create a separate cover section because the renderer "
+                    "adds the title slide; keep at most 12 content slides and at most 6 "
+                    "non-empty body lines per slide. The hard limit is 20 total slides "
+                    "including automatic continuation slides and the title slide. Start "
+                    "PPT content directly with '## ' sections, not a repeated '# ' title. "
+                    "Build a coherent story; each slide should communicate one main idea "
+                    "with 3-5 concise bullets rather than generic filler. "
+                    "Artifacts are created only in the fixed ignored workspace and are not "
+                    "sent through QQ. "
                     "This tool must stop for owner approval before execution."
                 ),
                 risk_level=RiskLevel.WRITE_LOCAL,
                 required_arguments=("command",),
-                optional_arguments=("query", "target", "content", "summary_id"),
+                optional_arguments=(
+                    "query",
+                    "target",
+                    "title",
+                    "content",
+                    "summary_id",
+                ),
                 executor=create_owner_write_command_executor(execute_owner_write_command),
+                enabled=True,
+                llm_visible=True,
+                requires_approval=True,
+                approval_resume_enabled=True,
+            )
+        )
+    if execute_document_delivery_command is not None:
+        specs.append(
+            type(spec)(
+                name=DOCUMENT_DELIVERY_TOOL_NAME,
+                description=(
+                    "Create one TXT, Word, or PowerPoint artifact in the fixed ignored "
+                    "workspace and send it once to the current owner private QQ chat after "
+                    "approval. Use arguments.command as one of: "
+                    f"{', '.join(DOCUMENT_DELIVERY_COMMANDS)}. "
+                    "Requires arguments.title and arguments.content. This is an external "
+                    "write: no group, no non-owner, no arbitrary recipient, no path, no retry. "
+                    "For PPT, the renderer adds the title slide: do not add a separate cover "
+                    "section, keep at most 12 '## ' content sections and at most 6 non-empty "
+                    "body lines per section. The hard limit is 20 total rendered slides, "
+                    "including continuation slides created after every 8 body lines. Start "
+                    "content directly with '## ' sections, never repeat the deck title as "
+                    "'# '. Use a coherent overview-to-capabilities-to-boundaries-to-next-steps "
+                    "story, one main idea and 3-5 concise bullets per slide."
+                ),
+                risk_level=RiskLevel.WRITE_EXTERNAL,
+                required_arguments=("command",),
+                optional_arguments=("query", "title", "content"),
+                executor=create_document_delivery_command_executor(
+                    execute_document_delivery_command
+                ),
                 enabled=True,
                 llm_visible=True,
                 requires_approval=True,
@@ -487,6 +593,39 @@ def create_owner_write_command_executor(
     return execute_owner_write
 
 
+def create_document_delivery_command_executor(
+    execute_document_delivery_command: OwnerWriteCommandTool,
+) -> ToolExecutor:
+    def execute_delivery(arguments, context: ToolContext):
+        command = str(arguments["command"]).strip()
+        if command not in DOCUMENT_DELIVERY_COMMANDS:
+            allowed = ", ".join(DOCUMENT_DELIVERY_COMMANDS)
+            raise ToolExecutionError(
+                f"unsupported document delivery command: {command}; allowed: {allowed}"
+            )
+        render_command = command.replace("create_and_send_", "create_", 1)
+        argument_error = owner_write_argument_error(
+            {
+                "command": render_command,
+                "title": arguments.get("title"),
+                "content": arguments.get("content"),
+            }
+        )
+        if argument_error:
+            raise ToolExecutionError(argument_error)
+        metadata = dict(context.metadata)
+        metadata["tool_arguments"] = dict(arguments)
+        next_context = ToolContext(
+            query=context.query,
+            is_owner=context.is_owner,
+            is_group=context.is_group,
+            metadata=metadata,
+        )
+        return execute_document_delivery_command(command, next_context)
+
+    return execute_delivery
+
+
 def create_default_main_agent_planner(tool_registry: ToolRegistry) -> MainAgentHandler:
     return create_semantic_first_main_agent_planner(
         tool_registry,
@@ -511,6 +650,28 @@ def plan_semantic_read_tool_request(
     tool_registry: ToolRegistry,
     state: MainAgentState,
 ) -> bool:
+    if (
+        tool_registry.get(DOCUMENT_DELIVERY_TOOL_NAME) is not None
+        and document_request_references_missing_prior_content(state.query)
+    ):
+        state.raw_action_request = ask_owner_action_json(
+            "MainAgent 不读取上一条 QQ 消息作为文档正文。请在同一条 "
+            "/agent 请求中粘贴完整正文，或只给出主题并明确让 "
+            "MainAgent 自行撰写。本次未创建审批、未生成文件、未发送 QQ。",
+            reason="document request references unavailable prior-message content",
+        )
+        return True
+    if (
+        is_document_artifact_request(state.query)
+        and (
+            tool_registry.get(DOCUMENT_DELIVERY_TOOL_NAME) is not None
+            or tool_registry.get(OWNER_WRITE_COMMAND_TOOL_NAME) is not None
+        )
+    ):
+        # Document outlines naturally contain words such as "status", "task", and
+        # "next step". They belong to the requested body and must not be consumed by
+        # deterministic management classifiers before the document-capable Main LLM.
+        return False
     if tool_registry.get(AGENT_TASK_COMMAND_TOOL_NAME) is not None:
         task_command = classify_agent_task_command(state.query)
         if task_command:
@@ -579,6 +740,58 @@ def plan_semantic_read_tool_request(
         )
         return True
     return False
+
+
+def is_document_artifact_request(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped:
+        return False
+    compact = re.sub(r"\s+", "", stripped.lower())
+    mentions_document = any(
+        marker in compact
+        for marker in ("word", "docx", "ppt", "pptx", "txt", "文档", "幻灯片")
+    )
+    requests_creation = any(
+        marker in compact
+        for marker in (
+            "生成",
+            "写一份",
+            "写个",
+            "撰写",
+            "制作",
+            "create",
+            "generate",
+            "write",
+        )
+    )
+    return mentions_document and requests_creation
+
+
+def document_request_references_missing_prior_content(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped:
+        return False
+    compact = re.sub(r"\s+", "", stripped.lower())
+    references_prior_content = any(
+        marker in compact
+        for marker in (
+            "我刚才提供",
+            "刚才提供",
+            "上一条内容",
+            "上一条消息",
+            "上面的内容",
+            "上述内容",
+            "之前提供",
+            "previouscontent",
+            "previousmessage",
+            "abovecontent",
+        )
+    )
+    if not (is_document_artifact_request(stripped) and references_prior_content):
+        return False
+    # A genuinely inlined document is normally long and multiline. Short, single-line
+    # references are always treated as missing history instead of being guessed.
+    return len(stripped) < 500 or "\n" not in stripped
 
 
 def agent_task_read_action_json(
@@ -652,6 +865,7 @@ def owner_write_command_action_json(
     *,
     query: str = "",
     target: str = "",
+    title: str = "",
     content: str = "",
     summary_id: str = "",
     reason: str = "",
@@ -661,6 +875,8 @@ def owner_write_command_action_json(
         arguments["query"] = query.strip()
     if target.strip():
         arguments["target"] = target.strip()
+    if title.strip():
+        arguments["title"] = title.strip()
     if content.strip():
         arguments["content"] = content.strip()
     if summary_id.strip():
@@ -913,6 +1129,9 @@ def is_owner_ops_health_query(compact: str) -> bool:
         "健康检查",
         "健康状态",
         "健康自检",
+        "可靠性巡检",
+        "周期巡检",
+        "定期巡检",
         "opshealth",
         "healthcheck",
     )
@@ -1218,6 +1437,55 @@ def is_owner_delete_summary_intent(query: str) -> bool:
 
 def owner_write_argument_error(arguments: dict[str, object]) -> str:
     command = str(arguments.get("command") or "").strip()
+    document_command = (
+        command.replace("create_and_send_", "create_", 1)
+        if command in DOCUMENT_DELIVERY_COMMANDS
+        else command
+    )
+    if document_command in DOCUMENT_ARTIFACT_COMMANDS:
+        title_value = arguments.get("title")
+        content_value = arguments.get("content")
+        if title_value is None:
+            return f"{document_command} 需要明确的 title。"
+        if content_value is None:
+            return f"{document_command} 需要完整的 content。"
+        if not isinstance(title_value, str):
+            return f"{document_command} 需要字符串 title。"
+        if not isinstance(content_value, str):
+            return f"{document_command} 需要字符串 content。"
+        title = title_value.strip()
+        content = content_value.strip()
+        if not title:
+            return f"{document_command} 需要明确的 title。"
+        if (
+            len(title) > DOCUMENT_ARTIFACT_MAX_TITLE_CHARS
+            or "\n" in title
+            or "\r" in title
+            or any(ord(character) < 32 for character in title)
+        ):
+            return f"{document_command} 的 title 无效或过长。"
+        if not content:
+            return f"{document_command} 需要完整的 content。"
+        if len(content) > DOCUMENT_ARTIFACT_MAX_CONTENT_CHARS or any(
+            ord(character) < 32 and character not in "\n\t\r"
+            for character in content
+        ):
+            return f"{document_command} 的 content 超出长度上限。"
+        if any(marker in content for marker in DOCUMENT_INTERNAL_SCAFFOLD_MARKERS):
+            return (
+                f"{document_command} 的 content 包含 MainAgent 内部上下文包装文本，"
+                "已在审批前拒绝。请让 MainAgent 根据主题生成正文，或在同一条 "
+                "/agent 请求中粘贴完整正文；不能引用“刚才/上面”的消息。"
+            )
+        if (
+            document_command == "create_presentation"
+            and presentation_slide_count(content) > DOCUMENT_ARTIFACT_MAX_SLIDES
+        ):
+            return (
+                "create_presentation 按最终分页规则会超过 20 张幻灯片，"
+                "已在审批前拒绝。请减少 `##` 章节或每节正文行；"
+                "标题页由渲染器自动生成，不要另建“封面”章节。"
+            )
     if command == "select_persona" and not str(arguments.get("target") or "").strip():
         return "select_persona 需要明确的角色卡 key：/agent 选择角色卡 <key>。"
     if command in {"add_fact_memory", "add_preference_memory"} and not str(
@@ -1794,6 +2062,25 @@ def create_main_agent_action_validator(tool_registry: ToolRegistry) -> MainAgent
                 state.response_text = argument_error
                 state.error = "need_argument"
                 return state
+        if (
+            action_request.action == MainAgentAction.TOOL_REQUEST
+            and action_request.tool_name == DOCUMENT_DELIVERY_TOOL_NAME
+        ):
+            command = str(action_request.arguments.get("command") or "").strip()
+            render_command = command.replace("create_and_send_", "create_", 1)
+            argument_error = owner_write_argument_error(
+                {
+                    "command": render_command,
+                    "title": action_request.arguments.get("title"),
+                    "content": action_request.arguments.get("content"),
+                }
+            )
+            if command not in DOCUMENT_DELIVERY_COMMANDS:
+                argument_error = f"不支持的文档发送 command：{command}。"
+            if argument_error:
+                state.response_text = argument_error
+                state.error = "need_argument"
+                return state
         return apply_action_request_to_state(state, action_request)
 
     return validate_action_request
@@ -1902,10 +2189,16 @@ def create_tool_registry_executor(tool_registry: ToolRegistry) -> MainAgentHandl
             if result.metadata:
                 state.metadata["tool_result_metadata"] = dict(result.metadata)
         except ToolExecutionError as exc:
-            state.response_text = f"MainAgentGraph tool failed: {exc}"
+            state.response_text = (
+                "MainAgentGraph tool failed: "
+                + format_failure_user_message(exc, component="工具执行")
+            )
             state.error = "tool_execution_failed"
         except Exception as exc:
-            state.response_text = f"MainAgentGraph read-only tool failed: {exc}"
+            state.response_text = (
+                "MainAgentGraph read-only tool failed: "
+                + format_failure_user_message(exc, component="只读工具执行")
+            )
             state.error = "tool_execution_failed"
         return state
 

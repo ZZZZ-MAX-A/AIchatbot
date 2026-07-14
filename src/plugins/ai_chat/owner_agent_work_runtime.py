@@ -25,6 +25,7 @@ from .external_read_security import (
     ExternalReadPolicyError,
     normalize_external_read_query,
 )
+from .failure_diagnostics import format_failure_user_message
 from .system_diagnostics_report import (
     STATUS_LABELS,
     STATUS_ORDER,
@@ -967,7 +968,10 @@ class OwnerAgentWorkRuntime:
                 response_text=(
                     format_external_read_policy_error(external_policy_error)
                     if external_policy_error is not None
-                    else safe_error
+                    else format_failure_user_message(
+                        safe_error,
+                        component=spec.display_name,
+                    )
                 ),
             )
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .sticker_intent import StickerIntent
+
 
 @dataclass(frozen=True)
 class ChatImageContext:
@@ -57,3 +59,4 @@ class ChatRuntimeResult:
     reply: str
     stored_assistant: str
     voice_text: str | None = None
+    sticker_intent: StickerIntent | None = None

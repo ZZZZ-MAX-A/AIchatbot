@@ -57,33 +57,49 @@ class LocalTimeResolution:
 
 
 _QUESTION_PUNCTUATION = str.maketrans("", "", " ，。！？?!.、~～\t\r\n")
-_POLITE_PREFIX = r"(?:请问|我想问一下|想问一下|问一下)?"
-_TRAILING_PARTICLE = r"(?:了|啊|呀|呢|来着)?"
+_DIRECT_QUERY_PREFIX = (
+    r"(?:(?:请问|我想问一下|想问一下|问一下)|"
+    r"(?:那)?(?:爱可|你)?(?:还)?记得)?"
+)
+_TRAILING_PARTICLE = r"(?:了|啊|呀|呢|吗|嘛|来着)?"
 _DATE_PATTERN = re.compile(
-    rf"^{_POLITE_PREFIX}(?:今天|今日)(?:是)?"
+    rf"^{_DIRECT_QUERY_PREFIX}(?:今天|今日)(?:是)?"
     rf"(?:几月几日|几月几号|几号|多少号|什么日期|日期(?:是)?多少|日期)"
     rf"{_TRAILING_PARTICLE}$"
 )
 _WEEKDAY_PATTERN = re.compile(
-    rf"^{_POLITE_PREFIX}(?:今天|今日)(?:是)?"
+    rf"^{_DIRECT_QUERY_PREFIX}(?:今天|今日)(?:是)?"
     rf"(?:星期|周|礼拜)几{_TRAILING_PARTICLE}$"
 )
 _DATE_AND_WEEKDAY_PATTERN = re.compile(
-    rf"^{_POLITE_PREFIX}(?:今天|今日)(?:是)?"
+    rf"^{_DIRECT_QUERY_PREFIX}(?:今天|今日)(?:是)?"
     rf"(?:(?:几月几日|几月几号|几号)(?:是)?(?:星期|周|礼拜)几|"
     rf"什么日期(?:是)?(?:星期|周|礼拜)几)"
     rf"{_TRAILING_PARTICLE}$"
 )
 _TIME_PATTERN = re.compile(
-    rf"^{_POLITE_PREFIX}(?:(?:现在|当前|这会儿|此刻)(?:是)?)?"
+    rf"^{_DIRECT_QUERY_PREFIX}(?:(?:现在|当前|这会儿|此刻)(?:是)?)?"
     rf"(?:几点(?:钟)?|什么时间|时间(?:是)?多少)"
     rf"{_TRAILING_PARTICLE}$"
 )
 _YEAR_PATTERN = re.compile(
-    rf"^{_POLITE_PREFIX}(?:今年|现在)(?:是)?"
+    rf"^{_DIRECT_QUERY_PREFIX}(?:今年|现在)(?:是)?"
     rf"(?:哪一年|几年|多少年|什么年份)"
     rf"{_TRAILING_PARTICLE}$"
 )
+
+
+def _without_leading_parenthetical_context(text: str) -> str:
+    remaining = text.lstrip()
+    for _ in range(3):
+        if not remaining or remaining[0] not in "（(":
+            break
+        closing = "）" if remaining[0] == "（" else ")"
+        closing_index = remaining.find(closing, 1)
+        if closing_index < 0:
+            return text
+        remaining = remaining[closing_index + 1 :].lstrip()
+    return remaining
 
 
 def timezone_for_name(timezone_name: str) -> tzinfo:
@@ -96,7 +112,8 @@ def timezone_for_name(timezone_name: str) -> tzinfo:
 def parse_local_time_intent(text: str) -> LocalTimeIntent | None:
     if not isinstance(text, str):
         return None
-    compact = text.translate(_QUESTION_PUNCTUATION).strip()
+    question_text = _without_leading_parenthetical_context(text)
+    compact = question_text.translate(_QUESTION_PUNCTUATION).strip()
     if not compact or len(compact) > 40:
         return None
     if _DATE_AND_WEEKDAY_PATTERN.fullmatch(compact):
@@ -170,6 +187,9 @@ def format_trusted_local_time_context(
             f"用户问题类型：{intent.value}",
             "以上事实来自 Bot 本机本轮消息的单次时钟快照，不来自用户、记忆、RAG 或网页。",
             "请保持当前角色卡的自然表达方式回答，但不得修改日期、星期、年份或时间事实。",
+            "历史消息中可能存在过期或错误的日期时间；必须忽略它们，不要复述、纠正或比较旧值。",
+            "回答中只陈述一次本轮问题所需的当前事实，并使用上方阿拉伯数字值，确保事实可校验。",
+            "不要只输出裸事实；除非用户明确要求极简，否则继续遵守当前角色卡的句数、称呼和动作描写规则。",
             "不要声称进行了联网、搜索或工具调用。",
             "不要补充未提供的天气、节假日、调休、农历、日程或提醒信息。",
         ]

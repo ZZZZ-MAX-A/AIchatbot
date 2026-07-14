@@ -58,7 +58,8 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
 
         self.assertIn("if not config.enable_main_agent:", source)
         self.assertIn("if config.main_agent_use_llm:", source)
-        self.assertIn("create_main_agent_lc_call_handler(config)", source)
+        self.assertIn("create_main_agent_lc_call_handler(", source)
+        self.assertIn("tool_registry=main_agent_tool_registry", source)
         self.assertIn("create_main_agent_tool_summary_lc_handler(config)", source)
         self.assertIn("主模型 Key", source)
         self.assertNotIn("主模型接口：", source)
@@ -86,6 +87,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
             "external_read_report_for_event=_configured_external_read_report_for_event()",
             source,
         )
+
         external_factory_start = source.index(
             "def _configured_external_read_report_for_event():"
         )
@@ -215,6 +217,35 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("SYSTEM_DIAGNOSTICS_VISION_RESPONSE_LIMIT = 1800", system_report_source)
         self.assertNotIn("httpx", system_report_source)
         self.assertNotIn("openai", system_report_source.lower())
+
+    def test_main_agent_document_request_has_progress_ack_and_session_busy_guard(self):
+        source = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        handler_start = source.index("@main_agent_cmd.handle()")
+        handler_end = source.index("@main_agent_debug_cmd.handle()", handler_start)
+        handler = source[handler_start:handler_end]
+
+        self.assertIn("_main_agent_session_locks", source)
+        self.assertIn("def main_agent_session_lock(", source)
+        self.assertIn("if lock.locked():", handler)
+        self.assertIn("当前消息未执行", handler)
+        self.assertIn("await lock.acquire()", handler)
+        self.assertIn("finally:\n        lock.release()", handler)
+        self.assertIn("is_document_artifact_request(query)", handler)
+        self.assertIn("document_request_references_missing_prior_content(query)", handler)
+        self.assertIn("正在生成文档标题、正文和审批请求", handler)
+        self.assertEqual(handler.count("run_main_agent_qq_command("), 1)
+        self.assertLess(
+            handler.index("await lock.acquire()"),
+            handler.index("run_main_agent_qq_command("),
+        )
+        self.assertLess(
+            handler.index("matcher.send("),
+            handler.index("run_main_agent_qq_command("),
+        )
+        self.assertLess(
+            handler.index("matcher.finish(reply)"),
+            handler.index("lock.release()"),
+        )
 
     def test_memory_rag_runner_uses_configured_owner_check(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

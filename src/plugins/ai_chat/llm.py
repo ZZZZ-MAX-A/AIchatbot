@@ -81,6 +81,8 @@ async def ask_llm(
     config: AiChatConfig,
     history: list[dict[str, str]],
     user_text: str,
+    *,
+    extra_system_context: str = "",
 ) -> str:
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -98,6 +100,8 @@ async def ask_llm(
     persona_prompt = load_persona_prompt()
     if persona_prompt:
         messages.append({"role": "system", "content": persona_prompt})
+    if extra_system_context.strip():
+        messages.append({"role": "system", "content": extra_system_context.strip()})
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 

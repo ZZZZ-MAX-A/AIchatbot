@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
@@ -60,6 +60,13 @@ from .diagnostics import (
     recent_error_lines,
     vision_troubleshoot_findings,
 )
+from .document_artifacts import (
+    DocumentArtifactDelivery,
+    DocumentArtifactError,
+    create_document_artifact,
+    prepare_document_artifact_delivery,
+    validate_document_artifact_delivery,
+)
 from .development_context_report import (
     DevelopmentContextReportPayload,
     build_development_context_report_source,
@@ -72,6 +79,12 @@ from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_s
 from .external_read_status import (
     external_read_task_snapshot_lines,
     latest_external_read_task_snapshot,
+)
+from .failure_diagnostics import (
+    classify_failure,
+    format_failure_inspection,
+    inspect_failure_lines,
+    sanitize_failure_text,
 )
 from .graph import (
     ActorRole,
@@ -114,6 +127,8 @@ from .graph import (
     call_main_llm_for_development_context_report,
     create_read_only_main_agent_runtime_handler,
     create_read_only_main_agent_tool_registry,
+    document_request_references_missing_prior_content,
+    is_document_artifact_request,
     persisted_turn_from_chat_turn,
     runtime_state_from_main_agent_command,
     runtime_state_from_chat_request,
@@ -196,6 +211,23 @@ from .summaries import (
     recent_summaries,
     summary_stats,
 )
+from .sticker_intent import (
+    STICKER_INTENT_SYSTEM_CONTEXT,
+    extract_sticker_intent,
+)
+from .sticker_attachment import send_selected_sticker_attachment
+from .sticker_classifier import (
+    RemoteStickerClassifierSettings,
+    StickerClassifierResult,
+    classify_sticker_intent,
+)
+from .sticker_selection import (
+    StickerSelectionContext,
+    StickerSelectionDecision,
+    StickerSelectionPolicy,
+    StickerSelectionRuntime,
+    current_selection_time,
+)
 from .system_diagnostics_report import (
     SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
     SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
@@ -252,9 +284,55 @@ ensure_database()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 _session_locks: dict[str, asyncio.Lock] = {}
+_main_agent_session_locks: dict[str, asyncio.Lock] = {}
 _last_shadow_chat_snapshot: ShadowChatSnapshot | None = None
 _last_shadow_chat_validation: ShadowChatValidation | None = None
 _last_root_graph_chat_observation: dict[str, object] | None = None
+_chat_sticker_selection_runtime = StickerSelectionRuntime()
+
+
+@dataclass(frozen=True)
+class ChatStickerIntentShadowSnapshot:
+    marker_status: str
+    mood: str
+    intensity: str
+    scene: str
+    confidence: float
+    decision_reason: str
+    selected_sticker_id: str
+    eligible_count: int
+
+
+_last_chat_sticker_intent_shadow: ChatStickerIntentShadowSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class RemoteStickerClassifierShadowSnapshot:
+    sample_id: int
+    classifier_status: str
+    mood: str
+    intensity: str
+    scene: str
+    confidence: float
+    decision_reason: str
+    selected_sticker_id: str
+    eligible_count: int
+    attachment_status: str
+
+
+@dataclass(frozen=True)
+class RemoteStickerClassifierEvaluation:
+    snapshot: RemoteStickerClassifierShadowSnapshot
+    decision: StickerSelectionDecision | None = None
+    context: StickerSelectionContext | None = None
+
+
+_last_remote_sticker_classifier_shadow: (
+    RemoteStickerClassifierShadowSnapshot | None
+) = None
+_remote_sticker_classifier_sample_id = 0
+_remote_sticker_classifier_task: asyncio.Task[None] | None = None
+_chat_sticker_attachments_suspended = False
 
 
 @dataclass(frozen=True)
@@ -306,14 +384,25 @@ def session_lock(key: str) -> asyncio.Lock:
     return lock
 
 
+def main_agent_session_lock(key: str) -> asyncio.Lock:
+    lock = _main_agent_session_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _main_agent_session_locks[key] = lock
+    return lock
+
+
 def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
     ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     group = event.group_id if isinstance(event, GroupMessageEvent) else ""
+    diagnosis = classify_failure(exc)
     with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(
             f"{datetime.now().isoformat(timespec='seconds')} "
             f"user={event.user_id} group={group} "
-            f"{type(exc).__name__}: {exc}\n"
+            f"category={diagnosis.category.value} code={diagnosis.code} "
+            f"type={type(exc).__name__} "
+            f'message="{sanitize_failure_text(exc)}"\n'
         )
 
 
@@ -323,7 +412,8 @@ def log_main_agent_observation(message: str, event: MessageEvent) -> None:
     with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(
             f"{datetime.now().isoformat(timespec='seconds')} "
-            f"user={event.user_id} group={group} {message}\n"
+            f"user={event.user_id} group={group} "
+            f"{sanitize_failure_text(message, limit=500)}\n"
         )
 
 
@@ -1383,11 +1473,7 @@ def tts_status_reply_lines(tts_health: dict[str, object] | None = None) -> list[
 
 
 def recent_errors_reply(errors: tuple[str, ...]) -> str:
-    if not errors:
-        return "最近错误：\n暂无。"
-    lines = ["最近错误："]
-    lines.extend(f"{index}. {line}" for index, line in enumerate(errors, 1))
-    return "\n".join(lines)
+    return format_failure_inspection(inspect_failure_lines(errors, window_hours=24))
 
 
 def _select_prefixed_lines(text: str, prefixes: tuple[str, ...], *, limit: int = 12) -> list[str]:
@@ -1446,10 +1532,10 @@ async def agent_ops_health_reply(event: MessageEvent) -> str:
             ),
         )
 
-    errors = recent_error_lines(5)
-    error_lines = ["暂无。"] if not errors else [
-        f"{index}. {line}" for index, line in enumerate(errors[:5], 1)
-    ]
+    errors = recent_error_lines(200)
+    error_lines = format_failure_inspection(
+        inspect_failure_lines(errors, window_hours=24)
+    ).splitlines()
     root_lines = recent_root_graph_chat_observation_lines()[:12]
     main_agent_lines = recent_main_agent_observation_lines(limit=5)
 
@@ -1690,7 +1776,7 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         return current
 
     async def read_recent_errors(current: DiagnosticsState) -> DiagnosticsState:
-        current.recent_errors = tuple(recent_error_lines(5))
+        current.recent_errors = tuple(recent_error_lines(200))
         return current
 
     async def read_memory_stats(current: DiagnosticsState) -> DiagnosticsState:
@@ -2697,6 +2783,7 @@ async def run_voice_graph_intent(
                 reply=result.reply,
                 stored_assistant=voice_text,
                 voice_text=voice_text,
+                sticker_intent=result.sticker_intent,
             )
             shadow_state = safe_apply_shadow_runtime_result(
                 event,
@@ -2711,6 +2798,7 @@ async def run_voice_graph_intent(
             mark_shadow_chat_stage(shadow_state, "finalizing")
             safe_record_shadow_chat_snapshot(event, shadow_state)
             await finalize_chat_result(
+                bot,
                 event,
                 matcher,
                 request.key,
@@ -2968,6 +3056,48 @@ view_persona_cmd = on_command("查看角色卡", aliases={"view_persona"}, prior
 select_persona_cmd = on_command("选择角色卡", aliases={"select_persona"}, priority=5, block=True)
 tell_owner_cmd = on_command("转告主人", aliases={"留言给主人", "tell_owner"}, priority=5, block=True)
 tts_status_cmd = on_command("语音状态", aliases={"tts_status"}, priority=5, block=True)
+sticker_check_cmd = on_command(
+    "表情检查",
+    aliases={"sticker_check"},
+    priority=5,
+    block=True,
+)
+sticker_analyze_cmd = on_command(
+    "表情分析",
+    aliases={"sticker_analyze"},
+    priority=5,
+    block=True,
+)
+sticker_drafts_cmd = on_command(
+    "表情草稿",
+    aliases={"sticker_drafts"},
+    priority=5,
+    block=True,
+)
+sticker_approve_cmd = on_command(
+    "表情批准",
+    aliases={"sticker_approve"},
+    priority=5,
+    block=True,
+)
+sticker_revoke_cmd = on_command(
+    "表情撤销",
+    aliases={"sticker_revoke"},
+    priority=5,
+    block=True,
+)
+sticker_preview_cmd = on_command(
+    "表情预览",
+    aliases={"sticker_preview"},
+    priority=5,
+    block=True,
+)
+sticker_intent_status_cmd = on_command(
+    "表情意图状态",
+    aliases={"sticker_intent_status"},
+    priority=5,
+    block=True,
+)
 help_cmd = on_command("权限帮助", aliases={"白名单帮助", "管理帮助"}, priority=5, block=True)
 
 allow_group_cmd = on_command("加入群白名单", aliases={"允许群", "allow_group"}, priority=5, block=True)
@@ -3799,6 +3929,419 @@ async def prepare_chat_request(
     )
 
 
+async def evaluate_chat_sticker_intent_shadow(
+    event: MessageEvent,
+    result: ChatRuntimeResult,
+    *,
+    marker_status: str,
+) -> None:
+    global _last_chat_sticker_intent_shadow
+    if not config.enable_chat_sticker_intent_shadow:
+        return
+    intent = result.sticker_intent
+    if intent is None:
+        _last_chat_sticker_intent_shadow = ChatStickerIntentShadowSnapshot(
+            marker_status=marker_status,
+            mood="",
+            intensity="",
+            scene="",
+            confidence=0.0,
+            decision_reason="intent_absent",
+            selected_sticker_id="",
+            eligible_count=0,
+        )
+        return
+    try:
+        from .sticker_library import load_approved_sticker_library
+
+        library = await asyncio.to_thread(
+            load_approved_sticker_library,
+            config.local_sticker_root,
+            limits=sticker_limits_from_config(),
+        )
+    except Exception:
+        _last_chat_sticker_intent_shadow = ChatStickerIntentShadowSnapshot(
+            marker_status=marker_status,
+            mood=intent.mood,
+            intensity=intent.intensity,
+            scene=intent.scene,
+            confidence=intent.confidence,
+            decision_reason="library_unavailable",
+            selected_sticker_id="",
+            eligible_count=0,
+        )
+        return
+    card = active_role_card()
+    policy = StickerSelectionPolicy(
+        enabled=True,
+        owner_private_only=config.chat_sticker_owner_private_only,
+        cooldown_seconds=config.chat_sticker_cooldown_seconds,
+        min_messages_between=config.chat_sticker_min_messages_between,
+        max_per_hour=config.chat_sticker_max_per_hour,
+        max_per_reply=config.chat_sticker_max_per_reply,
+        min_confidence=config.chat_sticker_min_intent_confidence,
+    )
+    context = StickerSelectionContext(
+        session_key=session_key(event),
+        is_owner=is_owner(config, event),
+        is_private=isinstance(event, PrivateMessageEvent),
+        persona_key=card.key if card is not None else "",
+        message_index=session_message_progress(session_key(event)) + 1,
+        reply_text=result.reply,
+        now=current_selection_time(),
+    )
+    decision = _chat_sticker_selection_runtime.decide(
+        library,
+        intent,
+        context,
+        policy,
+    )
+    _last_chat_sticker_intent_shadow = ChatStickerIntentShadowSnapshot(
+        marker_status=marker_status,
+        mood=intent.mood,
+        intensity=intent.intensity,
+        scene=intent.scene,
+        confidence=intent.confidence,
+        decision_reason=decision.reason,
+        selected_sticker_id=decision.selected_sticker_id or "",
+        eligible_count=decision.eligible_count,
+    )
+
+
+def remote_sticker_classifier_settings() -> RemoteStickerClassifierSettings:
+    return RemoteStickerClassifierSettings(
+        enabled=config.enable_remote_sticker_classifier,
+        api_key=config.sticker_classifier_api_key,
+        base_url=config.sticker_classifier_base_url,
+        model=config.sticker_classifier_model,
+        timeout_seconds=config.sticker_classifier_timeout_seconds,
+        max_input_chars=config.sticker_classifier_max_input_chars,
+    )
+
+
+def _remote_classifier_snapshot_for_absent_intent(
+    sample_id: int,
+    classification: StickerClassifierResult,
+) -> RemoteStickerClassifierShadowSnapshot:
+    reason = (
+        "intent_absent"
+        if classification.status == "not_requested"
+        else f"classifier_{classification.status}"
+    )
+    return RemoteStickerClassifierShadowSnapshot(
+        sample_id=sample_id,
+        classifier_status=classification.status,
+        mood="",
+        intensity="",
+        scene="",
+        confidence=0.0,
+        decision_reason=reason,
+        selected_sticker_id="",
+        eligible_count=0,
+        attachment_status=(
+            "disabled" if not config.enable_chat_sticker_attachments else "not_triggered"
+        ),
+    )
+
+
+async def _evaluate_remote_sticker_classifier_result(
+    event: MessageEvent,
+    reply_text: str,
+    sample_id: int,
+    classification: StickerClassifierResult,
+) -> RemoteStickerClassifierEvaluation:
+    intent = classification.intent
+    if intent is None:
+        return RemoteStickerClassifierEvaluation(
+            _remote_classifier_snapshot_for_absent_intent(
+                sample_id,
+                classification,
+            )
+        )
+    try:
+        from .sticker_library import load_approved_sticker_library
+
+        library = await asyncio.to_thread(
+            load_approved_sticker_library,
+            config.local_sticker_root,
+            limits=sticker_limits_from_config(),
+        )
+    except Exception:
+        return RemoteStickerClassifierEvaluation(
+            RemoteStickerClassifierShadowSnapshot(
+                sample_id=sample_id,
+                classifier_status=classification.status,
+                mood=intent.mood,
+                intensity=intent.intensity,
+                scene=intent.scene,
+                confidence=intent.confidence,
+                decision_reason="library_unavailable",
+                selected_sticker_id="",
+                eligible_count=0,
+                attachment_status=(
+                    "disabled"
+                    if not config.enable_chat_sticker_attachments
+                    else "not_triggered"
+                ),
+            )
+        )
+    card = active_role_card()
+    policy = StickerSelectionPolicy(
+        enabled=True,
+        owner_private_only=config.chat_sticker_owner_private_only,
+        cooldown_seconds=config.chat_sticker_cooldown_seconds,
+        min_messages_between=config.chat_sticker_min_messages_between,
+        max_per_hour=config.chat_sticker_max_per_hour,
+        max_per_reply=config.chat_sticker_max_per_reply,
+        min_confidence=config.chat_sticker_min_intent_confidence,
+    )
+    context = StickerSelectionContext(
+        session_key=session_key(event),
+        is_owner=is_owner(config, event),
+        is_private=isinstance(event, PrivateMessageEvent),
+        persona_key=card.key if card is not None else "",
+        message_index=session_message_progress(session_key(event)),
+        reply_text=reply_text,
+        now=current_selection_time(),
+    )
+    decision = _chat_sticker_selection_runtime.decide(
+        library,
+        intent,
+        context,
+        policy,
+    )
+    snapshot = RemoteStickerClassifierShadowSnapshot(
+        sample_id=sample_id,
+        classifier_status=classification.status,
+        mood=intent.mood,
+        intensity=intent.intensity,
+        scene=intent.scene,
+        confidence=intent.confidence,
+        decision_reason=decision.reason,
+        selected_sticker_id=decision.selected_sticker_id or "",
+        eligible_count=decision.eligible_count,
+        attachment_status=(
+            "disabled"
+            if not config.enable_chat_sticker_attachments
+            else ("ready" if decision.selected else "not_triggered")
+        ),
+    )
+    return RemoteStickerClassifierEvaluation(
+        snapshot,
+        decision if decision.selected else None,
+        context if decision.selected else None,
+    )
+
+
+async def _maybe_send_remote_sticker_attachment(
+    bot: Bot,
+    event: MessageEvent,
+    evaluation: RemoteStickerClassifierEvaluation,
+) -> RemoteStickerClassifierShadowSnapshot:
+    global _chat_sticker_attachments_suspended
+
+    snapshot = evaluation.snapshot
+    if not config.enable_chat_sticker_attachments:
+        return snapshot
+    if _chat_sticker_attachments_suspended:
+        return replace(snapshot, attachment_status="suspended")
+    decision = evaluation.decision
+    context = evaluation.context
+    if decision is None or context is None or not decision.selected_sticker_id:
+        return replace(snapshot, attachment_status="not_triggered")
+
+    async def onebot_sender(recipient: int, file_path: Path) -> None:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=recipient,
+            message=MessageSegment.image(str(file_path)),
+        )
+
+    send_result = await send_selected_sticker_attachment(
+        config.local_sticker_root,
+        decision.selected_sticker_id,
+        int(event.user_id),
+        limits=sticker_limits_from_config(),
+        sender=onebot_sender,
+    )
+    if not send_result.sent:
+        return replace(snapshot, attachment_status=send_result.status)
+    try:
+        _chat_sticker_selection_runtime.commit_sent(decision, context)
+    except ValueError:
+        _chat_sticker_attachments_suspended = True
+        return replace(snapshot, attachment_status="sent_commit_failed")
+    return replace(snapshot, attachment_status="sent")
+
+
+def schedule_remote_sticker_classifier_shadow(
+    bot: Bot,
+    event: MessageEvent,
+    user_text: str,
+    reply_text: str,
+) -> None:
+    global _last_remote_sticker_classifier_shadow
+    global _remote_sticker_classifier_sample_id
+    global _remote_sticker_classifier_task
+
+    if not config.enable_remote_sticker_classifier:
+        return
+    if not isinstance(event, PrivateMessageEvent) or not is_owner(config, event):
+        return
+
+    _remote_sticker_classifier_sample_id += 1
+    sample_id = _remote_sticker_classifier_sample_id
+    if config.enable_chat_sticker_attachments:
+        if _chat_sticker_attachments_suspended:
+            _last_remote_sticker_classifier_shadow = (
+                RemoteStickerClassifierShadowSnapshot(
+                    sample_id=sample_id,
+                    classifier_status="skipped",
+                    mood="",
+                    intensity="",
+                    scene="",
+                    confidence=0.0,
+                    decision_reason="attachments_suspended",
+                    selected_sticker_id="",
+                    eligible_count=0,
+                    attachment_status="suspended",
+                )
+            )
+            return
+        try:
+            policy = StickerSelectionPolicy(
+                enabled=True,
+                owner_private_only=config.chat_sticker_owner_private_only,
+                cooldown_seconds=config.chat_sticker_cooldown_seconds,
+                min_messages_between=config.chat_sticker_min_messages_between,
+                max_per_hour=config.chat_sticker_max_per_hour,
+                max_per_reply=config.chat_sticker_max_per_reply,
+                min_confidence=config.chat_sticker_min_intent_confidence,
+            )
+            context = StickerSelectionContext(
+                session_key=session_key(event),
+                is_owner=True,
+                is_private=True,
+                persona_key="",
+                message_index=session_message_progress(session_key(event)),
+                reply_text=reply_text,
+                now=current_selection_time(),
+            )
+            preflight = _chat_sticker_selection_runtime.preflight(context, policy)
+        except Exception:
+            _last_remote_sticker_classifier_shadow = (
+                RemoteStickerClassifierShadowSnapshot(
+                    sample_id=sample_id,
+                    classifier_status="skipped",
+                    mood="",
+                    intensity="",
+                    scene="",
+                    confidence=0.0,
+                    decision_reason="preflight_unavailable",
+                    selected_sticker_id="",
+                    eligible_count=0,
+                    attachment_status="preflight_blocked",
+                )
+            )
+            return
+        if not preflight.allowed:
+            _last_remote_sticker_classifier_shadow = (
+                RemoteStickerClassifierShadowSnapshot(
+                    sample_id=sample_id,
+                    classifier_status="skipped",
+                    mood="",
+                    intensity="",
+                    scene="",
+                    confidence=0.0,
+                    decision_reason=preflight.reason,
+                    selected_sticker_id="",
+                    eligible_count=0,
+                    attachment_status="preflight_blocked",
+                )
+            )
+            return
+    if (
+        _remote_sticker_classifier_task is not None
+        and not _remote_sticker_classifier_task.done()
+    ):
+        _last_remote_sticker_classifier_shadow = (
+            RemoteStickerClassifierShadowSnapshot(
+                sample_id=sample_id,
+                classifier_status="busy",
+                mood="",
+                intensity="",
+                scene="",
+                confidence=0.0,
+                decision_reason="classifier_busy",
+                selected_sticker_id="",
+                eligible_count=0,
+                attachment_status=(
+                    "disabled"
+                    if not config.enable_chat_sticker_attachments
+                    else "not_triggered"
+                ),
+            )
+        )
+        return
+
+    _last_remote_sticker_classifier_shadow = RemoteStickerClassifierShadowSnapshot(
+        sample_id=sample_id,
+        classifier_status="pending",
+        mood="",
+        intensity="",
+        scene="",
+        confidence=0.0,
+        decision_reason="classifier_pending",
+        selected_sticker_id="",
+        eligible_count=0,
+        attachment_status=(
+            "disabled" if not config.enable_chat_sticker_attachments else "pending"
+        ),
+    )
+
+    async def run_classifier() -> None:
+        global _last_remote_sticker_classifier_shadow
+        try:
+            classification = await classify_sticker_intent(
+                remote_sticker_classifier_settings(),
+                user_text,
+                reply_text,
+            )
+            evaluation = await _evaluate_remote_sticker_classifier_result(
+                event,
+                reply_text,
+                sample_id,
+                classification,
+            )
+            snapshot = await _maybe_send_remote_sticker_attachment(
+                bot,
+                event,
+                evaluation,
+            )
+        except Exception:
+            snapshot = RemoteStickerClassifierShadowSnapshot(
+                sample_id=sample_id,
+                classifier_status="internal_error",
+                mood="",
+                intensity="",
+                scene="",
+                confidence=0.0,
+                decision_reason="classifier_internal_error",
+                selected_sticker_id="",
+                eligible_count=0,
+                attachment_status=(
+                    "disabled"
+                    if not config.enable_chat_sticker_attachments
+                    else "internal_error"
+                ),
+            )
+        current = _last_remote_sticker_classifier_shadow
+        if current is not None and current.sample_id == sample_id:
+            _last_remote_sticker_classifier_shadow = snapshot
+
+    _remote_sticker_classifier_task = asyncio.create_task(run_classifier())
+
+
 async def generate_chat_text_response(
     event: MessageEvent,
     matcher: Matcher,
@@ -3820,6 +4363,11 @@ async def generate_chat_text_response(
             config,
             llm_history,
             llm_user_text(event, user_content.for_llm),
+            extra_system_context=(
+                STICKER_INTENT_SYSTEM_CONTEXT
+                if config.enable_chat_sticker_intent_shadow
+                else ""
+            ),
         )
     except Exception as exc:
         log_ai_event_error(exc, event)
@@ -3829,10 +4377,29 @@ async def generate_chat_text_response(
         await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
         return None
 
+    extracted_intent = extract_sticker_intent(reply)
+    reply = extracted_intent.visible_reply
+    if not reply:
+        reply = "（爱可轻轻眨了眨眼，重新整理着想说的话。）狗修金，爱可刚才没有组织好回答，请您再说一次。"
+
     if local_time_request is not None:
         reply = finalize_local_time_chat_reply(local_time_request, reply)
 
-    return ChatRuntimeResult(reply=reply, stored_assistant=reply)
+    result = ChatRuntimeResult(
+        reply=reply,
+        stored_assistant=reply,
+        sticker_intent=(
+            extracted_intent.intent
+            if config.enable_chat_sticker_intent_shadow
+            else None
+        ),
+    )
+    await evaluate_chat_sticker_intent_shadow(
+        event,
+        result,
+        marker_status=extracted_intent.status,
+    )
+    return result
 
 
 async def generate_legacy_chat_response(
@@ -3874,6 +4441,7 @@ async def generate_legacy_chat_response(
             reply=reply,
             stored_assistant=voice_text,
             voice_text=voice_text,
+            sticker_intent=result.sticker_intent,
         )
 
     return result
@@ -3911,13 +4479,18 @@ async def send_semantic_voice_response(
         reply=result.reply,
         stored_assistant=voice_text,
         voice_text=voice_text,
+        sticker_intent=result.sticker_intent,
     )
 
 async def render_chat_result(
+    bot: Bot,
+    event: MessageEvent,
     matcher: Matcher,
     result: ChatRuntimeResult,
     options: ChatOptions,
     state: ChatState | None = None,
+    *,
+    classifier_user_text: str = "",
 ) -> None:
     if options.semantic_voice:
         update_chat_commit(
@@ -3935,9 +4508,16 @@ async def render_chat_result(
         reply_chars=len(result.reply),
         should_reply_text=True,
     )
+    schedule_remote_sticker_classifier_shadow(
+        bot,
+        event,
+        classifier_user_text,
+        result.reply,
+    )
 
 
 async def finalize_chat_result(
+    bot: Bot,
     event: MessageEvent,
     matcher: Matcher,
     key: str,
@@ -3946,6 +4526,8 @@ async def finalize_chat_result(
     result: ChatRuntimeResult,
     options: ChatOptions,
     state: ChatState | None = None,
+    *,
+    classifier_user_text: str = "",
 ) -> None:
     turn = build_chat_turn(user_content.stored, result.stored_assistant)
     await persist_chat_turn(
@@ -3983,6 +4565,12 @@ async def finalize_chat_result(
         qq_reply_sent=True,
         reply_chars=len(result.reply),
         should_reply_text=True,
+    )
+    schedule_remote_sticker_classifier_shadow(
+        bot,
+        event,
+        classifier_user_text,
+        result.reply,
     )
     if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
         set_last_tts_candidate(result.reply)
@@ -4078,6 +4666,7 @@ async def run_chat_graph_session_runtime(
                 reply=result.reply,
                 stored_assistant=voice_text,
                 voice_text=voice_text,
+                sticker_intent=result.sticker_intent,
             )
         voice_result = await send_semantic_voice_response(
             bot,
@@ -4212,10 +4801,13 @@ async def run_legacy_chat_session(
                 mark_shadow_chat_stage(shadow_state, "finalizing")
                 safe_record_shadow_chat_snapshot(event, shadow_state)
                 await render_chat_result(
+                    bot,
+                    event,
                     matcher,
                     result,
                     options,
                     shadow_state,
+                    classifier_user_text=request.text,
                 )
                 return shadow_state
 
@@ -4271,6 +4863,7 @@ async def run_legacy_chat_session(
         safe_record_shadow_chat_snapshot(event, shadow_state)
 
         await finalize_chat_result(
+            bot,
             event,
             matcher,
             request.key,
@@ -4279,6 +4872,7 @@ async def run_legacy_chat_session(
             result,
             options,
             shadow_state,
+            classifier_user_text=request.text,
         )
         return shadow_state
 
@@ -4645,6 +5239,7 @@ def main_agent_help_reply() -> str:
             "/agent 任务工作台 / 任务看板 / 协作台",
             "/agent 查 <问题>",
             "/agent 诊断一下 Ollama / 看一下视觉和记忆状态",
+            "/agent 做一次可靠性巡检（只读聚合状态与近 24 小时分类错误）",
             "/agent 完整排查图片识别问题",
             "/agent 完整排查记忆检索问题",
             "/agent 帮我看一下最近错误",
@@ -4655,8 +5250,10 @@ def main_agent_help_reply() -> str:
             "/agent 帮我创建一个任务：<目标> / 取消最新任务 / 确认最新审批 / 拒绝最新审批",
             "/agent 删除摘要 <摘要ID>",
             "/agent 把群 <群号> 加入群白名单 / 把用户 <QQ号> 加入黑名单",
+            "/agent 帮我写一份 TXT/Word/PPT：<主题与要求>（Main LLM 生成内容，审批后写入固定工作区）",
+            "/agent 生成一份 TXT/Word/PPT 并发给我：<主题与要求>（仅 ENABLE_AGENT_EXTERNAL_WRITE=true 时可见，审批后单次发送）",
             "/agent-debug <问题>",
-            "边界：只读 dev_context、owner_read_command、agent_task_read；agent_task_command 仅任务/审批控制面；owner_write_command 只走审批恢复，不执行 shell。",
+            "边界：只读 dev_context、owner_read_command、agent_task_read；agent_task_command 仅任务/审批控制面；文档产物只写固定工作区，直接发送需独立 write_external 审批工具，不执行 shell。",
         ]
     )
 
@@ -4684,6 +5281,7 @@ def main_agent_tool_status_reply() -> str:
             "用途：主人管理只读控制台，不改状态。",
             "例子：/agent 诊断一下 Ollama",
             "例子：/agent 看一下视觉和记忆状态",
+            "例子：/agent 做一次可靠性巡检",
             "例子：/agent 完整排查图片识别问题",
             "例子：/agent 完整排查记忆检索问题",
             "例子：/agent 看看最近错误",
@@ -4724,7 +5322,7 @@ def main_agent_tool_status_reply() -> str:
             "可见性：LLM 可见 + 确定性语义优先",
             "审批：必须审批；确认后只恢复已注册且 approval_resume_enabled=true 的工具。",
             "用途：审批门控主人管理写工具。",
-            "当前开放：clear_image_cache、clear_error_log、select_persona、add_fact_memory、add_preference_memory、clear_session_summaries、delete_session_summary、allow_group、deny_group、allow_private、deny_private、block_user、unblock_user",
+            "当前开放：clear_image_cache、clear_error_log、select_persona、add_fact_memory、add_preference_memory、clear_session_summaries、delete_session_summary、allow_group、deny_group、allow_private、deny_private、block_user、unblock_user、create_txt_document、create_word_document、create_presentation",
             "例子：/agent 帮我清空图片缓存",
             "例子：/agent 帮我清空错误日志",
             "例子：/agent 帮我选择角色卡 moyan",
@@ -4736,13 +5334,25 @@ def main_agent_tool_status_reply() -> str:
             "例子：/agent 把用户 10001 移出私聊白名单",
             "例子：/agent 把用户 10002 加入黑名单",
             "例子：/agent 解除拉黑 10002",
+            "例子：/agent 帮我写一份 Word：总结 AIchatbot 当前进展",
+            "例子：/agent 帮我写一份 PPT：介绍 MainAgent 能力规划",
+            "例子：/agent 帮我写一份 TXT：整理今晚测试结果",
+            "",
+            "6. document_delivery_command",
+            "风险：write_external",
+            f"可见性：{'LLM 可见' if config.enable_agent_external_write else '当前关闭'}（受 ENABLE_AGENT_EXTERNAL_WRITE 门控）",
+            "审批：必须审批；确认后生成一个新文件，并只向当前主人私聊发送一次。",
+            "当前命令：create_and_send_txt_document、create_and_send_word_document、create_and_send_presentation",
+            "例子：/agent 生成一份 Word 并发给我：总结 AIchatbot 当前进展",
+            "边界：无 path、无自定义接收者、无群发、无重试；发送前重新核对格式、字节数和 SHA-256。",
             "",
             "隐藏演练工具：dry_run_write_file",
             "风险：write_local",
             "可见性：LLM 不可见",
             "审批：必须审批；仅用于 /agent 审批演练，不写文件。",
             "",
-            "当前不开放：shell、任意文件写入、未注册数据库写入、删除长期记忆、清空全部摘要、清空全部上下文。",
+            f"外部文件发送：{'已启用，仅开放上述受控文档单次发送' if config.enable_agent_external_write else '当前关闭'}。",
+            "当前不开放：shell、任意路径/任意文件写入、任意 QQ 文件发送、未注册数据库写入、删除长期记忆、清空全部摘要、清空全部上下文。",
             "边界：普通聊天不触发这些工具；固定 QQ 命令继续保留作为 fallback。",
         ]
     )
@@ -4762,7 +5372,12 @@ def main_agent_status_reply() -> str:
             "工具：dev_context，owner_read_command（主人管理只读命令），agent_task_read（任务/审批只读查询），agent_task_command（任务/审批控制面语义命令）",
             "任务：支持 pending / running / done / failed 事件记录；development_context_report 和 system_diagnostics_report 只能由主人私聊显式命令执行，详细回复与持久化摘要分离。",
             "审批：可查看、确认、拒绝；确认后只恢复已注册的审批工具",
-            "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（清空图片缓存/错误日志、选择角色卡、添加长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单）",
+            "审批恢复工具：dry_run_write_file（无副作用，LLM 不可见）、owner_write_command（受控本地写）"
+            + (
+                "、document_delivery_command（生成后向当前主人私聊单次发送）"
+                if config.enable_agent_external_write
+                else "。document_delivery_command 当前未启用"
+            ),
             "演练：可生成 dry-run 审批请求，确认后只执行无副作用演练工具",
             f"LLM：{'已接入 /agent ActionRequest 生成' if config.main_agent_use_llm else '未接入 /agent 默认路径'}",
             f"主模型：{config.main_llm_model or '未配置'}",
@@ -4787,9 +5402,11 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊显式 /agent 执行系统诊断任务：记忆与RAG，同步执行已注册的 system_diagnostics_report/memory_rag；按首故障层返回本地索引和安全观测，不执行 embedding、召回或重建。",
             "预留：主人私聊严格命令 /agent 执行外部只读查询：<问题>；必须同时启用 ENABLE_AGENT_WEB 并配置固定 provider，当前不由 Main LLM 选择，也不接受任意 URL。",
             "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
+            "允许：Main LLM 通过 owner_write_command 提议 TXT、Word 或 PPT 本地文档；必须携带完整 title/content 并经主人审批，只写 output/main-agent-workspace，该本地命令不通过 QQ 发送。",
+            f"条件允许：ENABLE_AGENT_EXTERNAL_WRITE={'true' if config.enable_agent_external_write else 'false'} 时，Main LLM 可通过 document_delivery_command 提议“生成并发送” TXT/Word/PPT；仍需独立 write_external 审批，只向确认命令所在的当前主人私聊发送一个文件，不重试。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
             "允许：/agent 审批演练 只创建 dry-run 任务和审批请求，方便验证 Route B。",
-            "禁止：MainAgent/LLM 执行 shell、任意文件写入、未注册数据库写入、发额外 QQ 消息、绕过 ActionRequest schema 或 ToolPolicyCheck。",
+            "禁止：MainAgent/LLM 执行 shell、任意路径或项目文件写入、未注册数据库写入、任意接收者/群发/重试式 QQ 文件发送、绕过 ActionRequest schema 或 ToolPolicyCheck。",
             "ProjectDocRAG：只在 /agent 显式命令中使用，不进入普通聊天。",
             "真实 LLM：只负责生成 ActionRequest、总结只读工具结果，以及为显式研发上下文任务生成无工具的受限结构化报告。",
         ]
@@ -5267,14 +5884,152 @@ async def _resume_registry_dev_context(_query: str, _is_owner: bool) -> str:
     return "dev_context is not available during approval resume."
 
 
+@dataclass(frozen=True)
+class PendingDocumentDelivery:
+    approval_id: int
+    task_id: int
+    session_key: str
+    user_id: str
+    delivery: DocumentArtifactDelivery
+
+
+_pending_document_deliveries: dict[int, PendingDocumentDelivery] = {}
+
+
 def execute_owner_write_command(command: str, _context) -> str:
+    from .document_artifacts import DOCUMENT_ARTIFACT_COMMANDS
+
+    if command in DOCUMENT_ARTIFACT_COMMANDS:
+        arguments = _context.metadata.get("tool_arguments", {})
+        if not isinstance(arguments, dict):
+            raise RuntimeError("document_artifact_arguments_unavailable")
+        try:
+            result = create_document_artifact(
+                command,
+                arguments.get("title"),
+                arguments.get("content"),
+            )
+        except DocumentArtifactError as exc:
+            raise RuntimeError(f"document_artifact_{exc.code}") from exc
+        count_label = {
+            "create_txt_document": "正文字符",
+            "create_word_document": "非空段落",
+            "create_presentation": "幻灯片",
+        }[command]
+        return "\n".join(
+            [
+                f"{result.format_label} 文档已生成。",
+                f"Artifact ID：{result.artifact_id}",
+                f"文件：{result.relative_file}",
+                f"大小：{result.bytes} bytes",
+                f"{count_label}：{result.item_count}",
+                f"SHA-256 短哈希：{result.short_sha256}",
+                "未修改项目源码、配置或数据库；未通过 QQ 发送文件。",
+            ]
+        )
     return owner_runtime_factory().run_write_command(command, _context)
+
+
+def execute_document_delivery_command(command: str, _context) -> str:
+    render_command = command.replace("create_and_send_", "create_", 1)
+    arguments = _context.metadata.get("tool_arguments", {})
+    if not isinstance(arguments, dict):
+        raise RuntimeError("document_delivery_arguments_unavailable")
+    try:
+        result = create_document_artifact(
+            render_command,
+            arguments.get("title"),
+            arguments.get("content"),
+        )
+        delivery = prepare_document_artifact_delivery(result)
+    except DocumentArtifactError as exc:
+        raise RuntimeError(f"document_delivery_{exc.code}") from exc
+    try:
+        approval_id = int(_context.metadata.get("approval_id"))
+        task_id = int(_context.metadata.get("task_id"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("document_delivery_approval_context_invalid") from exc
+    session_value = str(_context.metadata.get("session_key") or "").strip()
+    user_value = str(_context.metadata.get("user_id") or "").strip()
+    if not session_value or not user_value:
+        raise RuntimeError("document_delivery_owner_context_invalid")
+    _pending_document_deliveries[approval_id] = PendingDocumentDelivery(
+        approval_id=approval_id,
+        task_id=task_id,
+        session_key=session_value,
+        user_id=user_value,
+        delivery=delivery,
+    )
+    return "\n".join(
+        [
+            f"{result.format_label} 文档已生成并通过发送前复核。",
+            f"Artifact ID：{result.artifact_id}",
+            f"文件：{result.relative_file}",
+            f"大小：{result.bytes} bytes",
+            f"SHA-256 短哈希：{result.short_sha256}",
+            "等待当前主人确认命令执行单次 QQ 文件发送；不重试。",
+        ]
+    )
+
+
+def _pending_document_delivery_ids(event: MessageEvent) -> set[int]:
+    key = session_key(event)
+    owner_id = user_id(event)
+    return {
+        approval_id
+        for approval_id, pending in _pending_document_deliveries.items()
+        if pending.session_key == key and pending.user_id == owner_id
+    }
+
+
+async def _send_new_document_deliveries(
+    bot: Bot,
+    event: MessageEvent,
+    previous_ids: set[int],
+) -> str:
+    current_ids = _pending_document_delivery_ids(event)
+    new_ids = sorted(current_ids - previous_ids)
+    if not new_ids:
+        return ""
+    if len(new_ids) != 1:
+        for approval_id in new_ids:
+            _pending_document_deliveries.pop(approval_id, None)
+        return "文档已生成，但待发送状态数量异常；未通过 QQ 发送，也未重试。"
+    pending = _pending_document_deliveries.pop(new_ids[0], None)
+    if pending is None:
+        return "文档已生成，但待发送状态不可用；未通过 QQ 发送，也未重试。"
+    if not isinstance(event, PrivateMessageEvent) or not is_owner(config, event):
+        return "文档已生成，但发送被拒绝：仅允许当前主人私聊；未重试。"
+    if pending.session_key != session_key(event) or pending.user_id != user_id(event):
+        return "文档已生成，但发送上下文不匹配；未通过 QQ 发送，也未重试。"
+    try:
+        delivery = validate_document_artifact_delivery(pending.delivery)
+    except DocumentArtifactError:
+        return "文档已生成，但发送前完整性复核失败；未通过 QQ 发送，也未重试。"
+    try:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=int(event.user_id),
+            message=MessageSegment(
+                "file",
+                {"file": str(delivery.file_path)},
+            ),
+        )
+    except Exception:
+        log_ai_event_error(RuntimeError("document_delivery_send_failed"), event)
+        return "文档已生成，但 QQ 文件发送失败；未重试。文件仍保留在本地工作区。"
+    return "文档已通过 QQ 私聊发送给主人；单次发送完成。"
 
 
 def create_main_agent_approval_resume_tool_registry():
     return create_read_only_main_agent_tool_registry(
         _resume_registry_dev_context,
         execute_owner_write_command=execute_owner_write_command,
+        execute_document_delivery_command=(
+            execute_document_delivery_command
+            if config.enable_agent_external_write
+            else None
+        ),
     )
 
 
@@ -5423,6 +6178,7 @@ async def run_main_agent_qq_command(
     query: str,
     *,
     raw_output: bool,
+    bot: Bot | None = None,
 ) -> str:
     if not config.enable_main_agent:
         return "MainAgent is disabled. Set ENABLE_MAIN_AGENT=true to use /agent."
@@ -5438,8 +6194,17 @@ async def run_main_agent_qq_command(
         static_reply = main_agent_static_reply(query)
         if static_reply is not None:
             return static_reply
+        pending_delivery_ids = _pending_document_delivery_ids(event)
         task_reply = run_main_agent_task_command(event, query)
         if task_reply is not None:
+            if bot is not None:
+                delivery_reply = await _send_new_document_deliveries(
+                    bot,
+                    event,
+                    pending_delivery_ids,
+                )
+                if delivery_reply:
+                    task_reply = f"{task_reply}\n\n{delivery_reply}"
             return task_reply
 
     explicit_dev_context = raw_output or is_explicit_main_agent_dev_context_query(query)
@@ -5511,11 +6276,26 @@ async def run_main_agent_qq_command(
             policy_reason=policy_reason,
         )
 
+    main_agent_tool_registry = create_read_only_main_agent_tool_registry(
+        retrieve_dev_context,
+        execute_owner_read_command=execute_owner_read_command,
+        execute_owner_write_command=execute_owner_write_command,
+        execute_document_delivery_command=(
+            execute_document_delivery_command
+            if config.enable_agent_external_write
+            else None
+        ),
+        execute_agent_task_read=execute_agent_task_read,
+        execute_agent_task_command=execute_agent_task_command,
+    )
     call_main_agent = None
     summarize_tool_result = None
     if config.main_agent_use_llm:
         try:
-            call_main_agent = create_main_agent_lc_call_handler(config)
+            call_main_agent = create_main_agent_lc_call_handler(
+                config,
+                tool_registry=main_agent_tool_registry,
+            )
             if not raw_output:
                 summarize_tool_result = create_main_agent_tool_summary_lc_handler(config)
         except Exception as exc:
@@ -5525,12 +6305,19 @@ async def run_main_agent_qq_command(
         retrieve_dev_context=retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
         execute_owner_write_command=execute_owner_write_command,
+        execute_document_delivery_command=(
+            execute_document_delivery_command
+            if config.enable_agent_external_write
+            else None
+        ),
         execute_agent_task_read=execute_agent_task_read,
         execute_agent_task_command=execute_agent_task_command,
         request_approval=request_agent_tool_approval,
         call_main_agent=call_main_agent,
         summarize_tool_result=summarize_tool_result,
         render_mode="raw" if raw_output else "concise",
+        tool_registry=main_agent_tool_registry,
+        enable_external_write=config.enable_agent_external_write,
     )
     runner = RootGraphRunner(handlers={RuntimeIntent.MAIN_AGENT: handler})
     response = await runner.run(runtime_state)
@@ -5539,23 +6326,51 @@ async def run_main_agent_qq_command(
 
 
 @main_agent_cmd.handle()
-async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    reply = await run_main_agent_qq_command(
-        event,
-        arg.extract_plain_text().strip(),
-        raw_output=False,
-    )
-    await matcher.finish(reply)
+async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    query = arg.extract_plain_text().strip()
+    lock = main_agent_session_lock(session_key(event))
+    if lock.locked():
+        await matcher.finish(
+            "MainAgent 正在处理上一条 /agent 请求；当前消息未执行。"
+            "请等待上一条结果或审批请求返回后再试。"
+        )
+    await lock.acquire()
+    try:
+        if (
+            is_document_artifact_request(query)
+            and not document_request_references_missing_prior_content(query)
+        ):
+            await matcher.send(
+                "MainAgent 正在生成文档标题、正文和审批请求，请稍候。"
+            )
+        reply = await run_main_agent_qq_command(
+            event,
+            query,
+            raw_output=False,
+            bot=bot,
+        )
+        await matcher.finish(reply)
+    finally:
+        lock.release()
 
 
 @main_agent_debug_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    reply = await run_main_agent_qq_command(
-        event,
-        arg.extract_plain_text().strip(),
-        raw_output=True,
-    )
-    await matcher.finish(reply)
+    lock = main_agent_session_lock(session_key(event))
+    if lock.locked():
+        await matcher.finish(
+            "MainAgent 正在处理上一条请求；当前 /agent-debug 未执行。"
+        )
+    await lock.acquire()
+    try:
+        reply = await run_main_agent_qq_command(
+            event,
+            arg.extract_plain_text().strip(),
+            raw_output=True,
+        )
+        await matcher.finish(reply)
+    finally:
+        lock.release()
 
 
 @rebuild_memory_rag_cmd.handle()
@@ -5722,6 +6537,386 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish("\n".join(lines))
 
 
+@sticker_check_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    try:
+        from .sticker_library import (
+            StickerLibraryError,
+            StickerLimits,
+            format_sticker_candidate_report,
+            inspect_sticker_candidates,
+        )
+
+        limits = StickerLimits(
+            max_file_bytes=config.local_sticker_max_file_bytes,
+            max_dynamic_file_bytes=config.local_sticker_max_dynamic_file_bytes,
+            min_dimension=config.local_sticker_min_dimension,
+            max_dimension=config.local_sticker_max_dimension,
+            max_pixels=config.local_sticker_max_pixels,
+            max_animation_frames=config.local_sticker_max_animation_frames,
+            max_animation_duration_ms=config.local_sticker_max_animation_duration_ms,
+            min_frame_duration_ms=config.local_sticker_min_frame_duration_ms,
+            max_animation_decoded_pixels=(
+                config.local_sticker_max_animation_decoded_pixels
+            ),
+        )
+        report = inspect_sticker_candidates(
+            config.local_sticker_root,
+            limits=limits,
+        )
+    except ImportError:
+        await matcher.finish("本地表情候选检查依赖当前不可用。")
+    except StickerLibraryError:
+        await matcher.finish("本地表情候选检查配置无效，已安全关闭。")
+    await matcher.finish(format_sticker_candidate_report(report))
+
+
+@sticker_analyze_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    if not config.enable_vision:
+        await matcher.finish("本地视觉当前未开启，未分析候选表情。")
+    candidate_id = arg.extract_plain_text().strip()
+    try:
+        from .sticker_labeling import (
+            StickerLabelingError,
+            analyze_sticker_contact_sheet,
+            format_sticker_label_suggestion,
+        )
+        from .sticker_library import (
+            StickerLibraryError,
+            StickerLimits,
+            build_sticker_contact_sheet,
+            resolve_sticker_candidate_file,
+        )
+
+        limits = StickerLimits(
+            max_file_bytes=config.local_sticker_max_file_bytes,
+            max_dynamic_file_bytes=config.local_sticker_max_dynamic_file_bytes,
+            min_dimension=config.local_sticker_min_dimension,
+            max_dimension=config.local_sticker_max_dimension,
+            max_pixels=config.local_sticker_max_pixels,
+            max_animation_frames=config.local_sticker_max_animation_frames,
+            max_animation_duration_ms=config.local_sticker_max_animation_duration_ms,
+            min_frame_duration_ms=config.local_sticker_min_frame_duration_ms,
+            max_animation_decoded_pixels=(
+                config.local_sticker_max_animation_decoded_pixels
+            ),
+        )
+        candidate_file = await asyncio.to_thread(
+            resolve_sticker_candidate_file,
+            config.local_sticker_root,
+            candidate_id,
+            limits=limits,
+        )
+        contact_sheet = await asyncio.to_thread(
+            build_sticker_contact_sheet,
+            candidate_file,
+            limits=limits,
+        )
+        suggestion = await asyncio.to_thread(
+            analyze_sticker_contact_sheet,
+            config,
+            contact_sheet,
+        )
+    except ImportError:
+        await matcher.finish("本地表情分析依赖当前不可用。")
+    except StickerLibraryError:
+        await matcher.finish("候选表情不存在或未通过安全校验。")
+    except StickerLabelingError:
+        await matcher.finish("本地视觉未能生成可信标签建议，请主人稍后手动复核。")
+    await matcher.finish(
+        "候选：" + candidate_id + "\n" + format_sticker_label_suggestion(suggestion)
+    )
+
+
+def sticker_limits_from_config():
+    from .sticker_library import StickerLimits
+
+    return StickerLimits(
+        max_file_bytes=config.local_sticker_max_file_bytes,
+        max_dynamic_file_bytes=config.local_sticker_max_dynamic_file_bytes,
+        min_dimension=config.local_sticker_min_dimension,
+        max_dimension=config.local_sticker_max_dimension,
+        max_pixels=config.local_sticker_max_pixels,
+        max_animation_frames=config.local_sticker_max_animation_frames,
+        max_animation_duration_ms=config.local_sticker_max_animation_duration_ms,
+        min_frame_duration_ms=config.local_sticker_min_frame_duration_ms,
+        max_animation_decoded_pixels=(
+            config.local_sticker_max_animation_decoded_pixels
+        ),
+    )
+
+
+def sticker_approval_error_text(code: str) -> str:
+    if code in {"sticker_id_already_exists", "candidate_already_approved"}:
+        return "该候选已经批准，正式库未重复写入。"
+    if code in {"invalid_approval_confirmation", "approval_confirmation_mismatch"}:
+        return "表情批准失败：确认短哈希格式错误或与候选不一致。"
+    if code in {
+        "approval_draft_not_found",
+        "candidate_validation_failed",
+        "candidate_source_changed",
+    }:
+        return "表情批准失败：草稿不存在，或当前候选已变化/未通过安全复核。"
+    if code in {"manifest_schema_upgrade_required", "manifest_validation_failed"}:
+        return "表情批准失败：正式索引需要人工检查，未继续写入。"
+    return "表情批准失败：规范化或原子写入未通过安全复核。"
+
+
+def sticker_revocation_error_text(code: str) -> str:
+    if code == "sticker_already_disabled":
+        return "该表情已经处于 disabled 状态，未重复撤销。"
+    if code == "approved_sticker_not_found":
+        return "表情撤销失败：正式库中没有这个 sticker ID。"
+    if code in {
+        "invalid_revocation_confirmation",
+        "revocation_confirmation_mismatch",
+    }:
+        return "表情撤销失败：必须提供正式文件的正确 12 位短哈希。"
+    return "表情撤销失败：正式索引未通过安全复核。"
+
+
+@sticker_drafts_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    try:
+        from .sticker_approval import (
+            StickerApprovalError,
+            format_sticker_approval_drafts,
+            load_sticker_approval_drafts,
+        )
+
+        draft_set = await asyncio.to_thread(
+            load_sticker_approval_drafts,
+            config.local_sticker_root,
+        )
+    except ImportError:
+        await matcher.finish("本地表情批准草稿依赖当前不可用。")
+    except StickerApprovalError:
+        await matcher.finish("本地表情批准草稿不存在或未通过安全校验。")
+    await matcher.finish(format_sticker_approval_drafts(draft_set))
+
+
+@sticker_approve_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    tokens = arg.extract_plain_text().split()
+    if len(tokens) != 2:
+        await matcher.finish(
+            "用法：/表情批准 candidate_<12位短哈希> <同一12位短哈希确认>"
+        )
+    candidate_id, confirmation = tokens
+    try:
+        from .sticker_approval import StickerApprovalError, approve_sticker_candidate
+
+        result = await asyncio.to_thread(
+            approve_sticker_candidate,
+            config.local_sticker_root,
+            candidate_id,
+            confirmation,
+            limits=sticker_limits_from_config(),
+        )
+    except ImportError:
+        await matcher.finish("本地表情批准依赖当前不可用。")
+    except StickerApprovalError as exc:
+        await matcher.finish(sticker_approval_error_text(exc.code))
+    animation = (
+        f"动态 {result.frame_count} 帧/{result.duration_ms}ms"
+        if result.animated
+        else "静态"
+    )
+    await matcher.finish(
+        "表情批准成功，但未发送图片、未开启自动触发。\n"
+        f"ID：{result.sticker_id}\n"
+        f"索引版本：{result.library_revision}\n"
+        f"规范化结果：{animation}\n"
+        f"撤销确认短哈希：{result.short_sha256}"
+    )
+
+
+@sticker_revoke_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    tokens = arg.extract_plain_text().split()
+    if len(tokens) != 2:
+        await matcher.finish("用法：/表情撤销 <sticker_id> <最终文件12位短哈希确认>")
+    sticker_id, confirmation = tokens
+    try:
+        from .sticker_approval import StickerApprovalError, revoke_sticker_approval
+
+        result = await asyncio.to_thread(
+            revoke_sticker_approval,
+            config.local_sticker_root,
+            sticker_id,
+            confirmation,
+            limits=sticker_limits_from_config(),
+        )
+    except ImportError:
+        await matcher.finish("本地表情撤销依赖当前不可用。")
+    except StickerApprovalError as exc:
+        await matcher.finish(sticker_revocation_error_text(exc.code))
+    await matcher.finish(
+        "表情已撤销并标记为 disabled，原规范化文件保留但不可选择。\n"
+        f"ID：{result.sticker_id}\n"
+        f"索引版本：{result.library_revision}"
+    )
+
+
+def sticker_preview_error_text(code: str) -> str:
+    if code == "sticker_disabled":
+        return "该表情已经撤销或禁用，不能预览。"
+    if code in {"invalid_sticker_id", "sticker_not_found"}:
+        return "表情预览失败：正式库中没有这个安全 sticker ID。"
+    if code == "asset_validation_failed":
+        return "表情预览失败：正式图片在发送前未通过完整性复核。"
+    return "表情预览失败：正式索引未通过安全复核。"
+
+
+def check_sticker_preview_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
+    cooldown_seconds = config.local_sticker_preview_cooldown_seconds
+    if cooldown_seconds <= 0:
+        return False, "表情预览冷却配置无效，已安全关闭。"
+    ok, wait_seconds = check_rate_limit(
+        f"sticker_preview:owner:{user_id(event)}",
+        cooldown_seconds,
+    )
+    if ok:
+        return True, None
+    return False, f"表情预览冷却中，请等 {wait_seconds} 秒。"
+
+
+@sticker_preview_cmd.handle()
+async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if not config.enable_local_stickers:
+        await matcher.finish("本地表情包库当前未开启。")
+    tokens = arg.extract_plain_text().split()
+    if len(tokens) != 1:
+        await matcher.finish("用法：/表情预览 <已批准且 enabled 的 sticker_id>")
+    sticker_id = tokens[0]
+    try:
+        from .sticker_preview import StickerPreviewError, resolve_sticker_preview_asset
+
+        asset = await asyncio.to_thread(
+            resolve_sticker_preview_asset,
+            config.local_sticker_root,
+            sticker_id,
+            limits=sticker_limits_from_config(),
+        )
+    except ImportError:
+        await matcher.finish("本地表情预览依赖当前不可用。")
+    except StickerPreviewError as exc:
+        await matcher.finish(sticker_preview_error_text(exc.code))
+    cooldown_ok, cooldown_reason = check_sticker_preview_cooldown(event)
+    if not cooldown_ok:
+        await matcher.finish(cooldown_reason or "表情预览冷却中，请稍后再试。")
+    try:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=int(event.user_id),
+            message=MessageSegment.image(str(asset.file_path)),
+        )
+    except Exception:
+        log_ai_event_error(RuntimeError("sticker_preview_send_failed"), event)
+        await matcher.finish("表情预览发送失败，未重试、未改发其他图片。")
+    await matcher.finish()
+
+
+@sticker_intent_status_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("这个命令只能在主人私聊中使用。")
+    if config.enable_remote_sticker_classifier:
+        remote_snapshot = _last_remote_sticker_classifier_shadow
+        if remote_snapshot is None:
+            await matcher.finish(
+                "C1 远程表情分类 shadow 尚无普通聊天样本，未发送图片。"
+            )
+        remote_intent_text = (
+            f"{remote_snapshot.mood}/{remote_snapshot.intensity}/"
+            f"{remote_snapshot.scene}"
+            if remote_snapshot.mood
+            else "无有效建议"
+        )
+        remote_selected_text = remote_snapshot.selected_sticker_id or "无"
+        if not config.enable_chat_sticker_attachments:
+            mode_text = "C1 远程表情分类 shadow（正文已先发送，只观察，不发送图片）"
+            attachment_text = "关闭"
+        else:
+            mode_text = "B2 主人私聊自动附带（正文已先发送）"
+            attachment_labels = {
+                "pending": "处理中",
+                "ready": "待发送",
+                "sent": "已发送",
+                "not_triggered": "未触发",
+                "suspended": "已熔断",
+                "sent_commit_failed": "图片已发送，但状态提交失败并已熔断",
+                "send_failed": "发送失败，未重试",
+                "preflight_blocked": "频率门控中，未调用分类模型",
+            }
+            attachment_text = attachment_labels.get(
+                remote_snapshot.attachment_status,
+                f"未发送（{remote_snapshot.attachment_status}）",
+            )
+        await matcher.finish(
+            f"{mode_text}：\n"
+            f"样本序号：{remote_snapshot.sample_id}\n"
+            f"分类状态：{remote_snapshot.classifier_status}\n"
+            f"意图：{remote_intent_text}\n"
+            f"置信度：{remote_snapshot.confidence:.2f}\n"
+            f"本地决策：{remote_snapshot.decision_reason}\n"
+            f"匹配数量：{remote_snapshot.eligible_count}\n"
+            f"影子选中 ID：{remote_selected_text}\n"
+            f"自动附带：{attachment_text}"
+        )
+    if not config.enable_chat_sticker_intent_shadow:
+        await matcher.finish("B1 表情意图 shadow 当前未开启，普通聊天不会自动发图。")
+    snapshot = _last_chat_sticker_intent_shadow
+    if snapshot is None:
+        await matcher.finish("B1 表情意图 shadow 尚无普通聊天样本，未发送图片。")
+    intent_text = (
+        f"{snapshot.mood}/{snapshot.intensity}/{snapshot.scene}"
+        if snapshot.mood
+        else "无有效建议"
+    )
+    selected_text = snapshot.selected_sticker_id or "无"
+    await matcher.finish(
+        "B1 表情意图 shadow（只观察，不发送）：\n"
+        f"标记状态：{snapshot.marker_status}\n"
+        f"意图：{intent_text}\n"
+        f"置信度：{snapshot.confidence:.2f}\n"
+        f"本地决策：{snapshot.decision_reason}\n"
+        f"匹配数量：{snapshot.eligible_count}\n"
+        f"影子选中 ID：{selected_text}\n"
+        "自动附带：关闭"
+    )
+
+
 @help_cmd.handle()
 async def _(matcher: Matcher) -> None:
     await matcher.finish(
@@ -5768,6 +6963,13 @@ async def _(matcher: Matcher) -> None:
                 "/转告主人 内容",
                 "/留言给主人 内容",
                 "/语音状态",
+                "/表情检查",
+                "/表情分析 candidate_<短哈希>",
+                "/表情草稿",
+                "/表情批准 candidate_<短哈希> <短哈希确认>",
+                "/表情撤销 sticker_id <最终文件短哈希确认>",
+                "/表情预览 sticker_id",
+                "/表情意图状态",
                 "除转告命令外，以上管理命令只有主人可用。",
                 "转告命令允许主人、私聊白名单用户和授权群成员使用。",
             ]

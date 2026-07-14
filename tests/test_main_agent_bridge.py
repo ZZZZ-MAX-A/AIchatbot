@@ -967,6 +967,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "看一下视觉和记忆状态": "ops_health",
             "最近图片和 RAG 有没有问题": "ops_health",
             "做一次系统健康检查": "ops_health",
+            "做一次可靠性巡检": "ops_health",
             "完整排查图片识别问题": "vision_troubleshoot",
             "排查识图为什么失败": "vision_troubleshoot",
             "完整排查记忆检索问题": "memory_rag_troubleshoot",
@@ -1761,6 +1762,362 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             ],
         )
 
+    def test_llm_document_artifact_requires_approval_and_keeps_content(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for a document artifact")
+
+        def execute_owner_write_command(command, _context):
+            calls.append(command)
+            raise AssertionError("document creation must stop before approval")
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append(
+                (
+                    state.requested_tool,
+                    dict(state.metadata["tool_arguments"]),
+                    risk_level.value,
+                    policy_reason,
+                )
+            )
+            return "Agent 请求审批 #48\n/agent 确认 48\n/agent 拒绝 48"
+
+        def call_main_agent(state):
+            state.raw_action_request = self.main_agent_bridge.owner_write_command_action_json(
+                "create_word_document",
+                query=state.query,
+                title="AIchatbot 开发报告",
+                content="# 当前状态\n正文内容。",
+                reason="create an owner-requested Word artifact",
+            )
+            return state
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_write_command=execute_owner_write_command,
+            request_approval=request_approval,
+            call_main_agent=call_main_agent,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我写一份 Word：总结当前开发进度",
+                    is_owner=True,
+                )
+            )
+        )
+
+        expected_arguments = {
+            "command": "create_word_document",
+            "query": "帮我写一份 Word：总结当前开发进度",
+            "title": "AIchatbot 开发报告",
+            "content": "# 当前状态\n正文内容。",
+        }
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "owner_write_command")
+        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(calls, [])
+        self.assertEqual(execution.result.metadata["tool_arguments"], expected_arguments)
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "owner_write_command",
+                    expected_arguments,
+                    "write_local",
+                    "local writes require approval",
+                )
+            ],
+        )
+
+    def test_document_delivery_is_external_write_and_requires_explicit_enablement(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for document delivery")
+
+        def execute_document_delivery_command(_command, _context):
+            raise AssertionError("external document delivery must stop at approval")
+
+        def call_main_agent(state):
+            state.raw_action_request = self.main_agent_bridge.owner_write_command_action_json(
+                "create_and_send_txt_document",
+                title="直播测试",
+                content="测试正文",
+                reason="send document to owner",
+            ).replace(
+                '"tool_name": "owner_write_command"',
+                '"tool_name": "document_delivery_command"',
+            )
+            return state
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_document_delivery_command=execute_document_delivery_command,
+            request_approval=lambda *_args: "审批",
+            call_main_agent=call_main_agent,
+            enable_external_write=True,
+            render_mode="concise",
+        )
+        enabled = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="send document",
+                    is_owner=True,
+                )
+            )
+        )
+        self.assertEqual(enabled.result.error, "approval_required")
+        self.assertEqual(enabled.result.policy_decision, "require_approval")
+        self.assertEqual(enabled.result.requested_tool, "document_delivery_command")
+
+        disabled_runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_document_delivery_command=execute_document_delivery_command,
+            request_approval=lambda *_args: "不应创建审批",
+            call_main_agent=call_main_agent,
+            enable_external_write=False,
+            render_mode="concise",
+        )
+        disabled = asyncio.run(
+            disabled_runner.run(
+                self.main_agent.MainAgentState(
+                    query="send document",
+                    is_owner=True,
+                )
+            )
+        )
+        self.assertEqual(disabled.result.error, "policy_denied")
+        self.assertEqual(disabled.result.policy_decision, "deny")
+
+    def test_document_delivery_rejects_runtime_scaffold_content_before_approval(self):
+        arguments = {
+            "command": "create_and_send_word_document",
+            "title": "AIchatbot 开发进度总结",
+            "content": (
+                "AIchatbot 开发进度总结\n"
+                "Runtime metadata (not user content; never copy it into a document):\n"
+                "Registered visible tools: dev_context, document_delivery_command.\n"
+                "Owner query (the only user instruction; do not copy the metadata above):\n"
+                "生成一份 Word"
+            ),
+        }
+
+        error = self.main_agent_bridge.owner_write_argument_error(arguments)
+
+        self.assertIn("内部上下文包装文本", error)
+        self.assertIn("审批前拒绝", error)
+
+    def test_presentation_overflow_is_rejected_before_approval(self):
+        content = "\n".join(
+            f"## 幻灯片 {index}\n- 内容" for index in range(20)
+        )
+
+        error = self.main_agent_bridge.owner_write_argument_error(
+            {
+                "command": "create_and_send_presentation",
+                "title": "AIchatbot 能力介绍",
+                "content": content,
+            }
+        )
+
+        self.assertIn("超过 20 张幻灯片", error)
+        self.assertIn("审批前拒绝", error)
+        self.assertIn("不要另建“封面”章节", error)
+
+    def test_runtime_agent_context_is_metadata_not_document_content(self):
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            lambda _query, _is_owner: "context",
+            execute_document_delivery_command=lambda _command, _context: "unused",
+        )
+        builder = self.main_agent_bridge.create_read_only_agent_context_builder(registry)
+        state = self.main_agent.MainAgentState(query="生成并发送 Word", is_owner=True)
+
+        result = builder(state)
+
+        context = result.metadata["agent_context"]
+        self.assertIn("runtime metadata", context.lower())
+        self.assertIn("never copy", context.lower())
+        self.assertIn("document_delivery_command", context)
+        self.assertNotIn("MainAgentGraph read-only local test mode.", context)
+
+    def test_prior_message_document_reference_asks_owner_before_llm_or_approval(self):
+        calls = []
+
+        def call_main_agent(_state):
+            calls.append("llm")
+            raise AssertionError("missing prior-message content must stop before LLM")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=lambda _query, _is_owner: "unused",
+            execute_document_delivery_command=lambda _command, _context: "unused",
+            request_approval=lambda *_args: calls.append("approval"),
+            call_main_agent=call_main_agent,
+            enable_external_write=True,
+            render_mode="concise",
+        )
+
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query=(
+                        "生成一份 Word 并发给我，标题是《AIchatbot 开发进度总结》，"
+                        "正文使用我刚才提供的完整内容"
+                    ),
+                    is_owner=True,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.action, "ask_owner")
+        self.assertIn("不读取上一条 QQ 消息", execution.result.response_text)
+        self.assertIn("未创建审批", execution.result.response_text)
+        self.assertEqual(calls, [])
+
+    def test_topic_only_document_request_still_reaches_main_llm(self):
+        self.assertFalse(
+            self.main_agent_bridge.document_request_references_missing_prior_content(
+                "生成一份 Word 并发给我：总结 AIchatbot 当前开发进度"
+            )
+        )
+
+    def test_document_outline_next_step_does_not_trigger_task_read_classifier(self):
+        calls = []
+        approvals = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("document request must not become dev_context")
+
+        async def execute_agent_task_read(_command, _reference, _context):
+            raise AssertionError("outline text must not trigger agent_task_read")
+
+        def call_main_agent(state):
+            calls.append(state.query)
+            state.raw_action_request = self.main_agent_bridge.owner_write_command_action_json(
+                "create_and_send_word_document",
+                title="AIchatbot 当前开发进度总结",
+                content=(
+                    "# 当前阶段\n当前阶段正文。\n"
+                    "## 测试情况\n测试正文。\n"
+                    "## 推荐下一步\n推荐内容。"
+                ),
+                reason="generate and send requested Word document",
+            ).replace(
+                '"tool_name": "owner_write_command"',
+                '"tool_name": "document_delivery_command"',
+            )
+            return state
+
+        async def request_approval(state, risk_level, policy_reason):
+            approvals.append(
+                (state.requested_tool, risk_level.value, policy_reason)
+            )
+            return "审批已创建"
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_document_delivery_command=lambda _command, _context: "unused",
+            execute_agent_task_read=execute_agent_task_read,
+            request_approval=request_approval,
+            call_main_agent=call_main_agent,
+            enable_external_write=True,
+            render_mode="concise",
+        )
+        query = (
+            "/agent 生成一份 Word 并发给我：请自行撰写《AIchatbot 当前开发进度总结》，"
+            "包括当前阶段、已完成功能、架构状态、测试情况、待办事项、风险限制和推荐下一步"
+        )
+
+        execution = asyncio.run(
+            runner.run(self.main_agent.MainAgentState(query=query, is_owner=True))
+        )
+
+        self.assertEqual(execution.result.error, "approval_required")
+        self.assertEqual(execution.result.requested_tool, "document_delivery_command")
+        self.assertEqual(calls, [query])
+        self.assertEqual(
+            approvals,
+            [
+                (
+                    "document_delivery_command",
+                    "write_external",
+                    "external writes require approval",
+                )
+            ],
+        )
+
+    def test_llm_document_artifact_missing_title_or_content_stops_before_approval(self):
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context should not run for a document artifact")
+
+        for title, content, expected_text in (
+            ("", "正文", "需要明确的 title"),
+            ("标题", "", "需要完整的 content"),
+        ):
+            approvals = []
+
+            def execute_owner_write_command(_command, _context):
+                raise AssertionError("invalid document arguments must not execute")
+
+            async def request_approval(state, risk_level, policy_reason):
+                approvals.append((state, risk_level, policy_reason))
+                raise AssertionError("invalid document arguments must not create approval")
+
+            def call_main_agent(state):
+                state.raw_action_request = (
+                    self.main_agent_bridge.owner_write_command_action_json(
+                        "create_txt_document",
+                        title=title,
+                        content=content,
+                        reason="invalid document proposal",
+                    )
+                )
+                return state
+
+            runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+                retrieve_dev_context=retrieve_dev_context,
+                execute_owner_write_command=execute_owner_write_command,
+                request_approval=request_approval,
+                call_main_agent=call_main_agent,
+                render_mode="concise",
+            )
+            with self.subTest(title=title, content=content):
+                execution = asyncio.run(
+                    runner.run(
+                        self.main_agent.MainAgentState(
+                            query="document proposal",
+                            is_owner=True,
+                        )
+                    )
+                )
+                self.assertEqual(execution.result.error, "need_argument")
+                self.assertEqual(execution.result.requested_tool, "")
+                self.assertIn(expected_text, execution.result.response_text)
+                self.assertEqual(approvals, [])
+
+        invalid_argument_cases = (
+            (
+                {"command": "create_word_document", "title": [], "content": "正文"},
+                "需要字符串 title",
+            ),
+            (
+                {"command": "create_presentation", "title": "标题", "content": {}},
+                "需要字符串 content",
+            ),
+            (
+                {"command": "create_txt_document", "title": "标题", "content": "坏\x00内容"},
+                "content 超出长度上限",
+            ),
+        )
+        for arguments, expected_text in invalid_argument_cases:
+            with self.subTest(arguments=arguments):
+                self.assertIn(
+                    expected_text,
+                    self.main_agent_bridge.owner_write_argument_error(arguments),
+                )
+
     def test_owner_write_classifier_only_allows_first_safe_batch(self):
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我清空图片缓存"),
@@ -2057,7 +2414,8 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
 
         self.assertEqual(execution.result.error, "tool_execution_failed")
         self.assertIn("read-only tool failed", execution.result.response_text)
-        self.assertIn("dev context unavailable", execution.result.response_text)
+        self.assertIn("问题", execution.result.response_text)
+        self.assertNotIn("dev context unavailable", execution.result.response_text)
         self.assertEqual(
             execution.node_trace,
             (

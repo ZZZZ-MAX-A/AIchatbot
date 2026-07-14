@@ -457,6 +457,78 @@ class LangChainMainAgentAdapterTests(unittest.TestCase):
         self.assertEqual(execution.result.action, self_graph.MainAgentAction.TOOL_REQUEST.value)
         self.assertEqual(execution.result.requested_tool, self_graph.MainAgentToolName.DEV_CONTEXT.value)
 
+    def test_lc_call_handler_uses_supplied_runtime_tool_registry(self):
+        graph_modules = load_pure_graph_modules()
+        bridge = graph_modules["main_agent_bridge"]
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            return "context"
+
+        registry = bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_owner_write_command=lambda _command, _context: "unused",
+        )
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(messages)
+                return {"content": '{"action":"final_answer","content":"ok"}'}
+
+        handler = self.lc_main_agent.create_main_agent_lc_call_handler(
+            types.SimpleNamespace(main_llm_model="unused"),
+            llm=FakeLLM(),
+            tool_registry=registry,
+        )
+        state = self.graph_main_agent.MainAgentState(query="帮我写一份 TXT")
+
+        asyncio.run(handler(state))
+
+        system_prompt = calls[0][0]["content"]
+        self.assertIn('tool_name "owner_write_command"', system_prompt)
+        self.assertIn("create_txt_document", system_prompt)
+        self.assertIn("create_word_document", system_prompt)
+        self.assertIn("create_presentation", system_prompt)
+        self.assertIn('"title": "..."', system_prompt)
+        self.assertIn('"content": "..."', system_prompt)
+        self.assertNotIn('"path": "..."', system_prompt)
+
+    def test_lc_call_handler_exposes_document_delivery_tool_when_registered(self):
+        graph_modules = load_pure_graph_modules()
+        bridge = graph_modules["main_agent_bridge"]
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            return "context"
+
+        registry = bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_document_delivery_command=lambda _command, _context: "unused",
+        )
+
+        class FakeLLM:
+            def invoke(self, messages):
+                calls.append(messages)
+                return {"content": '{"action":"final_answer","content":"ok"}'}
+
+        handler = self.lc_main_agent.create_main_agent_lc_call_handler(
+            types.SimpleNamespace(main_llm_model="unused"),
+            llm=FakeLLM(),
+            tool_registry=registry,
+        )
+        state = self.graph_main_agent.MainAgentState(query="生成并发送 TXT")
+
+        asyncio.run(handler(state))
+
+        system_prompt = calls[0][0]["content"]
+        self.assertIn('tool_name "document_delivery_command"', system_prompt)
+        self.assertIn("create_and_send_txt_document", system_prompt)
+        self.assertIn("create_and_send_word_document", system_prompt)
+        self.assertIn("create_and_send_presentation", system_prompt)
+        self.assertIn('"title": "..."', system_prompt)
+        self.assertIn('"content": "..."', system_prompt)
+        self.assertNotIn('"path": "..."', system_prompt)
+
     def test_lc_tool_summary_handler_integrates_real_wrapper(self):
         state = self.graph_main_agent.MainAgentState(
             query="recover context",

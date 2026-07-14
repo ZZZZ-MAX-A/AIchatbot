@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 
 from .config import AiChatConfig
 from .database import DATABASE_PATH, connect, ensure_database
+from .failure_diagnostics import format_failure_inspection, inspect_failure_lines
 from .memory import memory_stats
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards
 from .trials import trial_stats
@@ -635,12 +636,8 @@ def recent_error_lines(limit: int = 5) -> list[str]:
 
 
 def format_recent_errors(limit: int = 5) -> str:
-    errors = recent_error_lines(limit)
-    if not errors:
-        return "最近错误：\n暂无。"
-    lines = ["最近错误："]
-    lines.extend(f"{index}. {line}" for index, line in enumerate(errors, 1))
-    return "\n".join(lines)
+    errors = recent_error_lines(max(limit, 200))
+    return format_failure_inspection(inspect_failure_lines(errors, window_hours=24))
 
 
 def clear_error_log() -> str:

@@ -84,6 +84,37 @@ NapCatQQ 不一定需要重启。
 重新运行 .\scripts\start-napcat-shell.ps1 2700318954
 ```
 
+## 可靠性巡检
+
+快速执行只读巡检：
+
+```powershell
+.\scripts\inspect-reliability.ps1
+```
+
+查看最近 7 天错误趋势：
+
+```powershell
+.\scripts\inspect-reliability.ps1 -Hours 168
+```
+
+为 Windows 任务计划程序刷新固定报告：
+
+```powershell
+.\scripts\inspect-reliability.ps1 -Hours 24 -WriteReport
+```
+
+固定报告位于 `output/reliability-inspections/latest.txt`，处于 Git 忽略范围。建议每 30 分钟执行一次。巡检只读取关键配置是否存在、本机端口、SQLite 只读 schema 状态和固定日志，不会调用外部模型、发送 QQ、重试、重启、修改配置或修复数据。
+
+QQ 主人私聊也可以执行：
+
+```text
+/agent 做一次可靠性巡检
+/agent 帮我看一下最近错误
+```
+
+Bot 代码更新后需重启，新的“可靠性巡检”自然命令和分类提示才会生效。
+
 ## 注意事项
 
 启动机器人前，不建议先手动打开普通 QQ 登录机器人账号。

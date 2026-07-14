@@ -36,6 +36,16 @@ def _security_int_env(name: str, default: int) -> int:
         return 0
 
 
+def _security_float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
 def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -97,6 +107,32 @@ class AiChatConfig:
     vision_max_image_bytes: int
     vision_image_cache_ttl_seconds: int
     vision_private_image_wait_seconds: int
+    enable_local_stickers: bool
+    local_sticker_root: Path = field(repr=False)
+    local_sticker_max_file_bytes: int
+    local_sticker_max_dynamic_file_bytes: int
+    local_sticker_min_dimension: int
+    local_sticker_max_dimension: int
+    local_sticker_max_pixels: int
+    local_sticker_max_animation_frames: int
+    local_sticker_max_animation_duration_ms: int
+    local_sticker_min_frame_duration_ms: int
+    local_sticker_max_animation_decoded_pixels: int
+    local_sticker_preview_cooldown_seconds: int
+    enable_chat_sticker_intent_shadow: bool
+    enable_chat_sticker_attachments: bool
+    enable_remote_sticker_classifier: bool
+    sticker_classifier_api_key: str = field(repr=False)
+    sticker_classifier_base_url: str
+    sticker_classifier_model: str
+    sticker_classifier_timeout_seconds: int
+    sticker_classifier_max_input_chars: int
+    chat_sticker_owner_private_only: bool
+    chat_sticker_cooldown_seconds: int
+    chat_sticker_min_messages_between: int
+    chat_sticker_max_per_hour: int
+    chat_sticker_max_per_reply: int
+    chat_sticker_min_intent_confidence: float
     enable_private_chat: bool
     enable_group_chat: bool
     max_context_messages: int
@@ -206,6 +242,104 @@ def load_config() -> AiChatConfig:
         vision_max_image_bytes=_int_env("VISION_MAX_IMAGE_BYTES", 5242880),
         vision_image_cache_ttl_seconds=_int_env("VISION_IMAGE_CACHE_TTL_SECONDS", 120),
         vision_private_image_wait_seconds=_int_env("VISION_PRIVATE_IMAGE_WAIT_SECONDS", 5),
+        enable_local_stickers=_bool_env("ENABLE_LOCAL_STICKERS", False),
+        local_sticker_root=PROJECT_ROOT / "data" / "stickers",
+        local_sticker_max_file_bytes=_security_int_env(
+            "LOCAL_STICKER_MAX_FILE_BYTES",
+            2_097_152,
+        ),
+        local_sticker_max_dynamic_file_bytes=_security_int_env(
+            "LOCAL_STICKER_MAX_DYNAMIC_FILE_BYTES",
+            5_242_880,
+        ),
+        local_sticker_min_dimension=_security_int_env(
+            "LOCAL_STICKER_MIN_DIMENSION",
+            32,
+        ),
+        local_sticker_max_dimension=_security_int_env(
+            "LOCAL_STICKER_MAX_DIMENSION",
+            2048,
+        ),
+        local_sticker_max_pixels=_security_int_env(
+            "LOCAL_STICKER_MAX_PIXELS",
+            4_194_304,
+        ),
+        local_sticker_max_animation_frames=_security_int_env(
+            "LOCAL_STICKER_MAX_ANIMATION_FRAMES",
+            120,
+        ),
+        local_sticker_max_animation_duration_ms=_security_int_env(
+            "LOCAL_STICKER_MAX_ANIMATION_DURATION_MS",
+            10_000,
+        ),
+        local_sticker_min_frame_duration_ms=_security_int_env(
+            "LOCAL_STICKER_MIN_FRAME_DURATION_MS",
+            20,
+        ),
+        local_sticker_max_animation_decoded_pixels=_security_int_env(
+            "LOCAL_STICKER_MAX_ANIMATION_DECODED_PIXELS",
+            60_000_000,
+        ),
+        local_sticker_preview_cooldown_seconds=_security_int_env(
+            "LOCAL_STICKER_PREVIEW_COOLDOWN_SECONDS",
+            3,
+        ),
+        enable_chat_sticker_intent_shadow=_bool_env(
+            "ENABLE_CHAT_STICKER_INTENT_SHADOW",
+            False,
+        ),
+        enable_chat_sticker_attachments=_bool_env(
+            "ENABLE_CHAT_STICKER_ATTACHMENTS",
+            False,
+        ),
+        enable_remote_sticker_classifier=_bool_env(
+            "ENABLE_REMOTE_STICKER_CLASSIFIER",
+            False,
+        ),
+        sticker_classifier_api_key=os.getenv(
+            "STICKER_CLASSIFIER_API_KEY",
+            "",
+        ).strip(),
+        sticker_classifier_base_url=os.getenv(
+            "STICKER_CLASSIFIER_BASE_URL",
+            "",
+        ).strip(),
+        sticker_classifier_model=os.getenv(
+            "STICKER_CLASSIFIER_MODEL",
+            "",
+        ).strip(),
+        sticker_classifier_timeout_seconds=_security_int_env(
+            "STICKER_CLASSIFIER_TIMEOUT_SECONDS",
+            8,
+        ),
+        sticker_classifier_max_input_chars=_security_int_env(
+            "STICKER_CLASSIFIER_MAX_INPUT_CHARS",
+            2400,
+        ),
+        chat_sticker_owner_private_only=_bool_env(
+            "CHAT_STICKER_OWNER_PRIVATE_ONLY",
+            True,
+        ),
+        chat_sticker_cooldown_seconds=_security_int_env(
+            "CHAT_STICKER_COOLDOWN_SECONDS",
+            120,
+        ),
+        chat_sticker_min_messages_between=_security_int_env(
+            "CHAT_STICKER_MIN_MESSAGES_BETWEEN",
+            4,
+        ),
+        chat_sticker_max_per_hour=_security_int_env(
+            "CHAT_STICKER_MAX_PER_HOUR",
+            6,
+        ),
+        chat_sticker_max_per_reply=_security_int_env(
+            "CHAT_STICKER_MAX_PER_REPLY",
+            1,
+        ),
+        chat_sticker_min_intent_confidence=_security_float_env(
+            "CHAT_STICKER_MIN_INTENT_CONFIDENCE",
+            0.82,
+        ),
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
         max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 40),

@@ -22,6 +22,14 @@ class LocalTimeTests(unittest.TestCase):
             "请问今日礼拜几": "今天是星期日。",
             "今天几月几日？": "今天是 2026 年 7 月 12 日。",
             "今天是几号": "今天是 2026 年 7 月 12 日。",
+            "爱可记得今天几号吗": "今天是 2026 年 7 月 12 日。",
+            "那爱可还记得今天几号嘛": "今天是 2026 年 7 月 12 日。",
+            "（你抚摸爱可湿润的地方）爱可记得今天几号吗": (
+                "今天是 2026 年 7 月 12 日。"
+            ),
+            "(轻轻抱住爱可) 你还记得今天几号吗": (
+                "今天是 2026 年 7 月 12 日。"
+            ),
             "今天几月几日，星期几": "今天是 2026 年 7 月 12 日，星期日。",
             "现在几点了": "现在是 10:30。",
             "请问当前是什么时间": "现在是 10:30。",
@@ -60,6 +68,9 @@ class LocalTimeTests(unittest.TestCase):
             "明天星期几",
             "今天星期几适合出门吗",
             "如果我问你今天星期几会怎样",
+            "爱可记得今天几号适合出门吗",
+            "（你问爱可今天几号）继续刚才的话题",
+            "（没有闭合爱可记得今天几号吗",
             "/agent 执行外部只读查询：今天星期几",
             "/状态",
             "2026 年 7 月 12 日是星期几",
@@ -100,6 +111,11 @@ class LocalTimeTests(unittest.TestCase):
             ("今天星期几", "今天是星期六。", False),
             ("今天几月几日", "今天是 7 月 11 日。", False),
             ("今天几月几日", "不是 7 月 11 日，是 7 月 12 日。", False),
+            (
+                "爱可记得今天几号吗",
+                "现在是2025年5月24日，星期六。",
+                False,
+            ),
             ("今天几月几日星期几", "今天是 7 月 12 日，星期六。", False),
             ("现在几点", "现在是 10:31。", False),
             ("现在是哪一年", "今年是 2025 年。", False),
@@ -135,6 +151,8 @@ class LocalTimeTests(unittest.TestCase):
         self.assertIn("当前日期：2026-07-12", resolution.trusted_context)
         self.assertIn("当前星期：星期日", resolution.trusted_context)
         self.assertIn("保持当前角色卡", resolution.trusted_context)
+        self.assertIn("忽略它们", resolution.trusted_context)
+        self.assertIn("不要只输出裸事实", resolution.trusted_context)
         self.assertNotIn("今天星期几", resolution.trusted_context)
 
         original_history = [
@@ -193,6 +211,10 @@ class LocalTimeTests(unittest.TestCase):
         )
         self.assertIn(
             "fallback = local_time_request.deterministic_reply",
+            plugin_source[llm_call:],
+        )
+        self.assertIn(
+            "llm_user_text(event, user_content.for_llm)",
             plugin_source[llm_call:],
         )
 

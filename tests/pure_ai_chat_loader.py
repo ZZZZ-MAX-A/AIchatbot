@@ -246,6 +246,14 @@ def load_external_read_security_module():
     )
 
 
+def load_document_artifacts_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.document_artifacts",
+        AI_CHAT_ROOT / "document_artifacts.py",
+    )
+
+
 def load_external_search_modules():
     security = load_external_read_security_module()
     search = load_module(
@@ -272,6 +280,71 @@ def load_local_time_module():
     return load_module(
         "src.plugins.ai_chat.local_time",
         AI_CHAT_ROOT / "local_time.py",
+    )
+
+
+def load_sticker_library_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.sticker_library",
+        AI_CHAT_ROOT / "sticker_library.py",
+    )
+
+
+def load_sticker_labeling_module():
+    load_sticker_library_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_labeling",
+        AI_CHAT_ROOT / "sticker_labeling.py",
+    )
+
+
+def load_sticker_approval_module():
+    load_sticker_library_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_approval",
+        AI_CHAT_ROOT / "sticker_approval.py",
+    )
+
+
+def load_sticker_preview_module():
+    load_sticker_library_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_preview",
+        AI_CHAT_ROOT / "sticker_preview.py",
+    )
+
+
+def load_sticker_attachment_module():
+    load_sticker_preview_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_attachment",
+        AI_CHAT_ROOT / "sticker_attachment.py",
+    )
+
+
+def load_sticker_intent_module():
+    load_sticker_library_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_intent",
+        AI_CHAT_ROOT / "sticker_intent.py",
+    )
+
+
+def load_sticker_classifier_module():
+    install_openai_stub()
+    load_sticker_intent_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_classifier",
+        AI_CHAT_ROOT / "sticker_classifier.py",
+    )
+
+
+def load_sticker_selection_module():
+    load_sticker_intent_module()
+    return load_module(
+        "src.plugins.ai_chat.sticker_selection",
+        AI_CHAT_ROOT / "sticker_selection.py",
     )
 
 
