@@ -379,13 +379,25 @@ async def _describe_image_base64(config: AiChatConfig, image_base64: str) -> str
 
 
 def _ollama_chat_vision(config: AiChatConfig, image_base64: str) -> str:
+    content = ollama_chat_vision_with_prompt(config, image_base64, VISION_PROMPT)
+    return sanitize_vision_description(content)
+
+
+def ollama_chat_vision_with_prompt(
+    config: AiChatConfig,
+    image_base64: str,
+    prompt: str,
+) -> str:
+    normalized_prompt = prompt.strip()
+    if not normalized_prompt or len(normalized_prompt) > 12_000:
+        raise VisionError("视觉提示合同无效")
     base_url = config.vision_ollama_base_url.rstrip("/")
     payload: dict[str, Any] = {
         "model": config.vision_model,
         "messages": [
             {
                 "role": "user",
-                "content": VISION_PROMPT,
+                "content": normalized_prompt,
                 "images": [image_base64],
             }
         ],
@@ -421,4 +433,6 @@ def _ollama_chat_vision(config: AiChatConfig, image_base64: str) -> str:
         raise VisionError("Ollama 返回空描述")
     if is_low_quality_vision_description(content):
         raise VisionError("Ollama 返回低质量重复内容")
-    return sanitize_vision_description(content)
+    if len(content) > 12_000:
+        raise VisionError("Ollama 返回内容过长")
+    return content

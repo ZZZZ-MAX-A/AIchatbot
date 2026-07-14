@@ -45,6 +45,8 @@ docs-archive/
 tts-validation/
 voice-samples/
 temp_audio/
+output/main-agent-workspace/
+output/reliability-inspections/
 
 # Local editor files
 .vscode/

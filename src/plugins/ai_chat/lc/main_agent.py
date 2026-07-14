@@ -11,6 +11,7 @@ from ..graph.main_agent_llm import (
     create_main_agent_call_handler,
     create_main_agent_tool_summary_handler,
 )
+from ..graph.tool_registry import ToolRegistry
 from .models import build_main_llm
 
 
@@ -62,10 +63,12 @@ def create_main_agent_lc_call_handler(
     *,
     llm: Any | None = None,
     context_metadata_key: str = "agent_context",
+    tool_registry: ToolRegistry | None = None,
 ) -> Callable[[MainAgentState], Awaitable[MainAgentState]]:
     return create_main_agent_call_handler(
         create_main_llm_call(config, llm=llm),
         context_metadata_key=context_metadata_key,
+        tool_registry=tool_registry,
     )
 
 

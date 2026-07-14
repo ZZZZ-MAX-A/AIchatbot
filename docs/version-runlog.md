@@ -6829,7 +6829,346 @@ MainAgent 继续保持中性、无角色身份、无括号动作旁白；本次�
 全量回归 493 tests OK；Python AST 119 files OK；git diff --check 通过。
 ```
 
+## ChatAgent：本地时间自然问法与主人 QQ live 收口
+
+状态：已补丁并通过主人 QQ live，未新增 Tavily 请求或 Agent 任务。
+
+```text
+本地角色时间问法的私人原句已从公开记录移除；首次验证未命中可信时间解析。
+补充受限自然问法前缀和吗/嘛，同时继续拒绝假设句、更宽泛问题、明天、历史日期和 /agent 命令。
+主人加入开头括号动作后仍未命中；解析器因此增加仅用于意图识别的开头括号动作剥离，最多三个中文或 ASCII 括号段。
+完整原始消息仍通过 user_content.for_llm 原样交给 ChatAgent；只有解析副本用于追加可信本地时间 system context。
+可信上下文要求忽略历史旧日期，不复述、纠正或比较旧值；只陈述一次本轮事实并继续遵守角色卡。
+数据库与运行时证据确认“今天几月几号”此前确实调用 ChatAgent；最终裸日期是候选未通过事实校验后的确定性回退，不是跳过模型。
+新增主人原话、ASCII 括号、未闭合括号、非直接问题和真实错误候选 2025-05-24 的回归合同。
+定向本地时间 7 tests OK；全量回归 493 tests OK；git diff --check 通过。
+修复后主人 QQ live 正确包含 2026-07-13、星期一；私人称谓和互动内容已从公开记录移除。
+Bot/NapCat/OneBot 正常，错误日志为空；最新 Agent 任务仍为 #43，没有新增 external-read 或 Tavily 请求。
+```
+
+## 主人审核的本地静态表情包库设计
+
+状态：第一版安全设计、A1/A2、动态候选预算、代表帧和 AI 标签建议合同已完成；A3 及以后尚未实现，尚未导入主人图片或发送 QQ 表情包。
+
+```text
+新增 docs/local-static-sticker-library-design.md。
+真实候选、批准文件、隔离文件、报告和索引建议放在 Git 忽略的 data/stickers 下。
+静态候选允许 PNG、JPEG、WebP；动态候选允许 GIF、APNG、动态 WebP；拒绝 SVG、视频、未知格式、路径逃逸和链接。
+候选按魔数和真实逐帧解码校验尺寸、像素、帧数、时长与字节预算；A3 主人批准时才生成规范化副本和 SHA-256 固定索引。
+运行时只读取 approved 索引；ChatAgent、MainAgent 和用户文本都不能提供文件路径或 URL。
+第一阶段仅设计主人显式候选检查、候选预览、批准和已批准预览；普通 ChatAgent 不自动发图。
+第二阶段若另行批准，ChatAgent 只提出有限 mood/usage_tag，本地策略映射到已批准 ID；默认关闭、主人私聊限定、每次最多一张、至少 120 秒冷却、失败不 retry。
+表情包库不调用 Tavily、浏览器、图片生成、视觉入库、MemoryRAG 或 ProjectDocRAG，不开放 Owner Console 写接口。
+QQ 动态、群发、非主人自动发图、主动私聊和自动下载继续延后。
+主人已批准并完成动态分析骨架；推荐下一步用少量主人 GIF 做 /表情检查 与 /表情分析 live，校准不确定标签后再做批量审核与 A3，QQ 发送继续延后。
+```
+
+## 本地静态表情包库 A1：配置、manifest 与图片校验
+
+状态：已实现并完成本地回归；未创建真实表情包目录、未导入图片、未注册 QQ 命令、未发送图片。
+
+```text
+新增默认关闭的 ENABLE_LOCAL_STICKERS，以及 2 MiB、32-2048 像素和 4,194,304 总像素安全预算；无效数字加载为 0，后续校验 fail closed。
+固定本地根目录为 Git 忽略的 data/stickers，根目录字段不进入配置 repr；聊天文本不能覆盖路径。
+显式声明并验证 Pillow 12.x 依赖窗口。
+新增纯本地 sticker_library.py，不依赖 NoneBot、网络、数据库、Tavily、MainAgent 或 LLM。
+新增不可变 StickerLimits、StickerImageInfo、StickerAsset、StickerIssue 和 StickerLibrary 数据模型。
+manifest 顶层严格验证 schema_version、library_revision、条目数量和 1 MiB 预算；逐条非法 entry 以安全 code 隔离，不扩大读取范围。
+批准文件只允许 approved 根目录的单层安全文件名；拒绝路径穿越、绝对路径、子目录和符号链接，并在 resolve 后再次确认文件仍位于固定根目录。
+按文件魔数和 Pillow 真实解码验证 PNG、JPEG、静态 WebP；拒绝 GIF、动画 PNG、损坏文件、metadata、尺寸/像素/字节超限和未知格式。
+重新计算 SHA-256，并复核 manifest 的 MIME、尺寸和字节数；重复 ID、文件和哈希均拒绝后出现条目。
+persona、mood、usage tag、owner_private scope、enabled、带时区 ISO approved_at 和固定 approval_source 均使用白名单验证。
+定向 sticker/config 22 tests OK，其中 Windows 当前权限不允许创建测试符号链接而安全跳过 1 项；代码路径仍显式拒绝链接。
+全量回归 509 tests OK（skipped=1）；Python AST 575 files OK；pip check 无损坏依赖；git diff --check 通过。
+真实 Bot 重启加载成功，8080 正常，NapCat/OneBot 自动重连，错误日志为空。
+A1 不加载真实 library、不注册表情命令、不产生 Agent 任务或 Tavily 请求。
+A2 候选检查与安全报告随后已完成；本节 A1 边界仍保持不批准、不写索引、不发送 QQ。
+```
+
+## 本地静态表情包库 A2：只读候选检查与安全报告
+
+状态：代码与回归已完成，真实开关、inbox 候选和主人 QQ live 尚未执行；未批准、改写或发送图片。
+
+```text
+新增 StickerCandidate 和 StickerCandidateReport 不可变模型，以及 inspect_sticker_candidates / format_sticker_candidate_report。
+只扫描固定 data/stickers/inbox 的直接子项；缺目录时报告“未自动创建”，不创建目录或文件。
+根目录、inbox 和候选文件均拒绝符号链接或 Windows junction；真实 resolve 后必须仍是 inbox 的直接普通文件。
+直接子项预算固定为 200；超过时整体拒绝扫描，不继续读取文件。
+候选在 2 MiB 预算内先计算 SHA-256，再按 A1 真实图片规则解码；重复内容只允许第一项进入审核。
+对外只显示 candidate_<12位短哈希>、短哈希、MIME、尺寸、字节数和安全分类；不显示文件名、绝对路径或完整哈希。
+metadata 候选可以读取格式/尺寸但标记为待清理，不可直接进入审核；目录、动画、损坏、未知格式、超预算和链接均拒绝。
+报告最多展开 30 项，仍保留总扫描、可审核和拒绝计数。
+新增严格固定 QQ 命令 /表情检查，仅主人私聊；总开关关闭时直接提示未开启。
+handler 延迟导入 Pillow 校验模块；依赖缺失或安全预算无效时给固定中文安全提示，不泄露原始异常。
+该命令不进入普通聊天、ChatAgent 或 MainAgent，不调用 LLM、RAG、Tavily、数据库、Agent 任务或图片发送。
+定向 sticker/config 30 tests OK（skipped=2，均为 Windows 当前权限无法创建符号链接测试）。
+全量回归 517 tests OK（skipped=2）；Python AST 575 files OK；git diff --check 通过。
+Bot 重启成功，8080 正常，NapCat/OneBot 自动重连，错误日志为空。
+当前 ENABLE_LOCAL_STICKERS 仍保持默认关闭，data/stickers 未自动创建，因此尚未宣称真实候选或 QQ live 通过。
+推荐下一步先由主人决定是否本地启用并准备少量自有候选；A2 live 通过后才进入 A3 批准/规范化写入。
+```
+
+## 本地表情包 A2.1-A2.3：动态预算、代表帧与 AI 标签建议
+
+状态：代码与假视觉合同回归完成；尚未导入主人 GIF、调用真实候选视觉分析、写正式标签或发送图片。
+
+```text
+候选层新增 GIF、APNG 和动态 WebP 支持；静态批准 loader 继续拒绝 GIF/多帧，A3 尚未开放动态正式资产。
+新增动态 5 MiB、120 帧、10 秒、最小 20ms 帧间隔和 60,000,000 总解码像素预算；逐帧真实解码并执行首故障短路。
+Pillow 12 不暴露动态 WebP 帧时长，因此新增受限 RIFF/ANMF chunk 解析；块越界、帧数不一致或时长不可用时 fail closed。
+候选报告新增静态/动态、帧数和总时长；仍不输出文件名、路径或完整哈希。
+新增内存代表帧联系表：最多 6 张，包含首尾、四分位和变化较大帧；输出 PNG bytes，不写临时文件。
+新增 sticker_labeling.py 固定 JSON 合同，只允许 moods、soft/medium/strong、动作、兼容场景、三类置信度和 ambiguous。
+情绪置信度低于 0.85、强度低于 0.75、场景低于 0.70、mixed 或 ambiguous 自动标记 needs_owner_review。
+高置信度只标记 suggested/待主人确认；AI 建议不写 library.json，不成为正式标签。
+现有本地 Ollama transport 新增固定 prompt 入口；原聊天视觉事实描述仍经过原 sanitize/truncate 行为，回归保持不变。
+新增 candidate_<12位短哈希> 精确解析器；只在固定 inbox 中重新匹配完整 SHA-256，碰撞、替换、路径逃逸或预算失败均拒绝。
+新增主人私聊严格命令 /表情分析 <candidate_id>；总开关与视觉开关门控，抽帧和视觉调用放入线程，失败只返回固定中文类别。
+/表情分析 不发送图片、不写标签、不批准候选，不调用 ChatAgent、MainAgent、Tavily、RAG、数据库或 Agent 任务。
+聚焦 sticker/label/config/vision 65 tests OK（skipped=2，均为 Windows 符号链接权限）。
+全量回归 530 tests OK（skipped=2）；Python AST 577 files OK；pip check 和 git diff --check 通过。
+Bot 重启成功，8080 正常，NapCat/OneBot 自动重连，错误日志为空。
+本轮未调用真实 Ollama 标签分析，避免用合成联系表冒充主人 GIF 分类质量；真实置信度阈值等待主人样本校准。
+推荐下一步为少量主人 GIF 的 /表情检查 + /表情分析 live；主人反馈不确定项后再做批量审核页和 A3 正式标签。
+```
+
+## 本地表情首批真实分析与主人校准
+
+状态：32 个候选已完成只读安全扫描；首批 6 个完成真实本地视觉分析、主人校准和一次改进后复跑；剩余 26 个完成 AI 人工辅助初判。未写正式标签、未批准候选、未发送 QQ 图片，剩余候选未交给当前模型静默批量分类。
+
+```text
+data/stickers/inbox 扫描到 32 个候选：31 个动态 GIF、1 个静态 PNG；全部通过字节、尺寸、帧数、时长和总解码像素预算，没有 rejected candidate。
+首批 6 个生成 output/sticker-review/initial-batch.png，只包含 candidate_<短哈希> 和代表帧，不包含源文件名、路径或完整 SHA-256。
+第一次本地 Ollama 标签结果置信度普遍偏低，并重复输出 neutral + embarrassed；全部正确路由到 needs_owner_review，没有写 library.json。
+人工初步建议经主人校准：第 1 个是“卖萌 / 中等”，不是打哈欠；第 3、4 个属于同一探头/围观场景；第 6 个“撒娇”或“拜托”均符合；第 2、5 及其他建议无需修正。
+固定标签白名单补充 curious、expectant、playful、pleading；动作补充 act_cute、exclamation_mark、hands_together、peek、show_heart；场景补充 acting_cute、attention_seeking、checking_reaction、joining_chat、request。
+固定 prompt 明确：仅凭张嘴不得判断 yawn；从遮挡物后探头不得自动判断 shy/embarrassed/cover_face；爱心、感叹号、闪亮注视和双手合拢按各自可见证据映射；neutral 不得作为不确定时的默认答案。
+改进后复跑第 1、4、6 个方向改善，但第 2、3、5 个仍出现明显误判，且 6 个均因低置信度或 ambiguous 保持 needs_owner_review。当前 3B 模型未通过无人复核批量分类质量门槛。
+剩余 26 个不再调用该 Ollama 分类器，而是按最多 6 个一批生成 5 张本地审核图，由 AI 直接查看代表帧完成初步建议。结果保存为 Git 忽略的 output/sticker-review/preliminary-analysis.md。8、18、19、20、22、24、25、26、28 共 9 个物品、原梗或触发语义不清项随后由主人逐一确认：喝奶茶表示观望/“请继续说”，手机拍照表示记录，锤子敲头表示受到打击，灵魂出窍用于震惊，趴倒表示摆烂，伸舌舔用于讨好/撒娇，蛋糕用于生日快乐和分享点心，小本本用于“我记住了”或记仇，握方向盘表示出发。32 个候选现均完成初步语义确认。
+固定标签合同继续增加 attentive、hurt、resigned、dizzy，以及 drink_milk_tea、take_photo、get_hit、soul_leave_body、lie_flat、lick、offer_cake、take_notes、drive、offer_gift、sway、type_angrily 和相应受控场景。图片动作和聊天用途分层保存；同一小本本 GIF 可兼容普通倾听/记录和有生气证据时的记仇场景，不把 angry 固化为唯一情绪。
+本次真实分析只调用 loopback Ollama，不调用 Tavily、ChatAgent、MainAgent、RAG、数据库或 Agent 任务；未消耗 Tavily credit。
+推荐下一步先设计 A3 待审草稿与显式批准流程，或先实现并验证两段式客观描述/受控标签映射。未经主人另行授权，不写正式 manifest、规范化副本，不实现 QQ 预览、自动触发或发送。
+全量回归 531 tests OK（skipped=2）；仓库范围 Python AST 135 files OK；pip check 和 git diff --check 通过。
+```
+
+## 本地表情包 A3：主人显式批准、规范化与撤销核心
+
+状态：A3 代码、纯本地回归和 32 条主人确认草稿已完成；尚未执行真实主人 QQ 命令、生成 `library.json` 或创建 approved 文件，没有发送表情包。
+
+```text
+正式 manifest 升级为 schema v2，新增 source_sha256、animated、frame_count、duration_ms、intensity 和 actions；新批准只写 v2，旧 schema v1 静态库继续只读兼容且不自动迁移。
+正式情绪、动作和 usage tag 白名单与主人确认的 32 个候选语义对齐；manifest loader 重新验证最终/来源哈希、动态属性和所有枚举，并拒绝重复来源哈希。
+新增纯本地 sticker_approval.py；不依赖 NoneBot、网络、Tavily、数据库、ChatAgent、MainAgent、RAG 或 OneBot sender。
+批准草稿固定在 data/stickers/reports/approval-drafts.json；只允许严格 schema、完整源哈希、唯一 candidate/sticker/source、白名单标签、owner_private 和 owner_confirmed=true。
+/表情草稿 仅主人私聊只读，只返回草稿 revision、数量、安全 candidate/sticker ID、情绪、强度和场景，不显示完整哈希、路径或源文件名。
+/表情批准 candidate_<12位短哈希> <同一短哈希> 仅主人私聊；重新解析固定 inbox 当前文件并匹配草稿完整源 SHA-256，候选替换、错误确认、重复来源和无草稿均 fail closed。
+静态候选修正方向、清除 metadata 并统一编码 PNG；GIF/APNG/动态 WebP 逐帧解码后按原动画类型重编码，保留帧时长和 loop 语义。规范化结果再次执行全部格式、metadata、帧数、时长、像素和字节预算。
+approved 文件先写同目录唯一临时文件并验证，再原子替换最终文件；manifest 通过 fsync 临时文件和 os.replace 原子更新。manifest 失败时清理本轮新文件，不形成有效条目。
+批准成功只返回安全 sticker ID、library revision、静态/动态摘要和最终 12 位撤销短哈希；不发送图片、不自动触发、不启用 ChatAgent 选择。
+/表情撤销 sticker_id <最终短哈希> 仅主人私聊；重新验证整个 v2 manifest 后原子递增 revision 并设置 enabled=false。第一版保留规范化文件，不删除、不移动，disabled 条目不可选择。
+根据 output/sticker-review/preliminary-analysis.md 和主人逐项确认生成 32 条真实本地草稿，draft schema=1、revision=1、32 个唯一 sticker ID；生成前要求实际 eligible candidate 集合与定义精确相等。一次人工报告短哈希笔误被集合检查拦截并修正，没有模糊匹配。
+当前 data/stickers/library.json 和 data/stickers/approved 均不存在，证明本阶段没有把“进入 A3”解释为自动批准。
+A3 专项覆盖静态 metadata 清理、GIF 帧数/总时长保留、错误确认零写入、候选替换、manifest 失败清孤立文件、重复批准、草稿校验、输出脱敏、撤销短哈希和 owner-private 命令隔离。
+全量回归 542 tests OK（skipped=2，均为 Windows 符号链接权限）。
+.env 原本没有 ENABLE_LOCAL_STICKERS；已只补充唯一 ENABLE_LOCAL_STICKERS=true，不显示或改动其他配置，也不进入 Git。Bot 于 2026-07-13 16:24 重启成功，ai_chat 插件加载、127.0.0.1:8080、NapCat/OneBot 重连均正常，stderr 为空。
+推荐下一步 QQ 私聊先验收 /表情草稿，再由主人挑一张静态和一张短 GIF 逐项批准，最后选择一项验证撤销。A4 QQ 预览、自动触发和发送继续延后。
+```
+
+### A3 QQ live：草稿、两项批准与重复批准提示
+
+```text
+/表情草稿 live 返回 draft revision 1、32 条安全 candidate/sticker ID 与主人确认标签；未显示路径、文件名或完整哈希，未发送图片。
+主人于 16:56:34 批准 candidate_350e629e52e1，生成 aike_angry_002 静态规范化 PNG；随后于 16:56:58 批准 candidate_1ee215ac7c6e，生成 aike_act_cute_001 动态规范化 GIF。
+正式库安全复核：schema 2、revision 2、enabled 2、disabled 0、invalid 0。静态最终短哈希 bc295b1266b1；动态最终短哈希 c82a170dcdbb。
+动态源容器报告 6 帧/360ms；规范化 GIF 为 2 帧/360ms。Pillow 合并了连续相同画面，总时长、动画属性和可见变化保持；设计与文档改为记录最终真实帧数，不承诺保留冗余相同帧。
+主人于 17:04:57 再次批准同一静态候选，重复 sticker ID/来源规则正确拒绝。原统一失败文本无法区分“已批准”和真正安全失败，因此补充分层安全提示：重复批准明确返回“该候选已经批准，正式库未重复写入”；确认哈希、候选变化、manifest 检查和规范化失败分别返回不同固定类别，不输出原异常。
+此前两条撤销尝试分别缺少最终短哈希或使用错误命令/候选哈希，均未改变正式库。正确静态撤销命令为 /表情撤销 aike_angry_002 bc295b1266b1；是否执行由主人决定。
+A3 专项 12 tests OK；全量回归 543 tests OK（skipped=2）。
+细分错误提示已随 17:19 Bot 重启加载；ai_chat 插件、8080 和 OneBot 重连正常，stderr 为空，正式库仍为 revision 2、enabled 2、invalid 0。
+```
+
+## 本地表情包 A4：主人显式 QQ 预览
+
+状态：代码、回归、Bot 重启和主人 QQ 动态 GIF live 均完成；正式库 revision 3、enabled 1、disabled 1，普通聊天自动附带仍关闭。
+
+```text
+新增纯本地 sticker_preview.py；严格 sticker ID 解析后重新加载完整 manifest，任何 invalid issue 均使预览 fail closed。
+只允许 enabled=true 的正式条目；disabled、未知 ID、非法 ID 均返回固定安全类别，不进入发送和冷却。
+发送前再次检查正式文件 SHA-256、MIME、尺寸、字节、metadata、动画属性、帧数与总时长，避免批准后文件被替换。
+新增 LOCAL_STICKER_PREVIEW_COOLDOWN_SECONDS，默认 3 秒；无效值加载为 0 并安全关闭预览。
+新增主人私聊严格命令 /表情预览 <sticker_id>；只接受一个参数，每条命令只有一次 send_private_msg，使用 MessageSegment.image 发送已复核的正式本地文件。
+成功只发送图片，不追加文字。OneBot 失败只记录 sticker_preview_send_failed 固定类别，不记录路径或原始异常；不重试、不改发其他图片、不随机选择。
+预览入口不调用 ChatAgent、MainAgent、Tavily、视觉、RAG、数据库或 Agent 任务，不开放群聊、普通聊天或自动附带。
+定向 config/preview 13 tests OK；全量回归 549 tests OK（skipped=2）。首次全量失败来自旧 A2/A3 源码审计测试截取范围延伸到新 A4 handler；收紧各自 handler 结束边界后通过，隔离要求未降低。
+QQ live 顺序：先 /表情预览 aike_angry_002，确认 disabled 只返回拒绝；再 /表情预览 aike_act_cute_001，确认 QQ/NapCat 实际播放动态 GIF。普通聊天自动触发继续延后。
+Bot 于 19:07 重启，ai_chat 插件、8080 和 OneBot 重连正常，stderr 为空；重启后正式库仍为 schema 2、revision 3、enabled 1、disabled 1、invalid 0。
+主人于 20:53 执行 /表情预览 aike_act_cute_001；OneBot matcher 单次完成，主人确认 QQ 收到的是第 1 张“卖萌”表情且能够播放动态效果。stderr 为空，没有 retry 或替代发送证据。
+预览前后正式库保持 schema 2、revision 3、enabled 1、disabled 1、invalid 0，证明 A4 只读预览没有改写 manifest。A4 enabled 动态主链 live 通过；disabled 拒绝 live 可选补验。
+```
+
+## 本地表情包 B1：ChatAgent 有限意图与本地 shadow 选择
+
+状态：代码、回归、shadow 配置和 Bot 重启加载完成，自动附件关闭；尚待主人 QQ shadow 样本校准。
+
+```text
+新增 sticker_intent.py 固定合同。ChatAgent 正常可见回复结束后只能追加一次末尾标记，字段限定 attach、mood、intensity、scene、confidence；不能选择 sticker ID、文件名、路径或 URL。
+控制标记在本地时间事实校验、QQ 发送、TTS 候选、stored_assistant、聊天历史和 RAG 之前解析并剥离。marker 缺失保持原回复；非法 JSON、未知枚举、额外字段、错误置信度、非末尾或残缺标记均丢弃意图并截断控制区域，绝不进入可见/持久化文本。
+ask_llm 新增可选 extra_system_context，不增加第二次 LLM 调用；只有 ENABLE_CHAT_STICKER_INTENT_SHADOW=true 时注入固定意图合同。附件开关不赋予模型额外能力。
+ChatRuntimeResult 新增可选 StickerIntent，并在 legacy/graph/semantic voice 包装中传递；现有构造保持默认兼容。
+新增 sticker_selection.py 纯本地策略：owner-private、回复非空、confidence>=0.82、正式库无 invalid、persona/scope/enabled 和 mood/intensity/scene 精确匹配。
+频率为确定性硬门控：120 秒冷却、至少 4 条消息间隔、每小时最多 6 张、每回复最多 1 张。无概率随机触发；同类多候选使用 shuffle-bag，袋内用完前不重复。
+选择和发送分成 decide/commit_sent；只有未来 OneBot 图片发送成功后才提交冷却、小时计数和袋消费。B1 shadow 只 decide，不 commit，不发送。
+新增 /表情意图状态 主人私聊只读命令，仅显示 marker 状态、有限意图、置信度、本地决策原因、匹配数量和安全 sticker ID；不保存或显示用户原文、回复正文、路径、哈希或文件名。
+.env 已设置 ENABLE_CHAT_STICKER_INTENT_SHADOW=true 与 ENABLE_CHAT_STICKER_ATTACHMENTS=false，均唯一；普通聊天仍没有 MessageSegment.image 或 send_private_msg 接入。
+意图/config/选择定向 20 tests OK；全量回归 562 tests OK（skipped=2）；Python AST 143 files OK；pip check 和 git diff --check 通过。
+推荐 QQ shadow live：先普通事实问题后查 /表情意图状态，确认不建议/不匹配且无图片；再发“爱可卖个萌给我看看”后查状态，观察是否为 playful/medium/acting_cute 并 shadow 选中 aike_act_cute_001。两轮均不得发图。
+Bot 于 21:33 重启，ai_chat 插件、8080 和 OneBot 重连正常，stderr 为空；shadow=true、attachments=false 均为唯一有效配置。
+
+主人首轮 QQ shadow 依次发送“爱可记得今天几号吗”和“爱可给我卖萌”。两次文本均正常回复且没有图片，但 `/表情意图状态` 都显示 `marker_absent / intent_absent`。21:41 与 21:57 日志确认消息进入同一普通聊天 matcher 且正常完成，stderr 为空。
+使用完整正式 ChatAgent prompt 的无隐私最小探针复现 marker 缺失；简短独立 prompt 可以输出 marker，说明不是解析器、开关、QQ handler 或 DeepSeek 完全不支持该字符格式，而是完整系统/基础/角色组合下的输出合同不稳定。将 system 消息简单合并仍有缺失或错误标签，不能作为修复。
+当前 DeepSeek 接口 3/3 支持 `json_object`，但 `json_schema` 返回 HTTP 400，因此曾把 B1 改为同一次 LLM 调用的严格 JSON envelope。最小探针连续三次得到 requested，并不代表真实长会话稳定；22:34 左右主人连续发送“爱可给我卖萌”时，Bot 一直返回固定“没有组织好回答”兜底。该句来自结构解析后可见 reply 为空触发的本地兜底，不是角色卡正常回复。虽然之后用同一近期历史的独立 JSON 探针又能返回完整结构，但这进一步证明输出具有随机不稳定性，不能靠放宽校验修复。
+为恢复“聊天优先”，22:37 先把 `.env` 的 shadow 改为 false 并重启；随后从 ChatAgent 主链完整撤销 JSON response_format、system 合并和结构 envelope 解析，恢复普通文本 + 可选末尾 marker 的安全形态。marker 缺失只会丢弃表情建议，正文原样保留。使用同一近期历史的普通模式探针得到 275 字非 JSON、非固定兜底回复；回退后全量 `562 tests OK（skipped=2）`，git diff --check 通过。Bot 于 22:47 再次重启，shadow=false、attachments=false；普通聊天恢复尚待主人 QQ 复验。正式库、Agent #43 和 Tavily 状态未因该回退改变。
+主人随后确认 QQ 中“爱可给我卖萌”已恢复正常角色回复，并选择新增第二个 DeepSeek API Key 做解耦分类。新 Key 只保存在 `.env` 的 `STICKER_CLASSIFIER_API_KEY`，检查时仅确认非空，没有输出内容；Base URL 固定 `https://api.deepseek.com`，模型为 `deepseek-v4-flash`。新增 `sticker_classifier.py`、独立配置和正文发送后的 owner-private 异步调度；分类器不回退使用 ChatAgent Key，不读取历史/记忆/RAG/图片/文件，不写数据库，不重试，也不发送图片。假 transport 覆盖禁用、错误配置、输入预算、严格字段、额外 ID、超时和调用次数；源码审计确认 legacy 与 graph 两条文字路径都先 `matcher.send(result.reply)`，再调度分类。
+独立 Key 手动探针只返回安全有限结果：卖萌为 requested + `playful/medium/acting_cute` + 0.95，日期事实为 not_requested；没有经过 QQ、Tavily、MainAgent、RAG 或聊天存储。补充 401/403/429/500 安全类别与单次调用回归后，全量 `571 tests OK（skipped=2）`，Git 口径 Python AST 145 files OK，pip check 与 git diff --check 通过。Bot 于 23:42 在 remote classifier=false、旧 marker shadow=false、attachments=false 下重启；ai_chat 加载、8080 监听、OneBot 重连均正常，stderr 为空，Agent 最新任务仍为 #43。尚未授权 QQ shadow 或 B2 发送。
+主人随后明确要求打开新的远程 shadow。只把 `ENABLE_REMOTE_STICKER_CLASSIFIER` 改为 true；旧 `ENABLE_CHAT_STICKER_INTENT_SHADOW=false`、`ENABLE_CHAT_STICKER_ATTACHMENTS=false` 保持不变。Bot 于 23:57 重启，ai_chat、8080 与 OneBot 重连正常，stderr 为空。当前只允许主人私聊在正文成功发送后产生一次后台分类，不发送 GIF；等待日期事实和卖萌样本 QQ live。
+2026-07-14 00:02–00:03 主人完成两组 QQ live。样本 #1“今天是几月几号”先得到正常日期正文，远程分类为 not_requested，本地 intent_absent、0 匹配、无选中；样本 #2“爱可给我卖萌”先得到正常角色回复，远程分类为 requested + `playful/medium/acting_cute` + 0.95，本地精确匹配 1 项并影子选中 `aike_act_cute_001`。两次状态均明确自动附带关闭，没有 GIF。NoneBot 日志显示四个 matcher 正常完成，stderr 为空；正式库保持 schema 2、revision 3、enabled 1、disabled 1，Agent 最新任务和 Tavily/external-read 最新任务均仍为 #43，`sticker_classifier.py` 不含 MessageSegment.image、send_private_msg 或 commit_sent。C1 日期负样本与卖萌正样本主链通过；B2 真实自动发送仍需主人另行明确授权。
+主人明确授权进入 B2。新增 `sticker_attachment.py`，通过注入单次 sender 复用 A4 发送前安全复核；`__init__.py` 只在正文成功发送、远程分类 requested、本地 selected、attachments=true、未熔断时调用一次 OneBot private image。失败不 retry、不替代，成功后才 commit 冷却/消息间隔/小时计数/shuffle-bag；发送成功但 commit 异常时熔断。全量 `576 tests OK（skipped=2）`，Git 口径 Python AST 147 files OK，pip check 和 git diff --check 通过。先在 attachments=false 下于 00:35 重启安全加载，再按授权设为 true 并于 00:36 重启，ai_chat、8080、OneBot 正常。
+主人 00:39 发送“爱可给我卖萌”，确认先收到正常文字、随后收到动态表情；00:40 状态显示 requested、`playful/medium/acting_cute`、0.95、selected、匹配 1、`aike_act_cute_001`、自动附带已发送。stderr 为空，Agent/Tavily 最新任务仍为 #43。主人随即表示不喜欢该表情并要求删除。核对 enabled 与最终短哈希后，调用现有原子撤销函数把 `aike_act_cute_001` 设为 disabled，library revision 从 3 升至 4；完整 loader 复核为 enabled 0、disabled 2、invalid 0。当前不会再自动发送该 GIF；文件按现有安全撤销合同保留作审计，未做不可逆磁盘删除。
+```
+
 ## 后续整理规则
+
+## 2026-07-14 本地表情批量逐项批准
+
+```text
+主人明确指定批准草稿序号 4、5、6、9、12、15、18、21、23、24、29、30、31、32，未授权批准其他候选。
+按草稿 revision 1 精确映射到 14 个 candidate_<12位短哈希>，每项确认值与 candidate ID 完全相同。写入前一次性复核 14 项当前候选、完整源 SHA-256、sticker ID、来源去重和目标文件冲突，全部通过。
+在受限工作区内首次执行时，安全批准函数无法在 approved 目录创建以点开头的原子临时文件，因此在第一项 normalization 阶段 fail closed 并清理临时文件，manifest 仍为 revision 4。同一张 38 帧 GIF 在隔离临时目录使用相同参数成功规范化，进一步定位为受限环境的目录写入权限，不是素材损坏。获得主人对本地批准写入的明确允许后，使用原有原子写入函数完成，未绕过任何哈希、图片预算、metadata、动画或 manifest 复核。
+成功新增：aike_peek_002、aike_surprised_001、aike_pleading_001、aike_pleading_002、aike_pleading_003、aike_affection_003、aike_recording_001、aike_affection_004、aike_surprised_003、aike_pleasing_001、aike_affection_005、aike_peek_003、aike_tired_002、aike_pleading_004。其中 13 张动态 GIF、1 张静态图；每项批准独立递增 revision。
+批准后完整 loader 复核：schema 2、revision 18、enabled 14、disabled 2、invalid 0；14 个指定 ID 全部 enabled，missing=none。已撤销的 aike_act_cute_001 和 aike_angry_002 继续 disabled，未物理删除审计副本。其他 16 个候选仍在 inbox/草稿中保留，未批准、未移动、未删除。
+表情专项回归运行 81 tests，全部通过，skipped=2 仍为 Windows 当前权限无法创建测试符号链接。运行选择路径在每次分类后重新加载完整 manifest，因此新资产不需要 Bot 重启即可参与主人私聊 B2；本轮没有发送 QQ 图片，仍需主人做新资产 live 验收。
+本轮没有修改 .env、API Key、数据库、RAG 索引或网络权限；没有调用 Tavily、MainAgent、ProjectDocRAG 或 QQ 动态；没有 commit 或 push。
+```
+
+## 2026-07-14 本地表情设计文档状态收口
+
+```text
+按恢复清单重新核对 Git、当前开发状态、版本运行记录和本地表情设计；main 与 origin/main 仍共同指向 cfbda5c，既有大量未提交开发修改全部保留，没有 commit、push 或 reset。
+执行指定 rebuild-rag-index 开发上下文查询并成功返回 5 条项目文档、4 条记忆；召回结果命中当前状态文档，但表情主题的前几项仍偏向旧基础文档，因此本轮继续以仓库与最新交接文档为准，没有把召回结果当作运行时事实。
+核对独立远程分类、正文发送后调度、B2 单次私聊图片发送和发送成功后 commit_sent 的代码顺序；表情专项重新运行 81 tests OK，skipped=2 仍为 Windows 当前权限无法创建测试符号链接。
+修正 local-static-sticker-library-design.md 的过期当前态：不再写 revision 3、shadow 开启、attachments 关闭或 B2 未执行；同步为远程分类开启、旧 marker shadow 关闭、attachments 开启，以及 schema 2、revision 18、enabled 14、disabled 2、invalid 0。
+文档明确运行分类后会重新加载 manifest、14 个新资产无需单独重启 Bot；保留 B1 marker/JSON envelope 的历史失败经验、主人私聊限定、正文优先、无重试、频率门控、撤销不物理删除和剩余 16 个候选不自动批准等边界。
+除按恢复清单执行开发侧 ProjectDocRAG 索引重建外，本轮只修改设计与运行记录文档；没有修改 .env、API Key、聊天数据库、MemoryRAG、真实表情、正式 manifest 或批准草稿，没有调用 DeepSeek、Tavily、MainAgent 或 QQ 图片发送。
+```
+
+## 2026-07-14 B2 冷却期跳过远程表情分类
+
+```text
+主人完成一晚 QQ live，反馈基本场景均符合预期，未发现功能问题；提出在表情发送冷却期间跳过表情分类 LLM，以减少 token 使用。
+StickerSelectionRuntime 新增纯本地 preflight，不需要 StickerIntent 或正式库即可检查 policy、owner-private scope、正文可用性、120 秒冷却、4 条消息间隔和每小时发送上限。preflight 只读取既有内存发送状态，不消费 shuffle-bag、不提交冷却或小时计数。
+B2 自动附件开启时，schedule_remote_sticker_classifier_shadow 在创建异步分类任务前执行 preflight；命中 cooldown、message_gap、hourly_cap 或附件熔断时直接返回 classifier_status=skipped，不调用 classify_sticker_intent。C1 shadow 在 attachments=false 时仍继续分类观察，不受发送频率状态影响。
+正文发送顺序保持不变；预检发生在正文成功发送之后。会话消息仍正常持久化，因此跳过分类不会冻结 message_index，达到 4 条间隔后可以自然恢复。预检读取本地消息进度异常时 fail closed 为 preflight_unavailable，跳过分类且不影响已发送正文。
+/表情意图状态 新增“频率门控中，未调用分类模型”展示；本地决策保留 cooldown、message_gap、hourly_cap 等安全类别，不显示正文、路径、哈希或异常原文。
+新增 preflight 冷却、消息间隔恢复、小时窗口到期、不消费状态和分类前源码顺序测试。表情专项 83 tests OK（skipped=2）；完整回归 578 tests OK（skipped=2）。本轮未调用 DeepSeek、Tavily、MainAgent 或 QQ 图片发送，未修改 .env、API Key、真实表情、正式 manifest 或批准草稿，未重启 Bot，未 commit 或 push。
+```
+
+## 2026-07-14 MainAgent TXT/Word/PPT 受控文档产物
+
+```text
+主人明确选择下一步同时增加 TXT、Word 和 PPT 三种 MainAgent 文档能力，并保持“不让 Agent 修改项目”的边界。
+新增纯本地 document_artifacts.py，生产根固定为 Git 忽略的 output/main-agent-workspace/；工具不接受 path 或文件名参数，只创建 artifact_<UTC>_<安全随机后缀>.txt/.docx/.pptx 唯一新文件，不覆盖已有文件。
+TXT 使用 UTF-8/LF 并精确重读；DOCX 使用 python-docx，支持标题、三级标题、项目符号和编号列表；PPTX 使用 python-pptx，生成 16:9 标题页和正文页，以 ## 标题或 --- 分页，每页最多 8 项、总计最多 20 页。
+DOCX/PPTX 保存后执行 ZIP test、必需 OOXML member 校验和库级重新打开；三种格式都限制 title<=120、content<=20,000、最终文件<=10 MiB，刷新临时文件后原子替换，并再次核对最终字节和 SHA-256。符号链接、控制字符、空内容、未知格式、超预算和异常依赖均 fail closed。
+MainAgent owner_write_command 新增 create_txt_document、create_word_document、create_presentation。Main LLM 工具合同只允许 command/query/title/content/既有管理参数，不暴露 path；模型必须先生成完整 title/content，ToolPolicyCheck 只创建 write_local 审批，主人确认后才通过既有 approval_resume_enabled 注册表执行一次。
+帮助、工具状态、边界和 Main LLM prompt 已同步。普通 ChatAgent、群聊、非主人、Owner Console、Tavily、RAG、数据库、shell 和 QQ sender 均未接入；产物完成后只返回 artifact ID、相对路径、大小、计数和短哈希，不自动发送文件。
+项目依赖新增 python-docx 1.x 与 python-pptx 1.x，当前虚拟环境已安装 python-docx 1.2.0、python-pptx 1.0.2、lxml 6.1.1 和 XlsxWriter 3.2.9。开发中修正 python-pptx 1.0 的 Pt/Inches 导入位置，以及 Windows 只读句柄 fsync 不兼容；修正后真实 DOCX/PPTX 重开通过。
+专项 MainAgent/格式合同 79 tests OK（skipped=1，为 Windows 符号链接权限）；完整回归 587 tests OK（skipped=3，均为符号链接权限）。本轮测试仅写系统临时目录，没有创建真实文档产物，没有调用 Main LLM、Tavily、RAG 或 QQ 发送；Bot 未重启，QQ live 尚未执行，没有 commit 或 push。
+```
+
+## 2026-07-14 修复 Main LLM 文档工具可见性接线
+
+```text
+主人首次 live 请求 TXT artifact 时收到“当前可用的 visible tool 只有 dev_context，未注册可调用的 owner_write_command”安全拒绝；没有创建审批、没有写文件。
+定位结果：run_main_agent_qq_command 的执行侧 create_read_only_main_agent_runtime_handler 会注册 owner_write_command，但 LC handler 使用 create_main_agent_lc_call_handler(config) 时没有传入该运行时 registry；main_agent_llm 因而按默认 registry 只渲染 dev_context。问题不在文档渲染器、审批策略或依赖。
+修复为生产路径只构造一份完整 main_agent_tool_registry，同时传给 LC Main LLM prompt、create_read_only_main_agent_runtime_handler；runner 也支持显式 tool_registry，并从 active registry 推导 local-write policy。这样 prompt、ActionRequest 校验、ToolPolicyCheck 和实际执行共享同一注册事实。
+新增 LC 接线回归：注入完整 registry 后 prompt 必须包含 owner_write_command、create_txt_document/create_word_document/create_presentation、title/content，并且不能包含 path。同步保留文档产物审批前零执行测试。
+完整回归 588 tests OK（skipped=3，均为 Windows 符号链接权限）；定向 MainAgent/LC/文档合同 107 tests OK；Python AST 149 files OK，pip check 与 git diff --check 通过。
+本轮没有重新调用 Main LLM、Tavily、RAG 或 QQ 文件发送，没有创建真实文档产物，没有 commit 或 push。Bot 尚未重启；修复需重启后再做主人 QQ live。
+
+## 2026-07-14 MainAgent 文档生成后受控 QQ 直接交付
+
+状态：已实现并通过本地定向回归；配置默认仍关闭，Bot 未重启，真实 QQ 文件 live 尚未执行。
+
+保留 `create_txt_document`、`create_word_document`、`create_presentation` 的本地 `write_local` 语义，不会将旧审批追溯扩权。已完成的审批 `#20` 只授权当时的本地 TXT 生成，不会被自动发送。
+
+新增独立 `document_delivery_command`，包含 `create_and_send_txt_document`、`create_and_send_word_document`、`create_and_send_presentation`。工具为 `write_external`、`llm_visible=true`、`requires_approval=true`、`approval_resume_enabled=true`；仅在 `ENABLE_AGENT_EXTERNAL_WRITE=true` 时注册并通过策略门控。参数仅包含 command/query/title/content，不开放 path、文件名、QQ 号、群号、任意接收者或重试选项。
+
+审批恢复后复用纯本地渲染器生成一个新文件，然后创建与 approval/session/user 绑定的有界内存待发送状态。当前 `/agent 确认` 处理器只消费该次确认新生成的状态，发送前再次核对固定工作区、后缀、字节数和完整 SHA-256。待发送状态在 OneBot `send_private_msg` 尝试前移除；每个审批最多发送一个 file segment，失败不重试、不换文件、不换接收者，且不影响本地产物保留。
+
+文档完整性、MainAgent bridge、Main LLM 工具合同、LC registry 接线和 QQ 边界定向回归为 117 tests OK（skipped=1，仅 Windows 符号链接权限）；最新完整回归 592 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。本轮没有修改 `.env`、没有重启 Bot、没有调用 Main LLM/Tavily/RAG，也没有通过 QQ 发送测试文件；没有 commit 或 push。
+
+## 2026-07-14 MainAgent Word 直接交付 live 的 prompt 污染修复
+
+主人已自行开启 `.env` 外部写开关，真实 QQ 链路成功生成并发送 Word，因而 `document_delivery_command` 审批恢复、DOCX 渲染和 OneBot file segment 达到主人私聊已有 live 证据。但产物正文误包含 `Read-only project context`、`MainAgentGraph read-only local test mode`、可见工具列表、禁止项和 `User query`，不能将该次生成视为内容质量验收通过。
+
+根因是 `create_read_only_agent_context_builder` 的历史文本仍声称“只读本地测试”和“禁止外部写”，即使完整 registry 已注册 `document_delivery_command`；`build_main_agent_action_messages` 又把它标记为 `Read-only project context` 并与 owner query 同置于 user message。Main LLM 因而把控制元数据误当可用正文。
+
+修复后，runtime context 明确标记为非用户文档内容，根据实际 registry 说明文档交付是否可用，不再绝对声称“禁止 QQ/外部写”。Action Planner 明确：主题型文档请求需自行生成完整 title/content；“生成并发送”在工具已注册时必须选择 `document_delivery_command`，不得用 `final_answer` 或本地产物降级；内部 metadata 不得复制进 title/content。
+
+本地校验层新增已知 internal scaffold marker 拒绝，即使模型再次输出包装文本，也会在审批创建前停止。MainAgent 未开放上一条 QQ 消息作为文档正文的读取能力；对“使用我刚才/上一条/上面提供的完整内容”且未同条内联正文的文档请求，确定性规则在 Main LLM 和审批之前返回 `ask_owner`，要求同一条 `/agent` 请求粘贴完整正文或明确仅给主题由 MainAgent 撰写。
+
+新增 prompt 分区、主题型请求、缺失历史引用、scaffold 拒绝和动态 registry context 回归；定向 110 tests OK（skipped=1），最新完整回归 597 tests OK（skipped=3）。修复需重启 Bot 后再用主题型 Word 请求复验；本轮没有修改 `.env`、没有自动重启、没有删除已生成的错误产物，没有 commit 或 push。
+
+主人随后用完整提纲复验，“推荐下一步”被确定性 `agent_task_read` 分类器提前消费，所以 Bot 转而询问 Agent 下一步，没有创建文档交付审批。该问题与外部写开关无关，属于“确定性管理分类优先于 Main LLM”的路由冲突。
+
+新增 `is_document_artifact_request`：当整句同时具有 TXT/Word/PPT/文档对象和生成/撰写/制作意图，且 registry 中存在本地文档或文档交付工具时，跳过任务、审批、主人管理等确定性文本分类，把完整要求交给文档能力 Main LLM。该收口只对明确文档创建请求生效；独立 `/agent 下一步`、任务查询和审批查询仍使用原确定性路由。新增真实提纲复现测试，确认不调 `agent_task_read`、不调 `dev_context`，Main LLM 请求 `document_delivery_command`，策略结果为 `write_external` 审批中断。定向 111 tests OK（skipped=1），完整回归 598 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。修复需重启 Bot 后再做主人 QQ live；本轮未修改 `.env`、未重启、未 commit 或 push。
+
+主人随后重启并用同类主题型 Word 请求完成复验，反馈文档成功生成且内容质量不错。该 live 表明新文档意图优先级已加载，提纲中的“推荐下一步”未再误命中 `agent_task_read`；Main LLM 生成了可用 title/content，内部 runtime metadata、工具列表和 query 包装未再出现在产物正文，审批恢复、DOCX 渲染和主人 QQ 文件交付也均成功。Word 主题型“生成并发送”链路因此完成真实内容质量验收。本次任务 ID 和审批 ID 未由主人提供，不臆造编号；TXT/PPTX 仍只有自动化格式/边界覆盖，尚未记录主人真实内容质量反馈。本次只同步文档状态，未重启 Bot、未修改 `.env`、未 commit 或 push。
+
+## 2026-07-14 MainAgent 文档生成进度回执与会话并发保护
+
+主人在 Word/PPT 测试中观察到 Action Planner 需等待约二十多秒才生成完整文档 `title/content`，期间 QQ 没有首条回执。主人追加 `/agent 在吗` 后，第二个 MainAgent 请求并发返回“在”，第一个文档请求随后才返回审批，导致可见顺序与请求顺序不一致。
+
+新增 `_main_agent_session_locks`，按 QQ session 隔离 `/agent` 和 `/agent-debug`，不复用普通聊天 `_session_locks`。文档请求成功取得锁后，先通过 matcher 发送“MainAgent 正在生成文档标题、正文和审批请求，请稍候”，再调用 Main LLM。同一 session 在锁持有期间收到的后续 `/agent` 不排队、不调 LLM、不调工具，立即返回“上一条正在处理，当前消息未执行”。只引用上一条内容而缺失同条正文的文档请求仍会立即 `ask_owner`，不先发慢任务回执。
+
+互斥锁在 `matcher.finish(reply)` 将最终结果或审批消息交给 adapter 之后才由 `finally` 释放，避免“先释放锁、再发结果”造成新的小竞态窗口。补丁只改善可见响应和顺序，不会缩短 Main LLM 生成完整文档内容的实际耗时，也不增加重试、后台队列或并发生成。
+
+主人本次 PPT 命令已正确生成审批 `#23`、任务 `#47`；工具为 `document_delivery_command`，命令为 `create_and_send_presentation`，标题和 PPT 结构化内容已出现在截断审批摘要中，风险为 `write_external`，状态为待主人确认。因未收到确认后的 PPTX 发送反馈，不宣称 PPT 内容质量或 QQ 交付 live 已通过。定向 124 tests OK（skipped=1），完整回归 599 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。需重启 Bot 后验收进度回执、忙碌拒绝和最终审批顺序；本轮未修改 `.env`、未重启、未 commit 或 push。
+
+## 2026-07-14 MainAgent PPT 审批恢复超页失败与前置结构预检
+
+主人已确认审批 `#23`，但恢复执行返回 `Approval resume failed: document_delivery_too_many_slides`。该错误发生在 PPTX 渲染前置结构阶段：没有成功生成最终 PPTX，没有创建待发送交付状态，也没有调用 OneBot 文件发送。审批已经进入确认/失败语义，不自动重试或改写原审批内容。
+
+根因是审批前 `owner_write_argument_error` 只检查 title/content 类型、空值、控制字符和字符长度，未执行 PPT 的最终分页算法。实际渲染将每个 `## ` 或 `---` 分成一个内容节，每 8 条非空正文拆分续页，并额外生成标题页；结构展开后超过 `DOCUMENT_ARTIFACT_MAX_SLIDES=20`，因而只在主人确认后才 fail closed。
+
+新增纯本地 `presentation_slide_count`，复用 `_ppt_sections` 实际章节和续页语义，返回包含自动标题页的确切渲染页数。MainAgent ActionRequest 校验在 ToolPolicyCheck 和审批创建之前调用该计算，超限时返回明确的“减少 `##` 章节/每节正文，不要另建封面”提示，不创建一个注定失败的审批。渲染器仍保留原硬上限作为第二层保护。
+
+Main LLM 系统 prompt、本地 `owner_write_command` 和外部 `document_delivery_command` 工具合同均补充 PPT 预算：标题页自动生成，不输出独立“封面”内容节；建议最多 12 个 `##` 内容节、每节最多 6 条非空正文；硬上限为标题页、内容页和自动续页合计 20 张。新增确切续页计数和审批前超页拒绝测试；定向 90 tests OK（skipped=1），完整回归 601 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。修复需重启 Bot；主人需重新发起 PPT 请求并确认新审批，不应再确认 `#23`。本轮未修改 `.env`、未重启、未 commit 或 push。
+
+## 2026-07-14 MainAgent PPT 主题、版式与内容叙事升级
+
+主人重新发起 PPT 请求并确认新审批后，PPTX 已成功生成和发送，证明超页结构预检后的真实交付链可达。主人同时反馈产物存在瑕疵且生成质量不高。用本机 PowerPoint 将实际收到的 9 页 PPTX 全部导出为 PNG 后检查，客观问题为：纯白背景、九页均使用同一标题/列表版式、封面 28pt、页标题 24pt、正文 18pt、内容集中于左上而留白过多，并且无主题色、分隔、页码、章节节奏或视觉支撑。内容覆盖完整，但多为并列概括，缺少演示文稿的连续叙事。
+
+本地 `_render_pptx` 升级为受控视觉主题：16:9 深色标题页，52pt 标题、20pt 副标题；浅色内容页，36pt 标题和 22pt 正文；蓝/青/紫循环强调色，顶部强调线、章节/页面双位数编号、分隔线、`AIchatbot · MainAgent` 页脚与页码；“下一步/总结/结论/展望/行动”节使用浅青背景收束。标题和正文都使用微软雅黑；顶层 `# ` 标题被视为与 title 重复而忽略，H1–H6/列表/编号前缀在正文中被归一化，避免 Markdown 符号进入页面。
+
+Main LLM 文档工具合同同步升级：PPT 内容直接从 `## ` 开始，不重复 deck title；按总览、分组能力、当前亮点/边界、下一步组织叙事；每页一个主旨、3–5 条简短具体要点，不使用空泛市场化填充和重复句式。该改动改善文字密度、页间逻辑和自动续页数量，不开放联网图片、任意本地素材或模板下载。
+
+升级后生成一份临时 9 页代表性 PPTX，使用本机 PowerPoint 以 1600×900 导出全部页面，组合联系表并检查代表页原图。所有页均正常打开，未发现文字裁切、标题换行、元素意外重叠、页码不一致或页脚越界。临时 PPTX、单页 PNG 和联系表仅保留在系统临时目录作 QA，未进入 `output/main-agent-workspace/`、Git 或 QQ。演示文稿专项技能对字号、信息密度、留白和逐页视觉检查的要求直接影响了本轮升级。定向 103 tests OK（skipped=1），完整回归 601 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。
+
+主人明确选择保留当前审批顺序：Main LLM 先生成可审查的 title/content 提案，主人确认后才写入 PPTX 并通过 QQ 发送。不改为“审批时看不到最终内容，确认后才调 Main LLM”的意图审批模式。本轮未修改 `.env`、未重启 Bot、未 commit 或 push。
+
+## 2026-07-14 可靠性错误分类与只读周期巡检
+
+主人确认 TXT 未发送是指令未包含“发给我”，不是工具故障；随后明确把下一步转向近期高频错误、超时、失败调用、异常退出、统一分类、可读提示和定期巡检。
+
+新增 `failure_diagnostics.py`，把关键失败统一为配置、模型、权限、网络和数据五类，并产生稳定 code、简要原因和不带副作用的下一步建议。新增密钥、token、password、secret 和 URL 脱敏；未来 `log_ai_event_error` 直接写安全 `category/code/type/message`，MainAgent 观测限制长度。Main LLM、工具执行、正式只读工作和审批恢复失败均接入分类提示；审批失败任务与事件不再持久化任意工具异常原文。PPT 超页、产物完整性、QQ 文件发送、审批上下文和恢复参数缺失均有专用 code。
+
+`/agent 做一次可靠性巡检` 确定性映射到现有 `owner_read_command/ops_health`，近 24 小时错误区改为分类统计，不调用 Main LLM 猜测状态。新增 `scripts/reliability_inspection.py` 与 `scripts/inspect-reliability.ps1`：只读取 `.env` 配置存在性、本机 8080/11434 端口、SQLite immutable read-only schema 和四个固定日志；无时间戳行使用日志文件 mtime 参与窗口过滤，避免旧 TTS/Owner Console 日志污染当前趋势。`-WriteReport` 只原子刷新 Git 忽略的 `output/reliability-inspections/latest.txt`，不接受任意输出路径。
+
+本机实际巡检：当前状态正常，NoneBot 8080 可达，SQLite 只读检查通过，聊天与 MainAgent 模型必填项已配置；最近 24 小时 0 个失败信号，最近 7 天 11 个失败信号（数据类 8、网络类 3、超时 1、失败调用 3、疑似异常退出 0）。这些是历史日志信号，不等于仍有 11 个当前故障或 11 次独立事故。
+
+最终完整回归 607 tests OK（skipped=3，均为 Windows 符号链接权限）；Python AST 594 files OK，pip check 和 `git diff --check` 通过。固定报告 UTF-8 中文重读通过，无替换字符且无残留临时文件。没有调用外部模型/Tavily/QQ，没有自动重试、重启、修改配置、修复数据、创建系统计划任务、commit 或 push。
+```
 
 从当前阶段开始：
 

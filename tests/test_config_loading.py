@@ -33,6 +33,33 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertFalse(config.enable_agent_external_write)
         self.assertFalse(config.enable_agent_shell)
         self.assertFalse(config.enable_chat_graph_runtime)
+        self.assertFalse(config.enable_local_stickers)
+        self.assertEqual(config.local_sticker_root.name, "stickers")
+        self.assertEqual(config.local_sticker_max_file_bytes, 2_097_152)
+        self.assertEqual(config.local_sticker_max_dynamic_file_bytes, 5_242_880)
+        self.assertEqual(config.local_sticker_min_dimension, 32)
+        self.assertEqual(config.local_sticker_max_dimension, 2048)
+        self.assertEqual(config.local_sticker_max_pixels, 4_194_304)
+        self.assertEqual(config.local_sticker_max_animation_frames, 120)
+        self.assertEqual(config.local_sticker_max_animation_duration_ms, 10_000)
+        self.assertEqual(config.local_sticker_min_frame_duration_ms, 20)
+        self.assertEqual(config.local_sticker_max_animation_decoded_pixels, 60_000_000)
+        self.assertEqual(config.local_sticker_preview_cooldown_seconds, 3)
+        self.assertFalse(config.enable_chat_sticker_intent_shadow)
+        self.assertFalse(config.enable_chat_sticker_attachments)
+        self.assertFalse(config.enable_remote_sticker_classifier)
+        self.assertEqual(config.sticker_classifier_api_key, "")
+        self.assertEqual(config.sticker_classifier_base_url, "")
+        self.assertEqual(config.sticker_classifier_model, "")
+        self.assertEqual(config.sticker_classifier_timeout_seconds, 8)
+        self.assertEqual(config.sticker_classifier_max_input_chars, 2400)
+        self.assertTrue(config.chat_sticker_owner_private_only)
+        self.assertEqual(config.chat_sticker_cooldown_seconds, 120)
+        self.assertEqual(config.chat_sticker_min_messages_between, 4)
+        self.assertEqual(config.chat_sticker_max_per_hour, 6)
+        self.assertEqual(config.chat_sticker_max_per_reply, 1)
+        self.assertEqual(config.chat_sticker_min_intent_confidence, 0.82)
+        self.assertNotIn(str(config.local_sticker_root), repr(config))
         self.assertEqual(config.main_llm_base_url, "https://api.openai.com/v1")
         self.assertEqual(config.main_llm_model, "gpt-4.1-mini")
         self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
@@ -132,6 +159,31 @@ class ConfigLoadingTests(unittest.TestCase):
                 "ENABLE_AGENT_EXTERNAL_WRITE": "yes",
                 "ENABLE_AGENT_SHELL": "on",
                 "ENABLE_CHAT_GRAPH_RUNTIME": "true",
+                "ENABLE_LOCAL_STICKERS": "true",
+                "LOCAL_STICKER_MAX_FILE_BYTES": "1024",
+                "LOCAL_STICKER_MAX_DYNAMIC_FILE_BYTES": "2048",
+                "LOCAL_STICKER_MIN_DIMENSION": "16",
+                "LOCAL_STICKER_MAX_DIMENSION": "512",
+                "LOCAL_STICKER_MAX_PIXELS": "262144",
+                "LOCAL_STICKER_MAX_ANIMATION_FRAMES": "40",
+                "LOCAL_STICKER_MAX_ANIMATION_DURATION_MS": "5000",
+                "LOCAL_STICKER_MIN_FRAME_DURATION_MS": "25",
+                "LOCAL_STICKER_MAX_ANIMATION_DECODED_PIXELS": "1000000",
+                "LOCAL_STICKER_PREVIEW_COOLDOWN_SECONDS": "4",
+                "ENABLE_CHAT_STICKER_INTENT_SHADOW": "true",
+                "ENABLE_CHAT_STICKER_ATTACHMENTS": "true",
+                "ENABLE_REMOTE_STICKER_CLASSIFIER": "true",
+                "STICKER_CLASSIFIER_API_KEY": "classifier-secret",
+                "STICKER_CLASSIFIER_BASE_URL": "https://classifier.example/v1",
+                "STICKER_CLASSIFIER_MODEL": "classifier-model",
+                "STICKER_CLASSIFIER_TIMEOUT_SECONDS": "6",
+                "STICKER_CLASSIFIER_MAX_INPUT_CHARS": "1800",
+                "CHAT_STICKER_OWNER_PRIVATE_ONLY": "false",
+                "CHAT_STICKER_COOLDOWN_SECONDS": "90",
+                "CHAT_STICKER_MIN_MESSAGES_BETWEEN": "3",
+                "CHAT_STICKER_MAX_PER_HOUR": "5",
+                "CHAT_STICKER_MAX_PER_REPLY": "1",
+                "CHAT_STICKER_MIN_INTENT_CONFIDENCE": "0.88",
                 "ENABLE_MEMORY_RAG": "true",
                 "ENABLE_PROJECT_DOC_RAG": "yes",
                 "MEMORY_RAG_EMBEDDING_PROVIDER": "unit",
@@ -173,6 +225,35 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertTrue(config.enable_agent_external_write)
         self.assertTrue(config.enable_agent_shell)
         self.assertTrue(config.enable_chat_graph_runtime)
+        self.assertTrue(config.enable_local_stickers)
+        self.assertEqual(config.local_sticker_max_file_bytes, 1024)
+        self.assertEqual(config.local_sticker_max_dynamic_file_bytes, 2048)
+        self.assertEqual(config.local_sticker_min_dimension, 16)
+        self.assertEqual(config.local_sticker_max_dimension, 512)
+        self.assertEqual(config.local_sticker_max_pixels, 262144)
+        self.assertEqual(config.local_sticker_max_animation_frames, 40)
+        self.assertEqual(config.local_sticker_max_animation_duration_ms, 5000)
+        self.assertEqual(config.local_sticker_min_frame_duration_ms, 25)
+        self.assertEqual(config.local_sticker_max_animation_decoded_pixels, 1_000_000)
+        self.assertEqual(config.local_sticker_preview_cooldown_seconds, 4)
+        self.assertTrue(config.enable_chat_sticker_intent_shadow)
+        self.assertTrue(config.enable_chat_sticker_attachments)
+        self.assertTrue(config.enable_remote_sticker_classifier)
+        self.assertEqual(config.sticker_classifier_api_key, "classifier-secret")
+        self.assertEqual(
+            config.sticker_classifier_base_url,
+            "https://classifier.example/v1",
+        )
+        self.assertEqual(config.sticker_classifier_model, "classifier-model")
+        self.assertEqual(config.sticker_classifier_timeout_seconds, 6)
+        self.assertEqual(config.sticker_classifier_max_input_chars, 1800)
+        self.assertNotIn("classifier-secret", repr(config))
+        self.assertFalse(config.chat_sticker_owner_private_only)
+        self.assertEqual(config.chat_sticker_cooldown_seconds, 90)
+        self.assertEqual(config.chat_sticker_min_messages_between, 3)
+        self.assertEqual(config.chat_sticker_max_per_hour, 5)
+        self.assertEqual(config.chat_sticker_max_per_reply, 1)
+        self.assertEqual(config.chat_sticker_min_intent_confidence, 0.88)
         self.assertTrue(config.enable_memory_rag)
         self.assertTrue(config.enable_project_doc_rag)
         self.assertEqual(config.memory_rag_embedding_provider, "unit")
@@ -197,6 +278,58 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.private_whitelist, frozenset({"10001", "10002"}))
         self.assertEqual(config.group_whitelist, frozenset({"42", "43"}))
         self.assertEqual(config.user_blacklist, frozenset({"90001", "90002"}))
+
+    def test_invalid_local_sticker_limits_fail_closed(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_LOCAL_STICKERS": "true",
+                "LOCAL_STICKER_MAX_FILE_BYTES": "invalid",
+                "LOCAL_STICKER_MAX_DYNAMIC_FILE_BYTES": "invalid",
+                "LOCAL_STICKER_MIN_DIMENSION": "invalid",
+                "LOCAL_STICKER_MAX_DIMENSION": "invalid",
+                "LOCAL_STICKER_MAX_PIXELS": "invalid",
+                "LOCAL_STICKER_MAX_ANIMATION_FRAMES": "invalid",
+                "LOCAL_STICKER_MAX_ANIMATION_DURATION_MS": "invalid",
+                "LOCAL_STICKER_MIN_FRAME_DURATION_MS": "invalid",
+                "LOCAL_STICKER_MAX_ANIMATION_DECODED_PIXELS": "invalid",
+                "LOCAL_STICKER_PREVIEW_COOLDOWN_SECONDS": "invalid",
+                "CHAT_STICKER_COOLDOWN_SECONDS": "invalid",
+                "CHAT_STICKER_MIN_MESSAGES_BETWEEN": "invalid",
+                "CHAT_STICKER_MAX_PER_HOUR": "invalid",
+                "CHAT_STICKER_MAX_PER_REPLY": "invalid",
+                "CHAT_STICKER_MIN_INTENT_CONFIDENCE": "invalid",
+            }
+        )
+
+        self.assertTrue(config.enable_local_stickers)
+        self.assertEqual(config.local_sticker_max_file_bytes, 0)
+        self.assertEqual(config.local_sticker_max_dynamic_file_bytes, 0)
+        self.assertEqual(config.local_sticker_min_dimension, 0)
+        self.assertEqual(config.local_sticker_max_dimension, 0)
+        self.assertEqual(config.local_sticker_max_pixels, 0)
+        self.assertEqual(config.local_sticker_max_animation_frames, 0)
+        self.assertEqual(config.local_sticker_max_animation_duration_ms, 0)
+        self.assertEqual(config.local_sticker_min_frame_duration_ms, 0)
+        self.assertEqual(config.local_sticker_max_animation_decoded_pixels, 0)
+        self.assertEqual(config.local_sticker_preview_cooldown_seconds, 0)
+        self.assertEqual(config.chat_sticker_cooldown_seconds, 0)
+        self.assertEqual(config.chat_sticker_min_messages_between, 0)
+        self.assertEqual(config.chat_sticker_max_per_hour, 0)
+        self.assertEqual(config.chat_sticker_max_per_reply, 0)
+        self.assertEqual(config.chat_sticker_min_intent_confidence, 0.0)
+
+    def test_invalid_remote_sticker_classifier_limits_fail_closed(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_REMOTE_STICKER_CLASSIFIER": "true",
+                "STICKER_CLASSIFIER_TIMEOUT_SECONDS": "invalid",
+                "STICKER_CLASSIFIER_MAX_INPUT_CHARS": "invalid",
+            }
+        )
+
+        self.assertTrue(config.enable_remote_sticker_classifier)
+        self.assertEqual(config.sticker_classifier_timeout_seconds, 0)
+        self.assertEqual(config.sticker_classifier_max_input_chars, 0)
 
 
 if __name__ == "__main__":
