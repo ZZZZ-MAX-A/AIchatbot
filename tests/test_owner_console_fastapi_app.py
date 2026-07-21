@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +34,10 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         cls.database = cls.memory_modules["database"]
         cls.agent_tasks = cls.memory_modules["agent_tasks"]
         cls.memory = cls.memory_modules["memory"]
+        cls.reliability = load_module(
+            "src.plugins.ai_chat.reliability_events",
+            AI_CHAT_ROOT / "reliability_events.py",
+        )
         cls.fastapi_app_module = load_module(
             "src.plugins.ai_chat.owner_console_fastapi_app",
             AI_CHAT_ROOT / "owner_console_fastapi_app.py",
@@ -87,6 +92,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/settings",
                 "/api/v1/owner-console/memory",
                 "/api/v1/owner-console/diagnostics",
+                "/api/v1/owner-console/reliability",
                 "/api/v1/owner-console/external-read",
             ],
         )
@@ -114,7 +120,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(data["allowed_methods"], ["GET"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 11)
+        self.assertEqual(data["route_count"], 12)
         rows = {row["name"]: row for row in data["rows"]}
         self.assertEqual(
             rows["routes"]["path"],
@@ -140,6 +146,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["settings"]["http_api_enabled"])
         self.assertTrue(rows["memory"]["http_api_enabled"])
         self.assertTrue(rows["diagnostics"]["http_api_enabled"])
+        self.assertTrue(rows["reliability"]["http_api_enabled"])
         self.assertTrue(rows["external-read"]["http_api_enabled"])
         self.assertEqual(rows["tasks.detail"]["path_params"], ["task_id"])
         self.assertEqual(
@@ -184,6 +191,86 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             self.client.post("/api/v1/owner-console/diagnostics").status_code,
             405,
         )
+        self.assertEqual(
+            self.client.post("/api/v1/owner-console/reliability").status_code,
+            405,
+        )
+
+    def test_reliability_endpoint_reads_structured_events_without_writing(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            occurred_at = datetime.now(UTC) - timedelta(hours=1)
+            recorded = self.reliability.record_result_safely(
+                component="bot_runtime",
+                operation="lifecycle",
+                code="suspected_abnormal_exit",
+                outcome=self.reliability.ReliabilityOutcome.DEGRADED,
+                occurred_at=occurred_at,
+                runtime_id=self.reliability.new_runtime_id(),
+            )
+            self.assertTrue(recorded)
+            db_path = self.database.DATABASE_PATH
+            before = db_path.stat()
+
+            response = self.client.get("/api/v1/owner-console/reliability")
+
+            after = db_path.stat()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resource"], "reliability")
+        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["http_api_enabled"])
+        self.assertFalse(payload["web_write_enabled"])
+        self.assertIsNone(payload["error"])
+        data = payload["data"]
+        self.assertEqual(data["recent"]["window_hours"], 24)
+        self.assertEqual(data["weekly"]["window_hours"], 168)
+        self.assertEqual(data["recent"]["failure_occurrence_count"], 1)
+        self.assertEqual(data["recent"]["failure_group_count"], 1)
+        self.assertEqual(
+            data["recent"]["state_counts"]["insufficient_evidence"],
+            1,
+        )
+        item = data["recent"]["items"][0]
+        self.assertEqual(item["component"], "bot_runtime")
+        self.assertEqual(item["operation"], "lifecycle")
+        self.assertEqual(item["code"], "suspected_abnormal_exit")
+        self.assertEqual(item["last_success_at"], "")
+        self.assertEqual(
+            set(item),
+            {
+                "component",
+                "operation",
+                "category",
+                "category_label",
+                "code",
+                "occurrence_count",
+                "first_seen_at",
+                "last_seen_at",
+                "last_success_at",
+                "recovery_state",
+                "recovery_state_label",
+            },
+        )
+        self.assertEqual(len(data["coverage"]), 7)
+        self.assertIn(
+            {"component": "vision", "operation": "infer"},
+            data["coverage"],
+        )
+        self.assertIn(
+            {"component": "tts", "operation": "synthesize"},
+            data["coverage"],
+        )
+        self.assertTrue(data["boundary"]["sqlite_mode_ro"])
+        self.assertFalse(data["boundary"]["ensure_database_called"])
+        self.assertFalse(data["boundary"]["chat_content_read"])
+        self.assertFalse(data["boundary"]["raw_exception_read"])
+        self.assertFalse(data["boundary"]["llm_called"])
+        self.assertFalse(data["boundary"]["rag_called"])
+        self.assertFalse(data["boundary"]["write_side_effect_allowed"])
+        self.assertEqual(before.st_size, after.st_size)
+        self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
 
     def test_optional_static_mode_serves_spa_without_touching_api_routes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

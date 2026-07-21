@@ -155,6 +155,22 @@ class StickerClassifierTests(unittest.TestCase):
                 transport=transport,
             )
         )
+        empty_user = asyncio.run(
+            self.module.classify_sticker_intent(
+                self.settings(),
+                "",
+                "回复",
+                transport=transport,
+            )
+        )
+        wrong_type = asyncio.run(
+            self.module.classify_sticker_intent(
+                self.settings(),
+                None,
+                "回复",
+                transport=transport,
+            )
+        )
         timed_out = asyncio.run(
             self.module.classify_sticker_intent(
                 self.settings(),
@@ -166,6 +182,8 @@ class StickerClassifierTests(unittest.TestCase):
 
         self.assertEqual(disabled.status, "disabled")
         self.assertEqual(oversized.status, "input_invalid")
+        self.assertEqual(empty_user.status, "input_invalid")
+        self.assertEqual(wrong_type.status, "input_invalid")
         self.assertEqual(timed_out.status, "timeout")
         self.assertEqual(calls, 1)
 
@@ -202,6 +220,29 @@ class StickerClassifierTests(unittest.TestCase):
                 self.assertIsNone(result.intent)
                 self.assertEqual(calls, 1)
 
+    def test_attachment_status_text_distinguishes_empty_image_from_rate_gates(self):
+        format_status = self.module.format_remote_sticker_attachment_status
+        self.assertEqual(
+            format_status("preflight_blocked", "empty_user_text"),
+            "纯图片无文本，已在本地跳过；未调用分类模型，未发送表情",
+        )
+        for reason in (
+            "cooldown",
+            "message_gap",
+            "hourly_cap",
+            "preflight_unavailable",
+        ):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    format_status("preflight_blocked", reason),
+                    "频率门控中，未调用分类模型",
+                )
+        self.assertEqual(format_status("sent", "empty_user_text"), "已发送")
+        self.assertEqual(
+            format_status("future_status", "future_reason"),
+            "未发送（future_status）",
+        )
+
     def test_chat_integration_source_keeps_remote_classifier_after_text_send(self):
         plugin = (AI_CHAT_ROOT / "__init__.py").read_text(encoding="utf-8")
         self.assertIn("schedule_remote_sticker_classifier_shadow", plugin)
@@ -210,9 +251,21 @@ class StickerClassifierTests(unittest.TestCase):
         scheduler = plugin[scheduler_start:scheduler_end]
         self.assertIn("isinstance(event, PrivateMessageEvent)", scheduler)
         self.assertIn("is_owner(config, event)", scheduler)
+        empty_text_gate = scheduler.index(
+            "if isinstance(user_text, str) and not user_text.strip():"
+        )
         preflight = scheduler.index("_chat_sticker_selection_runtime.preflight(")
         classifier_call = scheduler.index("classification = await classify_sticker_intent(")
+        self.assertLess(empty_text_gate, preflight)
         self.assertLess(preflight, classifier_call)
+        empty_text_block = scheduler[empty_text_gate:preflight]
+        self.assertIn('classifier_status="skipped"', empty_text_block)
+        self.assertIn('decision_reason="empty_user_text"', empty_text_block)
+        self.assertIn('attachment_status="preflight_blocked"', empty_text_block)
+        self.assertIn("return", empty_text_block)
+        self.assertNotIn("classify_sticker_intent", empty_text_block)
+        self.assertNotIn("_record_remote_sticker_classifier_reliability", empty_text_block)
+        self.assertNotIn("_maybe_send_remote_sticker_attachment", empty_text_block)
         self.assertIn('classifier_status="skipped"', scheduler)
         self.assertIn('"preflight_blocked"', scheduler)
         self.assertIn('decision_reason="preflight_unavailable"', scheduler)

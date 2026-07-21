@@ -332,7 +332,16 @@ def create_main_agent_call_handler(
     *,
     context_metadata_key: str = "agent_context",
     tool_registry: ToolRegistry | None = None,
+    result_observer: Callable[[Exception | None], None] | None = None,
 ) -> Callable[[MainAgentState], Awaitable[MainAgentState]]:
+    def notify_result(error: Exception | None) -> None:
+        if result_observer is None:
+            return
+        try:
+            result_observer(error)
+        except Exception:
+            pass
+
     async def call_main_agent(state: MainAgentState) -> MainAgentState:
         context_value = state.metadata.get(context_metadata_key, "")
         context = context_value if isinstance(context_value, str) else str(context_value)
@@ -344,12 +353,15 @@ def create_main_agent_call_handler(
                 tool_registry=tool_registry,
             )
         except Exception as exc:
+            notify_result(exc)
             state.response_text = format_main_llm_failure_reply(exc)
             state.error = "main_llm_failed"
             state.metadata["main_llm_error"] = {
                 "type": type(exc).__name__,
                 "message": str(exc),
             }
+        else:
+            notify_result(None)
         return state
 
     return call_main_agent

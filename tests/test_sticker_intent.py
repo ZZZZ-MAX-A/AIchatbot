@@ -120,6 +120,11 @@ class StickerIntentTests(unittest.TestCase):
         status_block = plugin[status_start:status_end]
         self.assertIn("await require_owner(event, matcher)", status_block)
         self.assertIn("isinstance(event, PrivateMessageEvent)", status_block)
+        self.assertIn(
+            "format_remote_sticker_attachment_status(",
+            status_block,
+        )
+        self.assertNotIn("attachment_labels =", status_block)
         self.assertIn("只观察，不发送", status_block)
         self.assertIn("自动附带：关闭", status_block)
         self.assertNotIn("MessageSegment.image", status_block)

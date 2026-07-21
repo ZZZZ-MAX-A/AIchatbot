@@ -29,6 +29,7 @@ class ChatUserContent:
     original: str
     for_llm: str
     stored: str
+    vision_failed: bool = False
 
 
 @dataclass(frozen=True)

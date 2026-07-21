@@ -11,6 +11,7 @@ import type {
   OwnerConsoleHealth,
   OwnerConsoleMemoryEnvelope,
   OwnerConsoleOverviewEnvelope,
+  OwnerConsoleReliabilityEnvelope,
   OwnerConsoleRoutesEnvelope,
   OwnerConsoleSettingsEnvelope,
   OwnerConsoleTaskDetailEnvelope,
@@ -26,6 +27,7 @@ const allowedPaths = new Set([
   `${API_BASE}/routes`,
   `${API_BASE}/overview`,
   `${API_BASE}/diagnostics`,
+  `${API_BASE}/reliability`,
   `${API_BASE}/external-read`,
   `${API_BASE}/memory`,
   `${API_BASE}/access-control`,
@@ -161,6 +163,20 @@ export const ownerConsoleApi = {
   ): Promise<OwnerConsoleDiagnosticsEnvelope> {
     const envelope = await getJson<OwnerConsoleDiagnosticsEnvelope>(
       `${API_BASE}/diagnostics`,
+      signal,
+    );
+    const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getReliability(
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleReliabilityEnvelope> {
+    const envelope = await getJson<OwnerConsoleReliabilityEnvelope>(
+      `${API_BASE}/reliability`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);

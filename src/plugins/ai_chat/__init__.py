@@ -202,6 +202,17 @@ from .rag.schema import (
     SOURCE_SESSION_SUMMARY,
 )
 from .rate_limit import check_rate_limit, check_rate_limits
+from .reliability_events import (
+    ReliabilityOutcome,
+    begin_runtime_lifecycle_safely,
+    finish_runtime_lifecycle_safely,
+    format_reliability_trend_report,
+    process_runtime_id,
+    read_reliability_trend,
+    record_failure_safely,
+    record_result_safely,
+    record_success_safely,
+)
 from .reply_decider import ReplyDecision, decide_group_auto_reply
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, select_role_card
 from .summaries import (
@@ -220,6 +231,7 @@ from .sticker_classifier import (
     RemoteStickerClassifierSettings,
     StickerClassifierResult,
     classify_sticker_intent,
+    format_remote_sticker_attachment_status,
 )
 from .sticker_selection import (
     StickerSelectionContext,
@@ -250,12 +262,16 @@ from .system_diagnostics_report import (
 )
 from .trials import can_use_private_trial, increment_private_trial, trial_stats
 from .vision import (
+    VISION_FAILURE_DESCRIPTION,
+    VISION_FAILURE_REPLY,
+    all_vision_descriptions_failed,
     describe_images,
     event_has_image,
     format_image_descriptions,
     image_refs_from_event,
     is_direct_image_source,
     is_low_quality_vision_description,
+    is_vision_failure_description,
     sanitize_vision_description,
     vision_safety_context,
 )
@@ -333,6 +349,20 @@ _last_remote_sticker_classifier_shadow: (
 _remote_sticker_classifier_sample_id = 0
 _remote_sticker_classifier_task: asyncio.Task[None] | None = None
 _chat_sticker_attachments_suspended = False
+_reliability_runtime_id = process_runtime_id()
+
+
+async def _record_runtime_started() -> None:
+    begin_runtime_lifecycle_safely(runtime_id=_reliability_runtime_id)
+
+
+async def _record_runtime_stopped() -> None:
+    finish_runtime_lifecycle_safely(runtime_id=_reliability_runtime_id)
+
+
+_driver = get_driver()
+_driver.on_startup(_record_runtime_started)
+_driver.on_shutdown(_record_runtime_stopped)
 
 
 @dataclass(frozen=True)
@@ -741,10 +771,10 @@ async def run_vision_graph(
                 current.descriptions = await describe_images(config, current.image_urls)
             except Exception as exc:
                 log_ai_event_error(exc, event)
-                current.descriptions = [f"图片识别失败：{type(exc).__name__}"]
+                current.descriptions = [VISION_FAILURE_DESCRIPTION]
             return current
         if config.enable_vision:
-            current.descriptions = ["无法读取图片地址。"]
+            current.descriptions = [VISION_FAILURE_DESCRIPTION]
         return current
 
     async def sanitize_image_context_node(current: VisionContext) -> VisionContext:
@@ -938,6 +968,7 @@ def build_chat_user_content(
         original=original_user_content,
         for_llm=user_content,
         stored=stored_user,
+        vision_failed=all_vision_descriptions_failed(image_descriptions),
     )
 
 
@@ -1555,6 +1586,16 @@ async def agent_ops_health_reply(event: MessageEvent) -> str:
             *_section_lines("MainAgent", main_agent_lines),
         ]
     )
+
+
+async def agent_reliability_trend_reply(_event: MessageEvent) -> str:
+    def build_report() -> str:
+        return format_reliability_trend_report(
+            read_reliability_trend(window_hours=24),
+            read_reliability_trend(window_hours=24 * 7),
+        )
+
+    return await asyncio.to_thread(build_report)
 
 
 async def agent_vision_troubleshoot_reply(event: MessageEvent) -> str:
@@ -3438,9 +3479,7 @@ def image_description_stats(descriptions: list[str]) -> dict[str, object]:
     low_quality_count = 0
     for description in descriptions:
         text = str(description)
-        is_error = text.startswith("无法读取或识别这张图片：") or text.startswith(
-            "图片识别失败："
-        )
+        is_error = is_vision_failure_description(text)
         is_low_quality = (
             "Ollama 返回低质量重复内容" in text
             or is_low_quality_vision_description(text)
@@ -4044,6 +4083,40 @@ def _remote_classifier_snapshot_for_absent_intent(
     )
 
 
+def _record_remote_sticker_classifier_reliability(status: str) -> None:
+    if status in {"requested", "not_requested"}:
+        record_success_safely("sticker_classifier", "classify_intent")
+        return
+    if status == "disabled":
+        record_result_safely(
+            component="sticker_classifier",
+            operation="classify_intent",
+            code="operation_skipped",
+            outcome=ReliabilityOutcome.SKIPPED,
+        )
+        return
+    code_by_status = {
+        "not_configured": "invalid_configuration",
+        "invalid_config": "invalid_configuration",
+        "input_invalid": "data_validation_failed",
+        "auth_failed": "authorization_failed",
+        "rate_limited": "model_rate_limited",
+        "timeout": "request_timeout",
+        "unavailable": "connection_failed",
+        "empty_response": "invalid_model_response",
+        "response_too_large": "invalid_model_response",
+        "json_invalid": "invalid_model_response",
+        "contract_invalid": "invalid_model_response",
+    }
+    code = code_by_status.get(status, "unexpected_runtime_state")
+    record_result_safely(
+        component="sticker_classifier",
+        operation="classify_intent",
+        code=code,
+        outcome=ReliabilityOutcome.FAILED,
+    )
+
+
 async def _evaluate_remote_sticker_classifier_result(
     event: MessageEvent,
     reply_text: str,
@@ -4191,6 +4264,22 @@ def schedule_remote_sticker_classifier_shadow(
 
     _remote_sticker_classifier_sample_id += 1
     sample_id = _remote_sticker_classifier_sample_id
+    if isinstance(user_text, str) and not user_text.strip():
+        _last_remote_sticker_classifier_shadow = (
+            RemoteStickerClassifierShadowSnapshot(
+                sample_id=sample_id,
+                classifier_status="skipped",
+                mood="",
+                intensity="",
+                scene="",
+                confidence=0.0,
+                decision_reason="empty_user_text",
+                selected_sticker_id="",
+                eligible_count=0,
+                attachment_status="preflight_blocked",
+            )
+        )
+        return
     if config.enable_chat_sticker_attachments:
         if _chat_sticker_attachments_suspended:
             _last_remote_sticker_classifier_shadow = (
@@ -4307,6 +4396,7 @@ def schedule_remote_sticker_classifier_shadow(
                 user_text,
                 reply_text,
             )
+            _record_remote_sticker_classifier_reliability(classification.status)
             evaluation = await _evaluate_remote_sticker_classifier_result(
                 event,
                 reply_text,
@@ -4318,7 +4408,12 @@ def schedule_remote_sticker_classifier_shadow(
                 event,
                 evaluation,
             )
-        except Exception:
+        except Exception as exc:
+            record_failure_safely(
+                "sticker_classifier",
+                "classify_intent",
+                exc,
+            )
             snapshot = RemoteStickerClassifierShadowSnapshot(
                 sample_id=sample_id,
                 classifier_status="internal_error",
@@ -4348,6 +4443,11 @@ async def generate_chat_text_response(
     prompt_context: ChatPromptContext,
     user_content: ChatUserContent,
 ) -> ChatRuntimeResult | None:
+    if user_content.vision_failed:
+        return ChatRuntimeResult(
+            reply=VISION_FAILURE_REPLY,
+            stored_assistant=VISION_FAILURE_REPLY,
+        )
     local_time_request = resolve_local_time_request(
         clean_text(event),
         timezone_name=config.bot_timezone,
@@ -4508,12 +4608,13 @@ async def render_chat_result(
         reply_chars=len(result.reply),
         should_reply_text=True,
     )
-    schedule_remote_sticker_classifier_shadow(
-        bot,
-        event,
-        classifier_user_text,
-        result.reply,
-    )
+    if result.reply != VISION_FAILURE_REPLY:
+        schedule_remote_sticker_classifier_shadow(
+            bot,
+            event,
+            classifier_user_text,
+            result.reply,
+        )
 
 
 async def finalize_chat_result(
@@ -4566,12 +4667,13 @@ async def finalize_chat_result(
         reply_chars=len(result.reply),
         should_reply_text=True,
     )
-    schedule_remote_sticker_classifier_shadow(
-        bot,
-        event,
-        classifier_user_text,
-        result.reply,
-    )
+    if result.reply != VISION_FAILURE_REPLY:
+        schedule_remote_sticker_classifier_shadow(
+            bot,
+            event,
+            classifier_user_text,
+            result.reply,
+        )
     if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
         set_last_tts_candidate(result.reply)
         update_chat_commit(
@@ -5240,6 +5342,7 @@ def main_agent_help_reply() -> str:
             "/agent 查 <问题>",
             "/agent 诊断一下 Ollama / 看一下视觉和记忆状态",
             "/agent 做一次可靠性巡检（只读聚合状态与近 24 小时分类错误）",
+            "/agent 查看故障趋势（结构化事件 24 小时详情与 7 天摘要）",
             "/agent 完整排查图片识别问题",
             "/agent 完整排查记忆检索问题",
             "/agent 帮我看一下最近错误",
@@ -5282,6 +5385,7 @@ def main_agent_tool_status_reply() -> str:
             "例子：/agent 诊断一下 Ollama",
             "例子：/agent 看一下视觉和记忆状态",
             "例子：/agent 做一次可靠性巡检",
+            "例子：/agent 查看故障趋势",
             "例子：/agent 完整排查图片识别问题",
             "例子：/agent 完整排查记忆检索问题",
             "例子：/agent 看看最近错误",
@@ -5797,6 +5901,7 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         user_id_from_event=user_id,
         bot_status_lines=status_lines,
         ops_health_reply_for_event=agent_ops_health_reply,
+        reliability_trend_reply_for_event=agent_reliability_trend_reply,
         vision_troubleshoot_reply_for_event=agent_vision_troubleshoot_reply,
         memory_rag_troubleshoot_reply_for_event=agent_memory_rag_troubleshoot_reply,
         run_diagnostics_graph=run_diagnostics_graph,
@@ -6004,7 +6109,12 @@ async def _send_new_document_deliveries(
         return "文档已生成，但发送上下文不匹配；未通过 QQ 发送，也未重试。"
     try:
         delivery = validate_document_artifact_delivery(pending.delivery)
-    except DocumentArtifactError:
+    except DocumentArtifactError as exc:
+        record_failure_safely(
+            "document_delivery",
+            "send_document",
+            RuntimeError(f"document_delivery_{exc.code}"),
+        )
         return "文档已生成，但发送前完整性复核失败；未通过 QQ 发送，也未重试。"
     try:
         await bot.call_api(
@@ -6017,7 +6127,14 @@ async def _send_new_document_deliveries(
         )
     except Exception:
         log_ai_event_error(RuntimeError("document_delivery_send_failed"), event)
+        record_result_safely(
+            component="document_delivery",
+            operation="send_document",
+            code="document_delivery_failed",
+            outcome=ReliabilityOutcome.FAILED,
+        )
         return "文档已生成，但 QQ 文件发送失败；未重试。文件仍保留在本地工作区。"
+    record_success_safely("document_delivery", "send_document")
     return "文档已通过 QQ 私聊发送给主人；单次发送完成。"
 
 
@@ -6173,6 +6290,13 @@ def log_main_agent_runtime_observations(
         )
 
 
+def _record_main_llm_plan_result(error: Exception | None) -> None:
+    if error is None:
+        record_success_safely("main_llm", "plan_action")
+    else:
+        record_failure_safely("main_llm", "plan_action", error)
+
+
 async def run_main_agent_qq_command(
     event: MessageEvent,
     query: str,
@@ -6295,6 +6419,7 @@ async def run_main_agent_qq_command(
             call_main_agent = create_main_agent_lc_call_handler(
                 config,
                 tool_registry=main_agent_tool_registry,
+                result_observer=_record_main_llm_plan_result,
             )
             if not raw_output:
                 summarize_tool_result = create_main_agent_tool_summary_lc_handler(config)
@@ -6869,19 +6994,9 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
             attachment_text = "关闭"
         else:
             mode_text = "B2 主人私聊自动附带（正文已先发送）"
-            attachment_labels = {
-                "pending": "处理中",
-                "ready": "待发送",
-                "sent": "已发送",
-                "not_triggered": "未触发",
-                "suspended": "已熔断",
-                "sent_commit_failed": "图片已发送，但状态提交失败并已熔断",
-                "send_failed": "发送失败，未重试",
-                "preflight_blocked": "频率门控中，未调用分类模型",
-            }
-            attachment_text = attachment_labels.get(
+            attachment_text = format_remote_sticker_attachment_status(
                 remote_snapshot.attachment_status,
-                f"未发送（{remote_snapshot.attachment_status}）",
+                remote_snapshot.decision_reason,
             )
         await matcher.finish(
             f"{mode_text}：\n"

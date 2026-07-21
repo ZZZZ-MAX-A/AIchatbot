@@ -59,6 +59,12 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
             ),
             ("diagnostics", "diagnostics", "/api/v1/owner-console/diagnostics", "diagnostics"),
             (
+                "reliability",
+                "reliability",
+                "/api/v1/owner-console/reliability",
+                "reliability",
+            ),
+            (
                 "external-read",
                 "external-read",
                 "/api/v1/owner-console/external-read",
@@ -118,6 +124,11 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         self.assertEqual(rows["settings"].query_params, [])
         self.assertFalse(rows["settings"].requires_context)
         self.assertTrue(rows["external-read"].requires_context)
+        self.assertFalse(rows["reliability"].requires_context)
+        self.assertEqual(
+            rows["reliability"].read_model,
+            "OwnerConsoleReliabilitySnapshot",
+        )
         self.assertEqual(
             rows["external-read"].read_model,
             "OwnerConsoleExternalReadSnapshot",

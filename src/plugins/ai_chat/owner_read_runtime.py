@@ -69,6 +69,9 @@ class OwnerReadRuntime:
     ops_health_reply: TextProvider = field(
         default_factory=lambda: _missing_text_provider("ops_health_reply")
     )
+    reliability_trend_reply: TextProvider = field(
+        default_factory=lambda: _missing_text_provider("reliability_trend_reply")
+    )
     vision_troubleshoot_reply: TextProvider = field(
         default_factory=lambda: _missing_text_provider("vision_troubleshoot_reply")
     )
@@ -157,6 +160,8 @@ async def run_owner_read_command(
 ) -> str:
     if command == "ops_health":
         return str(await _maybe_await(runtime.ops_health_reply()))
+    if command == "reliability_trend":
+        return str(await _maybe_await(runtime.reliability_trend_reply()))
     if command == "vision_troubleshoot":
         return str(await _maybe_await(runtime.vision_troubleshoot_reply()))
     if command == "memory_rag_troubleshoot":

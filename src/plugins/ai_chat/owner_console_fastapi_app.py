@@ -46,6 +46,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
         "settings",
         "memory",
         "diagnostics",
+        "reliability",
         "external-read",
     }
 )
@@ -61,6 +62,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics",
+    f"{OWNER_CONSOLE_HTTP_API_PREFIX}/reliability",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read",
 )
 
@@ -659,6 +661,23 @@ def create_owner_console_fastapi_app() -> FastAPI:
         return _owner_console_success(
             "diagnostics",
             diagnostics,
+        )
+
+    @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/reliability", response_model=None)
+    async def owner_console_reliability() -> Any:
+        try:
+            config = load_config()
+            runtime = _owner_console_runtime_from_config(config)
+            snapshot = runtime.build_reliability_snapshot()
+        except Exception as exc:
+            return _owner_console_internal_error(
+                "reliability",
+                message="failed to build owner console reliability snapshot",
+                exc=exc,
+            )
+        return _owner_console_success(
+            "reliability",
+            snapshot,
         )
 
     if _owner_console_static_enabled():

@@ -238,6 +238,25 @@ def load_pure_policy_modules():
     return modules
 
 
+def load_reliability_event_modules():
+    ensure_ai_chat_packages()
+    modules = {
+        "database": load_module(
+            "src.plugins.ai_chat.database",
+            AI_CHAT_ROOT / "database.py",
+        ),
+        "failure_diagnostics": load_module(
+            "src.plugins.ai_chat.failure_diagnostics",
+            AI_CHAT_ROOT / "failure_diagnostics.py",
+        ),
+    }
+    modules["reliability_events"] = load_module(
+        "src.plugins.ai_chat.reliability_events",
+        AI_CHAT_ROOT / "reliability_events.py",
+    )
+    return modules
+
+
 def load_external_read_security_module():
     ensure_ai_chat_packages()
     return load_module(
@@ -438,16 +457,28 @@ def load_legacy_media_modules():
             "src.plugins.ai_chat.config",
             AI_CHAT_ROOT / "config.py",
         ),
-        "vision": load_module(
-            "src.plugins.ai_chat.vision",
-            AI_CHAT_ROOT / "vision.py",
-        ),
-        "voice": load_module(
-            "src.plugins.ai_chat.voice",
-            AI_CHAT_ROOT / "voice.py",
-        ),
         "events": events,
     }
+    modules["database"] = load_module(
+        "src.plugins.ai_chat.database",
+        AI_CHAT_ROOT / "database.py",
+    )
+    modules["reliability_events"] = load_module(
+        "src.plugins.ai_chat.reliability_events",
+        AI_CHAT_ROOT / "reliability_events.py",
+    )
+    modules["media_reliability"] = load_module(
+        "src.plugins.ai_chat.media_reliability",
+        AI_CHAT_ROOT / "media_reliability.py",
+    )
+    modules["vision"] = load_module(
+        "src.plugins.ai_chat.vision",
+        AI_CHAT_ROOT / "vision.py",
+    )
+    modules["voice"] = load_module(
+        "src.plugins.ai_chat.voice",
+        AI_CHAT_ROOT / "voice.py",
+    )
     return modules
 
 

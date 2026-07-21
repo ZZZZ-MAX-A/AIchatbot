@@ -5,6 +5,7 @@ import os
 import tempfile
 import types
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -780,6 +781,7 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             "approvals",
             "approval_detail",
             "diagnostics",
+            "reliability",
             "external_read",
             "memory",
             "access_control",
@@ -809,11 +811,94 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(rows["task_detail"].required_params, ["task_id"])
         self.assertEqual(rows["approval_detail"].required_params, ["approval_id"])
         self.assertFalse(rows["settings"].requires_context)
+        self.assertFalse(rows["reliability"].requires_context)
+        self.assertEqual(
+            rows["reliability"].read_model,
+            "OwnerConsoleReliabilitySnapshot",
+        )
         self.assertIn("recent_errors", rows["diagnostics"].optional_params)
         self.assertEqual(payload["page"], "route_contract")
         self.assertEqual(payload["data"]["route_count"], len(expected_pages))
         self.assertFalse(
             payload["data"]["boundary"]["ordinary_chat_can_trigger_main_agent"]
+        )
+
+    def test_reliability_snapshot_is_fixed_structured_and_read_only(self):
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+        category = next(
+            item for item in self.owner_console.CATEGORY_LABELS if item.value == "data"
+        )
+        trend_item = types.SimpleNamespace(
+            component="bot_runtime",
+            operation="lifecycle",
+            category=category,
+            code="suspected_abnormal_exit",
+            occurrence_count=2,
+            first_seen_at=now - timedelta(hours=2),
+            last_seen_at=now - timedelta(hours=1),
+            last_success_at=now - timedelta(minutes=30),
+            recovery_state=(
+                self.owner_console.ReliabilityRecoveryState.INSUFFICIENT_EVIDENCE
+            ),
+        )
+        calls: list[tuple[int, datetime]] = []
+
+        def trend_provider(*, window_hours: int, now: datetime):
+            calls.append((window_hours, now))
+            return self.owner_console.ReliabilityTrendSummary(
+                generated_at=now,
+                window_hours=window_hours,
+                failure_occurrence_count=2,
+                items=(trend_item,),
+            )
+
+        snapshot = self.owner_console.build_owner_console_reliability_snapshot(
+            trend_provider=trend_provider,
+            now=now,
+        )
+        payload = self.owner_console.owner_console_to_jsonable(snapshot)
+
+        self.assertEqual(calls, [(24, now), (168, now)])
+        self.assertEqual(snapshot.recent.failure_occurrence_count, 2)
+        self.assertEqual(snapshot.weekly.failure_group_count, 1)
+        self.assertEqual(snapshot.recent.state_counts.insufficient_evidence, 1)
+        self.assertEqual(snapshot.recent.items[0].last_success_at, "")
+        self.assertEqual(snapshot.recent.items[0].recovery_state, "insufficient_evidence")
+        self.assertEqual(len(snapshot.coverage), 7)
+        self.assertEqual(
+            (snapshot.coverage[0].component, snapshot.coverage[0].operation),
+            ("bot_runtime", "lifecycle"),
+        )
+        self.assertEqual(
+            (snapshot.coverage[-2].component, snapshot.coverage[-2].operation),
+            ("vision", "infer"),
+        )
+        self.assertEqual(
+            (snapshot.coverage[-1].component, snapshot.coverage[-1].operation),
+            ("tts", "synthesize"),
+        )
+        self.assertTrue(snapshot.boundary.sqlite_mode_ro)
+        self.assertFalse(snapshot.boundary.ensure_database_called)
+        self.assertFalse(snapshot.boundary.chat_content_read)
+        self.assertFalse(snapshot.boundary.raw_exception_read)
+        self.assertFalse(snapshot.boundary.llm_called)
+        self.assertFalse(snapshot.boundary.rag_called)
+        self.assertFalse(snapshot.boundary.write_side_effect_allowed)
+        self.assertEqual(
+            set(payload["recent"]["items"][0]),
+            {
+                "component",
+                "operation",
+                "category",
+                "category_label",
+                "code",
+                "occurrence_count",
+                "first_seen_at",
+                "last_seen_at",
+                "last_success_at",
+                "recovery_state",
+                "recovery_state_label",
+            },
         )
 
     def test_read_model_serialization_contract_is_json_safe_and_read_only(self):

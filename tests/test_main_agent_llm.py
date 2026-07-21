@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-from pure_ai_chat_loader import load_pure_graph_modules
+from pure_ai_chat_loader import load_pure_graph_modules, load_pure_lc_modules
 
 
 class MainAgentLLMAdapterTests(unittest.TestCase):
@@ -110,6 +110,7 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
         self.assertIn('"content": "..."', contract)
         self.assertNotIn('"path": "..."', contract)
         self.assertIn("fixed ignored workspace", contract)
+
 
     def test_document_delivery_tool_contract_exposes_bounded_send_commands(self):
         async def retrieve_dev_context(_query, _is_owner):
@@ -431,6 +432,61 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
             check_tool_policy=check_policy,
         )
         return asyncio.run(runner.run(state))
+
+
+class MainAgentLLMResultObserverTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.modules = load_pure_lc_modules()
+        cls.lc = cls.modules["main_agent"]
+
+    def test_result_observer_receives_success_and_failure_without_changing_result(self):
+        observations: list[Exception | None] = []
+
+        async def success_model(_messages):
+            return '{"action":"ask_owner","content":"clarify","reason":"safe"}'
+
+        success_handler = self.lc.create_main_agent_lc_call_handler(
+            SimpleNamespace(),
+            llm=success_model,
+            result_observer=observations.append,
+        )
+        success_state = self.modules["graph_main_agent"].MainAgentState(query="safe")
+        result = asyncio.run(success_handler(success_state))
+
+        async def failure_model(_messages):
+            raise RuntimeError("request timeout with private details")
+
+        failure_handler = self.lc.create_main_agent_lc_call_handler(
+            SimpleNamespace(),
+            llm=failure_model,
+            result_observer=observations.append,
+        )
+        failure_state = self.modules["graph_main_agent"].MainAgentState(query="safe")
+        failed = asyncio.run(failure_handler(failure_state))
+
+        self.assertIn('"action":"ask_owner"', result.raw_action_request)
+        self.assertEqual(failed.error, "main_llm_failed")
+        self.assertIsNone(observations[0])
+        self.assertIsInstance(observations[1], RuntimeError)
+
+    def test_observer_failure_is_fail_open(self):
+        async def model(_messages):
+            return "result"
+
+        def broken_observer(_error):
+            raise RuntimeError("reliability storage unavailable")
+
+        handler = self.lc.create_main_agent_lc_call_handler(
+            SimpleNamespace(),
+            llm=model,
+            result_observer=broken_observer,
+        )
+        state = self.modules["graph_main_agent"].MainAgentState(query="safe")
+
+        result = asyncio.run(handler(state))
+
+        self.assertEqual(result.raw_action_request, "result")
 
 
 if __name__ == "__main__":

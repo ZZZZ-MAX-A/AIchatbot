@@ -8,6 +8,7 @@ import { DashboardPage } from "../pages/DashboardPage";
 import { DiagnosticsPage } from "../pages/DiagnosticsPage";
 import { ExternalReadPage } from "../pages/ExternalReadPage";
 import { MemoryPage } from "../pages/MemoryPage";
+import { ReliabilityPage } from "../pages/ReliabilityPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TaskDetailPage } from "../pages/TaskDetailPage";
 import { TasksPage } from "../pages/TasksPage";
@@ -37,6 +38,10 @@ export function App() {
           <Route
             path="/owner-console/diagnostics"
             element={<DiagnosticsPage />}
+          />
+          <Route
+            path="/owner-console/reliability"
+            element={<ReliabilityPage />}
           />
           <Route
             path="/owner-console/external-read"
