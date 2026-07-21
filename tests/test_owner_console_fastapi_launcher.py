@@ -62,6 +62,7 @@ print(json.dumps(payload, sort_keys=True))
                 "/api/v1/owner-console/memory",
                 "/api/v1/owner-console/external-read",
                 "/api/v1/owner-console/diagnostics",
+                "/api/v1/owner-console/reliability",
             ],
         )
 

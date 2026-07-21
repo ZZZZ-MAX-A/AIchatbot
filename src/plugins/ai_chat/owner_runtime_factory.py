@@ -60,6 +60,7 @@ class OwnerRuntimeFactory:
     user_id_from_event: EventValue
     bot_status_lines: LinesProvider
     ops_health_reply_for_event: EventTextProvider
+    reliability_trend_reply_for_event: EventTextProvider
     vision_troubleshoot_reply_for_event: EventTextProvider
     memory_rag_troubleshoot_reply_for_event: EventTextProvider
     run_diagnostics_graph: GraphRunner
@@ -114,6 +115,7 @@ class OwnerRuntimeFactory:
         return OwnerReadRuntime(
             bot_status_lines=self.bot_status_lines,
             ops_health_reply=lambda: self.ops_health_reply_for_event(event),
+            reliability_trend_reply=lambda: self.reliability_trend_reply_for_event(event),
             vision_troubleshoot_reply=lambda: self.vision_troubleshoot_reply_for_event(event),
             memory_rag_troubleshoot_reply=lambda: self.memory_rag_troubleshoot_reply_for_event(event),
             run_diagnostics=run_owner_read_diagnostics,

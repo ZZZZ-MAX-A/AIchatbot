@@ -58,6 +58,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             user_id_from_event=lambda item: item["user_id"],
             bot_status_lines=lambda: ["Bot 状态", "OK"],
             ops_health_reply_for_event=lambda _event: "聚合诊断",
+            reliability_trend_reply_for_event=lambda _event: "结构化故障趋势",
             vision_troubleshoot_reply_for_event=lambda _event: "图片识别排查",
             memory_rag_troubleshoot_reply_for_event=lambda _event: "记忆检索排查",
             run_diagnostics_graph=run_diagnostics_graph,
@@ -156,6 +157,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "群白名单:123456",
         )
         self.assertEqual(
+            asyncio.run(factory.run_read_command(event, "reliability_trend", context)),
+            "结构化故障趋势",
+        )
+        self.assertEqual(
             factory.run_write_command("clear_image_cache", context),
             "已清空图片缓存：1 条。",
         )
@@ -183,6 +188,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         runtime = self.owner_read_runtime.OwnerReadRuntime(
             bot_status_lines=lambda: ["Bot 状态", "OK"],
             ops_health_reply=lambda: "聚合诊断",
+            reliability_trend_reply=lambda: "结构化故障趋势",
             vision_troubleshoot_reply=lambda: "图片识别排查",
             memory_rag_troubleshoot_reply=lambda: "记忆检索排查",
             run_diagnostics=run_diagnostics,
@@ -223,6 +229,16 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                 )
             ),
             "聚合诊断",
+        )
+        self.assertEqual(
+            asyncio.run(
+                self.owner_read_runtime.run_owner_read_command(
+                    runtime,
+                    "reliability_trend",
+                    context,
+                )
+            ),
+            "结构化故障趋势",
         )
         self.assertEqual(
             asyncio.run(
@@ -557,6 +573,44 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(execution.result.error, "")
         self.assertEqual(execution.result.requested_tool, "owner_read_command")
         self.assertEqual(calls, ["recent_errors"])
+
+    def test_reliability_trend_runs_deterministically_before_llm(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("reliability trend must not query RAG")
+
+        async def execute_owner_read_command(command, context):
+            calls.append((command, context.query))
+            return "结构化故障趋势（只读）\n最近 24 小时：0 个故障组。"
+
+        async def configured_llm_handler(_state):
+            raise AssertionError("reliability trend must not call Main LLM")
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_owner_read_command=execute_owner_read_command,
+            call_main_agent=configured_llm_handler,
+            render_mode="concise",
+        )
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="查看故障趋势",
+                    is_owner=True,
+                    metadata={"session_key": "private:10001"},
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "owner_read_command")
+        self.assertEqual(
+            execution.result.metadata["tool_arguments"],
+            {"command": "reliability_trend", "query": "查看故障趋势"},
+        )
+        self.assertEqual(calls, [("reliability_trend", "查看故障趋势")])
+        self.assertIn("结构化故障趋势", execution.result.response_text)
 
     def test_ambiguous_troubleshooting_can_ask_owner_without_running_tool(self):
         llm_calls = []
@@ -968,6 +1022,9 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             "最近图片和 RAG 有没有问题": "ops_health",
             "做一次系统健康检查": "ops_health",
             "做一次可靠性巡检": "ops_health",
+            "查看故障趋势": "reliability_trend",
+            "查看最近故障趋势": "reliability_trend",
+            "查看可靠性趋势": "reliability_trend",
             "完整排查图片识别问题": "vision_troubleshoot",
             "排查识图为什么失败": "vision_troubleshoot",
             "完整排查记忆检索问题": "memory_rag_troubleshoot",

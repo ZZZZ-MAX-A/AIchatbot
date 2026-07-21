@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import AiChatConfig
+from .media_reliability import observe_tts_synthesis_safely
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -350,33 +351,49 @@ async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech, *, refresh_c
     if not adapted.segments:
         raise RuntimeError("empty TTS segments")
 
-    await ensure_tts_service(config)
+    try:
+        await ensure_tts_service(config)
 
-    payload: dict[str, Any] = {
-        "segments": list(adapted.segments),
-        "pauses_ms": list(adapted.pauses_ms),
-        "voice_id": config.tts_voice,
-        "language": "zh",
-        "emotion": config.tts_emotion,
-        "max_total_seconds": config.tts_max_total_seconds,
-        "bypass_cache": refresh_cache,
-    }
-    async with httpx.AsyncClient(timeout=config.tts_timeout_seconds) as client:
-        response = await client.post(f"{config.tts_service_url.rstrip('/')}/tts", json=payload)
-        response.raise_for_status()
-        data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError(str(data.get("error") or "TTS service failed"))
-    audio_path = Path(str(data.get("audio_path") or ""))
-    if not audio_path.exists():
-        raise RuntimeError(f"TTS output not found: {audio_path}")
-    return TtsResult(
-        audio_path=audio_path,
-        language=str(data.get("language") or "zh"),
-        duration_seconds=float(data.get("duration_seconds") or 0.0),
-        cache_hit=bool(data.get("cache_hit")),
-        segments=tuple(data.get("segments") or ()),
-    )
+        payload: dict[str, Any] = {
+            "segments": list(adapted.segments),
+            "pauses_ms": list(adapted.pauses_ms),
+            "voice_id": config.tts_voice,
+            "language": "zh",
+            "emotion": config.tts_emotion,
+            "max_total_seconds": config.tts_max_total_seconds,
+            "bypass_cache": refresh_cache,
+        }
+        async with httpx.AsyncClient(timeout=config.tts_timeout_seconds) as client:
+            response = await client.post(f"{config.tts_service_url.rstrip('/')}/tts", json=payload)
+            response.raise_for_status()
+            data = response.json()
+        if not data.get("ok"):
+            raise RuntimeError(str(data.get("error") or "TTS service failed"))
+        audio_path = Path(str(data.get("audio_path") or ""))
+        if not audio_path.is_file():
+            raise RuntimeError(f"TTS output not found: {audio_path}")
+        if audio_path.stat().st_size <= 0:
+            raise RuntimeError("TTS output is empty")
+        duration_seconds = float(data.get("duration_seconds") or 0.0)
+        if duration_seconds <= 0:
+            raise RuntimeError("TTS output duration invalid")
+        if (
+            config.tts_max_total_seconds > 0
+            and duration_seconds > config.tts_max_total_seconds
+        ):
+            raise RuntimeError("TTS output exceeds duration limit")
+        result = TtsResult(
+            audio_path=audio_path,
+            language=str(data.get("language") or "zh"),
+            duration_seconds=duration_seconds,
+            cache_hit=bool(data.get("cache_hit")),
+            segments=tuple(data.get("segments") or ()),
+        )
+    except Exception as exc:
+        observe_tts_synthesis_safely(succeeded=False, error=exc)
+        raise
+    observe_tts_synthesis_safely(succeeded=True)
+    return result
 
 
 async def ensure_tts_service(config: AiChatConfig) -> None:

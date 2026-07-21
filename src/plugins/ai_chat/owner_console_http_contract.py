@@ -92,6 +92,12 @@ _HTTP_ROUTE_MAPPINGS = (
         read_page="diagnostics",
     ),
     _OwnerConsoleHttpRouteMapping(
+        name="reliability",
+        resource="reliability",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/reliability",
+        read_page="reliability",
+    ),
+    _OwnerConsoleHttpRouteMapping(
         name="external-read",
         resource="external-read",
         path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read",

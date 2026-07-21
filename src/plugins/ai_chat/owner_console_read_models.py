@@ -353,6 +353,74 @@ class OwnerConsoleExternalReadSnapshot:
 
 
 @dataclass(frozen=True)
+class OwnerConsoleReliabilityStateCounts:
+    unresolved: int
+    recovered: int
+    recurring: int
+    insufficient_evidence: int
+
+
+@dataclass(frozen=True)
+class OwnerConsoleReliabilityTrendItem:
+    component: str
+    operation: str
+    category: str
+    category_label: str
+    code: str
+    occurrence_count: int
+    first_seen_at: str
+    last_seen_at: str
+    last_success_at: str
+    recovery_state: str
+    recovery_state_label: str
+
+
+@dataclass(frozen=True)
+class OwnerConsoleReliabilityWindow:
+    window_hours: int
+    failure_occurrence_count: int
+    failure_group_count: int
+    state_counts: OwnerConsoleReliabilityStateCounts
+    items: list[OwnerConsoleReliabilityTrendItem]
+
+
+@dataclass(frozen=True)
+class OwnerConsoleReliabilityCoverageRow:
+    component: str
+    operation: str
+
+
+@dataclass(frozen=True)
+class OwnerConsoleReliabilityBoundary:
+    sqlite_mode_ro: bool = True
+    ensure_database_called: bool = False
+    chat_content_read: bool = False
+    raw_exception_read: bool = False
+    user_identifier_read: bool = False
+    runtime_identifier_exposed: bool = False
+    database_identifier_exposed: bool = False
+    llm_called: bool = False
+    rag_called: bool = False
+    alert_executed: bool = False
+    repair_executed: bool = False
+    retry_executed: bool = False
+    restart_executed: bool = False
+    cleanup_executed: bool = False
+    write_side_effect_allowed: bool = False
+
+
+@dataclass(frozen=True)
+class OwnerConsoleReliabilitySnapshot:
+    generated_at: str
+    recent: OwnerConsoleReliabilityWindow
+    weekly: OwnerConsoleReliabilityWindow
+    coverage: list[OwnerConsoleReliabilityCoverageRow]
+    scope_note: str
+    evidence_note: str
+    boundary: OwnerConsoleReliabilityBoundary
+
+
+@dataclass(frozen=True)
 class OwnerConsoleProviderWiringRow:
     provider_name: str
     required: bool

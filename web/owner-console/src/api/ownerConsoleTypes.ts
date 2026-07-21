@@ -305,6 +305,71 @@ export type OwnerConsoleExternalReadSnapshot = {
 export type OwnerConsoleExternalReadEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleExternalReadSnapshot>;
 
+export type OwnerConsoleReliabilityStateCounts = {
+  unresolved: number;
+  recovered: number;
+  recurring: number;
+  insufficient_evidence: number;
+};
+
+export type OwnerConsoleReliabilityTrendItem = {
+  component: string;
+  operation: string;
+  category: string;
+  category_label: string;
+  code: string;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_success_at: string;
+  recovery_state: string;
+  recovery_state_label: string;
+};
+
+export type OwnerConsoleReliabilityWindow = {
+  window_hours: number;
+  failure_occurrence_count: number;
+  failure_group_count: number;
+  state_counts: OwnerConsoleReliabilityStateCounts;
+  items: OwnerConsoleReliabilityTrendItem[];
+};
+
+export type OwnerConsoleReliabilityCoverageRow = {
+  component: string;
+  operation: string;
+};
+
+export type OwnerConsoleReliabilityBoundary = {
+  sqlite_mode_ro: boolean;
+  ensure_database_called: boolean;
+  chat_content_read: boolean;
+  raw_exception_read: boolean;
+  user_identifier_read: boolean;
+  runtime_identifier_exposed: boolean;
+  database_identifier_exposed: boolean;
+  llm_called: boolean;
+  rag_called: boolean;
+  alert_executed: boolean;
+  repair_executed: boolean;
+  retry_executed: boolean;
+  restart_executed: boolean;
+  cleanup_executed: boolean;
+  write_side_effect_allowed: boolean;
+};
+
+export type OwnerConsoleReliabilitySnapshot = {
+  generated_at: string;
+  recent: OwnerConsoleReliabilityWindow;
+  weekly: OwnerConsoleReliabilityWindow;
+  coverage: OwnerConsoleReliabilityCoverageRow[];
+  scope_note: string;
+  evidence_note: string;
+  boundary: OwnerConsoleReliabilityBoundary;
+};
+
+export type OwnerConsoleReliabilityEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleReliabilitySnapshot>;
+
 export type OwnerConsoleAccessList = {
   label: string;
   count: number;

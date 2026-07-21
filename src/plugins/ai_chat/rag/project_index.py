@@ -27,6 +27,7 @@ from .schema import (
     RagSearchResult,
 )
 from .search import search_rag_documents
+from ..reliability_events import record_failure_safely, record_success_safely
 
 
 CURRENT_STATUS_ANCHOR_MAX_CHARS = 1200
@@ -67,6 +68,32 @@ class ProjectDocIndexStats:
 
 
 def rebuild_project_doc_index(
+    *,
+    root: Path,
+    embedder: EmbeddingProvider,
+    max_chars: int = 1800,
+) -> ProjectDocIndexStats:
+    try:
+        stats = _rebuild_project_doc_index(
+            root=root,
+            embedder=embedder,
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        record_failure_safely("project_doc_rag", "rebuild_index", exc)
+        raise
+    if stats.has_errors:
+        record_failure_safely(
+            "project_doc_rag",
+            "rebuild_index",
+            stats.errors[0],
+        )
+    else:
+        record_success_safely("project_doc_rag", "rebuild_index")
+    return stats
+
+
+def _rebuild_project_doc_index(
     *,
     root: Path,
     embedder: EmbeddingProvider,

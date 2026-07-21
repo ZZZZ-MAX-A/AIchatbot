@@ -7,9 +7,9 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from pure_ai_chat_loader import load_legacy_media_modules
+from pure_ai_chat_loader import AI_CHAT_ROOT, load_legacy_media_modules
 
 
 class Segment:
@@ -211,8 +211,183 @@ class VisionPureUnitTests(unittest.TestCase):
         disabled = types.SimpleNamespace(enable_vision=False)
         limited = types.SimpleNamespace(enable_vision=True, vision_max_images=0)
 
-        self.assertEqual(asyncio.run(self.vision.describe_images(disabled, ["http://example.test/a.png"])), [])
-        self.assertEqual(asyncio.run(self.vision.describe_images(limited, ["http://example.test/a.png"])), [])
+        with patch.object(self.vision, "observe_vision_infer_safely") as observer:
+            self.assertEqual(asyncio.run(self.vision.describe_images(disabled, ["http://example.test/a.png"])), [])
+            self.assertEqual(asyncio.run(self.vision.describe_images(limited, ["http://example.test/a.png"])), [])
+
+        observer.assert_not_called()
+
+    def test_describe_images_records_one_success_for_one_logical_batch(self):
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_max_images=2,
+            vision_timeout_seconds=30,
+            vision_max_image_bytes=1024,
+        )
+        with (
+            patch.object(
+                self.vision,
+                "_image_url_to_base64",
+                AsyncMock(side_effect=["AAAA", "BBBB"]),
+            ),
+            patch.object(
+                self.vision,
+                "_describe_image_base64",
+                AsyncMock(side_effect=["第一张图片。", "第二张图片。"]),
+            ),
+            patch.object(self.vision, "observe_vision_infer_safely") as observer,
+        ):
+            descriptions = asyncio.run(
+                self.vision.describe_images(
+                    config,
+                    ["https://example.test/a.png", "https://example.test/b.png"],
+                )
+            )
+
+        self.assertEqual(descriptions, ["第一张图片。", "第二张图片。"])
+        observer.assert_called_once_with(
+            attempted_count=2,
+            successful_count=2,
+            error=None,
+        )
+
+    def test_describe_images_records_partial_batch_as_one_degraded_candidate(self):
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_max_images=2,
+            vision_timeout_seconds=30,
+            vision_max_image_bytes=1024,
+        )
+        failure = self.vision.VisionError(
+            "Ollama 返回低质量重复内容 api_key=sk-secret https://private.invalid"
+        )
+        with (
+            patch.object(
+                self.vision,
+                "_image_url_to_base64",
+                AsyncMock(side_effect=["AAAA", "BBBB"]),
+            ),
+            patch.object(
+                self.vision,
+                "_describe_image_base64",
+                AsyncMock(side_effect=["第一张图片。", failure]),
+            ),
+            patch.object(self.vision, "observe_vision_infer_safely") as observer,
+        ):
+            descriptions = asyncio.run(
+                self.vision.describe_images(
+                    config,
+                    ["https://example.test/a.png", "https://example.test/b.png"],
+                )
+            )
+
+        self.assertEqual(descriptions[0], "第一张图片。")
+        self.assertEqual(descriptions[1], self.vision.VISION_FAILURE_DESCRIPTION)
+        self.assertNotIn("sk-secret", repr(descriptions))
+        self.assertNotIn("private.invalid", repr(descriptions))
+        observer.assert_called_once_with(
+            attempted_count=2,
+            successful_count=1,
+            error=failure,
+        )
+
+    def test_describe_images_all_failed_uses_fixed_reply_marker_without_retry(self):
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_max_images=1,
+            vision_timeout_seconds=30,
+            vision_max_image_bytes=1024,
+        )
+        failure = self.vision.VisionError(
+            "Ollama 返回空描述 api_key=sk-secret https://private.invalid"
+        )
+        describe = AsyncMock(side_effect=failure)
+        with (
+            patch.object(
+                self.vision,
+                "_image_url_to_base64",
+                AsyncMock(return_value="AAAA"),
+            ),
+            patch.object(self.vision, "_describe_image_base64", describe),
+            patch.object(self.vision, "observe_vision_infer_safely") as observer,
+        ):
+            descriptions = asyncio.run(
+                self.vision.describe_images(config, ["https://example.test/a.png"])
+            )
+
+        self.assertEqual(descriptions, [self.vision.VISION_FAILURE_DESCRIPTION])
+        self.assertTrue(self.vision.all_vision_descriptions_failed(descriptions))
+        self.assertEqual(
+            self.vision.VISION_FAILURE_REPLY,
+            "本次图片识别失败了，请稍后再试，或者换一张更清晰的图片。",
+        )
+        self.assertNotIn("sk-secret", repr(descriptions))
+        self.assertNotIn("private.invalid", repr(descriptions))
+        describe.assert_awaited_once_with(config, "AAAA")
+        observer.assert_called_once_with(
+            attempted_count=1,
+            successful_count=0,
+            error=failure,
+        )
+
+    def test_partial_vision_success_does_not_trigger_deterministic_batch_failure(self):
+        descriptions = [
+            "第一张图片中有一只猫。",
+            self.vision.VISION_FAILURE_DESCRIPTION,
+        ]
+
+        self.assertFalse(self.vision.all_vision_descriptions_failed(descriptions))
+
+    def test_chat_runtime_short_circuits_failed_vision_before_chat_llm(self):
+        plugin_source = (AI_CHAT_ROOT / "__init__.py").read_text(encoding="utf-8")
+        content_builder_start = plugin_source.index("def build_chat_user_content(")
+        content_builder_end = plugin_source.index("def parse_single_arg(", content_builder_start)
+        content_builder = plugin_source[content_builder_start:content_builder_end]
+        self.assertIn(
+            "vision_failed=all_vision_descriptions_failed(image_descriptions)",
+            content_builder,
+        )
+
+        generator_start = plugin_source.index("async def generate_chat_text_response(")
+        generator_end = plugin_source.index("async def generate_legacy_chat_response(", generator_start)
+        generator = plugin_source[generator_start:generator_end]
+        failure_guard = generator.index("if user_content.vision_failed:")
+        llm_call = generator.index("reply = await ask_llm(")
+        self.assertLess(failure_guard, llm_call)
+        self.assertIn("reply=VISION_FAILURE_REPLY", generator[failure_guard:llm_call])
+
+        render_start = plugin_source.index("async def render_chat_result(")
+        render_end = plugin_source.index("async def finalize_chat_result(", render_start)
+        render = plugin_source[render_start:render_end]
+        self.assertIn("if result.reply != VISION_FAILURE_REPLY:", render)
+
+        finalize_start = render_end
+        finalize_end = plugin_source.index(
+            "async def run_chat_graph_session_runtime(", finalize_start
+        )
+        finalize = plugin_source[finalize_start:finalize_end]
+        self.assertIn("if result.reply != VISION_FAILURE_REPLY:", finalize)
+
+    def test_diagnostic_vision_probe_does_not_emit_runtime_event(self):
+        config = types.SimpleNamespace(
+            enable_vision=True,
+            vision_ollama_base_url="http://127.0.0.1:11434",
+            vision_model="qwen2.5vl:3b",
+            vision_timeout_seconds=1,
+            vision_num_ctx=1024,
+        )
+        with (
+            patch.object(
+                self.vision,
+                "_ollama_chat_vision",
+                return_value="画面中有四个色块。",
+            ),
+            patch.object(self.vision, "observe_vision_infer_safely") as observer,
+        ):
+            result = self.vision.check_vision_inference(config)
+
+        self.assertTrue(result.ok)
+        observer.assert_not_called()
 
     def test_ollama_chat_vision_sends_num_ctx_option(self):
         captured = {}
@@ -321,6 +496,102 @@ class VoicePureUnitTests(unittest.TestCase):
         self.assertTrue(self.voice.is_local_tts_service("http://localhost:7861"))
         self.assertTrue(self.voice.is_local_tts_service("http://[::1]:7861"))
         self.assertFalse(self.voice.is_local_tts_service("https://example.test:7861"))
+
+    def tts_config(self):
+        return types.SimpleNamespace(
+            tts_voice="voice-1",
+            tts_emotion="neutral",
+            tts_max_total_seconds=60,
+            tts_timeout_seconds=30,
+            tts_service_url="http://127.0.0.1:7861",
+        )
+
+    def test_request_tts_records_success_only_after_audio_validation(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def post(self, url, json):
+                return self.response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF-valid-audio")
+            response = Response(
+                {
+                    "ok": True,
+                    "audio_path": str(audio_path),
+                    "duration_seconds": 1.25,
+                    "language": "zh",
+                    "segments": [],
+                }
+            )
+            adapted = self.voice.AdaptedSpeech(
+                text="你好",
+                segments=("你好",),
+                pauses_ms=(),
+            )
+            with (
+                patch.object(self.voice, "ensure_tts_service", AsyncMock()),
+                patch.object(
+                    self.voice.httpx,
+                    "AsyncClient",
+                    return_value=Client(response),
+                ),
+                patch.object(self.voice, "observe_tts_synthesis_safely") as observer,
+            ):
+                result = asyncio.run(
+                    self.voice.request_tts(self.tts_config(), adapted)
+                )
+
+        self.assertEqual(result.duration_seconds, 1.25)
+        observer.assert_called_once_with(succeeded=True)
+
+    def test_request_tts_records_failure_when_generation_boundary_raises(self):
+        adapted = self.voice.AdaptedSpeech(
+            text="你好",
+            segments=("你好",),
+            pauses_ms=(),
+        )
+        failure = RuntimeError(
+            "TTS service did not start within 45 seconds api_key=sk-secret"
+        )
+        with (
+            patch.object(
+                self.voice,
+                "ensure_tts_service",
+                AsyncMock(side_effect=failure),
+            ),
+            patch.object(self.voice, "observe_tts_synthesis_safely") as observer,
+        ):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(self.voice.request_tts(self.tts_config(), adapted))
+
+        observer.assert_called_once_with(succeeded=False, error=failure)
+
+    def test_request_tts_precondition_rejection_does_not_emit_event(self):
+        adapted = self.voice.AdaptedSpeech(text="", segments=(), pauses_ms=())
+        with patch.object(self.voice, "observe_tts_synthesis_safely") as observer:
+            with self.assertRaisesRegex(RuntimeError, "empty TTS segments"):
+                asyncio.run(self.voice.request_tts(self.tts_config(), adapted))
+
+        observer.assert_not_called()
 
 
 if __name__ == "__main__":

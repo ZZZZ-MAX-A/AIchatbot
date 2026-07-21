@@ -64,6 +64,7 @@ AGENT_TASK_COMMAND_TOOL_NAME = "agent_task_command"
 OWNER_READ_COMMANDS: tuple[str, ...] = (
     "bot_status",
     "ops_health",
+    "reliability_trend",
     "vision_troubleshoot",
     "memory_rag_troubleshoot",
     "diagnostics",
@@ -978,6 +979,8 @@ def classify_owner_read_command(query: str) -> str:
         return "bot_status"
     if is_owner_vision_troubleshoot_query(compact):
         return "vision_troubleshoot"
+    if is_owner_reliability_trend_query(compact):
+        return "reliability_trend"
     if is_owner_ops_health_query(compact):
         return "ops_health"
     if any(marker in compact for marker in ("最近错误", "报错", "错误日志", "recenterror", "recenterrors")):
@@ -1116,6 +1119,19 @@ def is_owner_voice_status_query(compact: str) -> bool:
         "有没有异常",
     )
     return any(marker in compact for marker in direct_status_markers)
+
+
+def is_owner_reliability_trend_query(compact: str) -> bool:
+    return compact in {
+        "故障趋势",
+        "查看故障趋势",
+        "最近故障趋势",
+        "查看最近故障趋势",
+        "可靠性趋势",
+        "查看可靠性趋势",
+        "reliabilitytrend",
+        "failuretrend",
+    }
 
 
 def is_owner_ops_health_query(compact: str) -> bool:

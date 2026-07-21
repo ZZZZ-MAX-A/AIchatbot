@@ -7170,6 +7170,108 @@ Main LLM 文档工具合同同步升级：PPT 内容直接从 `## ` 开始，不
 最终完整回归 607 tests OK（skipped=3，均为 Windows 符号链接权限）；Python AST 594 files OK，pip check 和 `git diff --check` 通过。固定报告 UTF-8 中文重读通过，无替换字符且无残留临时文件。没有调用外部模型/Tavily/QQ，没有自动重试、重启、修改配置、修复数据、创建系统计划任务、commit 或 push。
 ```
 
+## 2026-07-18 P2.47 结构化可靠性事件第一刀
+
+```text
+主人确认 component / operation / category / code / outcome 严格事件合同后，完成 P2.47 第一刀。新增 reliability_events.py 与数据库 schema 7；reliability_event_buckets 按每次进程随机 runtime UUID 和固定五分钟桶聚合，重复事件只增加 occurrence_count，保留 first_seen_at / last_seen_at。表结构不含消息、用户、QQ、session、路径、URL、Key、异常或 metadata 字段；Python 注册表和 SQLite CHECK 同时拒绝未知组件、操作、类别、code 和 outcome。
+
+失败/降级沿用 configuration/model/permission/network/data 五类和现有稳定 code；operation_succeeded、operation_skipped、runtime_started、runtime_stopped 只表达非故障结果。趋势按 component + operation + category + code 聚合；最后失败之后有真实成功才 recovered，成功后再失败为 recurring，无后续成功为 unresolved，skipped 不算恢复。生命周期 start 无对应 stop 时只推断 suspected_abnormal_exit，不声称已证明崩溃。
+
+首批接线覆盖 Main LLM 完整 ActionRequest 生成边界、独立表情分类状态、文档发送前完整性/QQ 单次发送、ProjectDocRAG 重建返回和 Bot startup/shutdown。Main LLM observer 在完整文本提取后才记录成功，空响应等后续错误不会被误记成功；observer 和 SQLite 异常全部 fail-open，不改变主链结果。
+
+临时 SQLite 测试直接检查数据库原始字节，确认原始异常中的 Key、URL 和用户标识未持久化；未知 direct SQL component/operation 被 CHECK 拒绝。核心定向 80 tests OK，相邻表情/MainAgent/文档/RAG 回归 115 tests OK（skipped=1），完整回归 625 tests OK（skipped=3）。本轮未重启 Bot、未发送 QQ、未调用 Main LLM/DeepSeek/Tavily，未开放趋势命令、Owner Console、自动告警、自动清理、自动修复或自动重启，未 commit 或 push。
+```
+
+## 2026-07-19 P2.47 最小运行验收
+
+```text
+主人明确批准按最小验收方案重启 Bot。旧 bot.py 被停止，新进程于 00:25 启动并加载 P2.47；8080 正常监听，OneBot V11 已连接，stderr 为空。数据库 schema 为 7，首次加载只写入 bot_runtime/lifecycle/runtime_started/succeeded，没有把旧版本进程停止误报为 suspected_abnormal_exit。
+
+主人随后在 QQ 私聊完成普通聊天、/表情意图状态和“不执行工具”的 Main LLM 文字请求。启动后共 3 个 matcher 完成、0 个 matcher 错误；结构化表恰好出现 runtime_started、sticker_classifier/classify_intent/operation_succeeded、main_llm/plan_action/operation_succeeded 三组事件。invalid allowlist rows=0，失败/降级=0，suspected_abnormal_exit=0；没有新增 Agent 任务、审批或 document_delivery 事件，符合“不执行工具、不发送文件”的验收要求。
+
+本次只读核对没有读取或输出聊天历史正文。结构化表列仍严格限定为 schema、时间桶、runtime UUID、component、operation、category、code、outcome 和计数/first/last seen；没有用户、QQ、session、正文、路径、URL、Key、异常或 metadata 列。P2.47 最小运行验收通过。正常 Ctrl+C shutdown 的 runtime_stopped 和强制退出后的 suspected_abnormal_exit 真实注入未执行，保留为可选深度验收；自动告警、修复、重启、趋势 QQ 命令和 Owner Console 仍未开放。
+```
+
+## 2026-07-19 P2.47 结构化故障趋势只读命令
+
+```text
+主人确认故障趋势与最近错误、可靠性巡检的职责区别后批准第二刀。OWNER_READ_COMMANDS 增加 reliability_trend；“查看故障趋势/查看最近故障趋势/查看可靠性趋势”在 Main LLM 之前确定性进入 owner_read_command。OwnerReadRuntime 和 OwnerRuntimeFactory 注入专用 provider，帮助文本同步增加入口；命令不创建任务/审批，不调用 LLM、Tavily、RAG、外部模型或 QQ 额外发送。
+
+新增 format_reliability_trend_report：最近 24 小时展开 component/operation、类别/code、次数、首末时间和恢复状态，最近 7 天给出次数、组数及未恢复/已恢复/反复发生/证据不足摘要。无故障不声称持续在线；生命周期 insufficient_evidence 不显示“最近成功”。输出不含 runtime UUID、数据库 ID、用户、QQ、正文、路径、URL、Key 或原始异常。
+
+为保证真只读，database.py 新增 SQLite mode=ro 的 connect_read_only；趋势查询不再调用 ensure_database。生产 smoke 查询前后 chatbot.db 大小和 mtime 一致。smoke 发现 18:35 Bot 确实重新启动，上一 runtime 没有 runtime_stopped，因此已有 suspected_abnormal_exit/data/degraded 被正确展示；当前进程、8080、OneBot 和 stderr 正常，不把该信号升级为已证明崩溃。
+
+定向核心 121 tests OK，相邻组合 147 tests OK，完整回归 630 tests OK（skipped=3）。主人随后明确批准重启，Bot 于 20:31 成功加载 `ai_chat`；8080 正常监听，OneBot V11 已连接，启动日志和 stderr 无错误。由于本次使用已批准的强制停止，上一 runtime 再次缺少 `runtime_stopped`，形成第二条预期的 `suspected_abnormal_exit`，不作为命令缺陷。
+
+主人于 20:42 在 QQ 私聊执行 `/agent 查看故障趋势`。真实返回在最近 24 小时和 7 天均统计失败/降级 2 次、1 个故障组：`bot_runtime / lifecycle`、`data / suspected_abnormal_exit`，首次 18:35:22、最后 20:31:39，状态严格为“证据不足”，未误报恢复。报告明确只统计已接入 P2.47 的固定结构化事件，不读取聊天正文或原始异常，并声明未调用 Main LLM、Tavily、RAG 或外部模型，未告警、修复、重试、重启或清理。运行日志确认该 matcher 单次正常完成、0 matcher 错误、stderr 为空；查询后 `chatbot.db` 大小与修改时间仍为启动时数值，符合真只读合同。P2.47 第二刀 QQ live 验收通过。Owner Console、自动告警、自动修复、自动重启和清理仍未开放，未 commit 或 push。
+```
+
+## 2026-07-19 P2.47 Owner Console 结构化可靠性只读页
+
+```text
+主人批准下一步最小 Owner Console 可靠性页面。新增 OwnerConsoleReliabilitySnapshot 读模型、OwnerConsoleReadRuntime.build_reliability_snapshot、GET-only /api/v1/owner-console/reliability HTTP 合同和 /owner-console/reliability 前端路由。后端以同一生成时刻读取 24 小时与 168 小时趋势，复用 P2.47 分组和恢复状态；前端显示六项摘要、时间窗口切换、组件/类别/恢复状态筛选、故障组表格、五项接入范围和只读安全边界。
+
+接口和页面均不接收用户/会话上下文，不调用 ensure_database、Main LLM、Tavily、MemoryRAG、ProjectDocRAG 或外部模型，不创建任务/审批，不告警、修复、重试、重启或清理。read model 不含 runtime UUID、数据库 ID、QQ、用户、聊天正文、原始异常、路径、URL、Key、堆栈或 metadata；生命周期证据不足继续隐藏最近成功。前端所有请求仍集中在单一 API client 的 GET allowlist，并通过只读守卫。
+
+Owner Console 生产构建后启动在 127.0.0.1:8090。真实 GET 返回最近 24 小时和 7 天均为 2 次失败/降级、1 个 bot_runtime/lifecycle/suspected_abnormal_exit 故障组、状态 insufficient_evidence，接入范围 5 项。查询前后 chatbot.db 大小和 mtime 完全一致；health read_only=true、web_write_enabled=false，所有 LLM/RAG/写副作用标志为 false。
+
+Owner Console 后端套件 40 tests OK，可靠性与持久化相邻 44 tests OK，Python 全量 632 tests OK（skipped=3）；前端 13 tests OK，TypeScript、GET-only guard、Vite production build、pip check 和 git diff --check 通过。当前工具会话未暴露 Browser 技能所需内置浏览器接口，因此没有使用独立自动化绕过限制。
+
+2026-07-20 主人随后打开真实页面完成人工浏览器验收：恢复状态正确显示“证据不足”，最近成功显示符合预期，清除筛选可用；底部 5 项接入范围和只读边界完整，缩小窗口后没有明显重叠。生产数据只有 bot_runtime 一个真实故障组，因此现场无法充分演示跨组件筛选；前端自动化已使用 bot_runtime 与 main_llm 两个故障组验证 7 天切换和本地组件筛选，不为演示向生产数据库写入假故障。第三刀浏览器验收通过。没有重启 Bot，没有自动告警/修复，未 commit 或 push。
+```
+
+## 2026-07-20 P2.47 视觉与语音结构化事件接线
+
+```text
+主人确认视觉识图和语音合成是高频故障模块，并批准按严格边界进入第四刀。新增 media_reliability.py，视觉和 TTS 分别使用有限确定性映射选择既有稳定 category/code，不把异常原文、图片、语音文本、QQ、路径、URL 或 Key 交给记录器。映射覆盖鉴权、超时、连接、429、模型不存在、无效模型响应、配置错误、数据校验和未知运行状态；observer 自身异常全部 fail-open。
+
+vision.describe_images 只对真实用户图片理解批次观察一次。功能关闭、无 URL、max_images=0、图片等待/缓存和 diagnostic_vision_image_base64 自检不记录；批次全成功为 succeeded、全失败为 failed、部分成功为 degraded。异常业务行为保持原样：已处理 VisionError 继续返回安全失败描述，未知异常记录固定失败后继续抛给既有 Graph 边界。
+
+voice.request_tts 只在通过非空 segments 前置后进入观察边界，覆盖按需服务准备和 TTS HTTP 生成。成功前新增音频必须为真实非空文件、duration>0 且不超过 max_total_seconds 的复核；失败记录固定 code 后继续抛给既有语音错误处理。健康检查、按需待机、候选保存、功能关闭、冷却和文本过长前置拒绝不记录。QQ record 发送发生在 request_tts 返回之后，发送失败不归因到 tts/synthesize，后续若接入应属于 qq_adapter/send_message。
+
+Owner Console 接入范围由历史 5 项更新为 7 项。受控重启 Owner Console 后，生产 /api/v1/owner-console/reliability 已显示 vision/infer 与 tts/synthesize；read_only=true、web_write=false，查询前后 chatbot.db 大小和 mtime 不变，当前失败趋势仍只有原 2 次生命周期事件，没有制造视觉/TTS 假故障。
+
+媒体/可靠性/Owner Console 定向 76 tests OK，视觉语音 Graph、诊断和 QQ 边界相邻 80 tests OK，Python 全量 647 tests OK（skipped=3）；Python AST 148 files、pip check 和 git diff --check 通过。本轮所有媒体测试均使用 fake Ollama、fake TTS HTTP 和临时 SQLite；未调用真实 Ollama，未冷启动或调用 IndexTTS2，未生成或发送真实 QQ 语音，未重启 Bot，未 commit 或 push。下一步真实验收需要先批准重启 Bot，然后分别执行一条图片识别和一条真实 TTS/QQ 语音请求；语音 live 涉及实际显存和 QQ 发送，继续单独确认。
+
+主人随后批准重启 Bot 和最小媒体验收。Bot 于 2026-07-20 01:07:29 启动，8080、OneBot、ai_chat 均正常，matcher、stderr 和 traceback 为 0。强制停止旧进程按合同形成一组 suspected_abnormal_exit/degraded 与新 runtime_started/succeeded；这属于生命周期证据，不归因到媒体组件。
+
+01:11 的真实图片批次收到正常 QQ 回复，但识图失败。结构化表只新增一条 vision/infer/model/invalid_model_response/failed，occurrence_count=1；Ollama 可达、qwen2.5vl:3b 存在并已加载。由于合同不保存模型原始输出，不能进一步断言具体是空描述、无效 JSON、低质量重复还是超长输出。ChatAgent 最终把本次失败角色化为“看不到图片、能力还做不到”，错误暗示永久缺少视觉能力；这不影响结构化事件正确性，但真实识图和用户失败文案均未通过验收。未自动停止 Ollama、重试图片或修改文案，后续需主人单独批准确定性失败提示与受控复测。
+
+01:17 的首条真实语音请求只新增 tts/synthesize/network/request_timeout/failed，未生成音频或发送 QQ。TTS 进程约在请求后启动，服务健康落在 45 秒 startup wait 边界之后，health 为 ok=true、loaded=false；代码顺序证明该失败早于 /tts 请求和 IndexTTS2 加载，不能归因为显存不足或模型推理慢。当日下午再次冷启动在 14:00:17 产生同一固定超时；服务在线后继续执行的请求于 14:06:28 只新增一条 tts/synthesize/operation_succeeded/succeeded。主人确认真实 QQ 语音收到，合成产物复核和后续 QQ 送达均通过；同一 runtime 的最后失败之后出现成功，request_timeout 故障组具备 recovered 证据。
+
+成功后实时 health 为 ok=true、loaded=true、language=zh；IndexTTS2 GPU allocated 约 6931.8 MiB、reserved 约 7476.0 MiB，证明本机约 8GB 显存可以完成该条真实合成，但余量较小。TTS 模型按需加载并在空闲 600 秒后卸载，Web 服务在线与模型驻留必须分开表述。未自动重试、卸载视觉模型、重启服务、修改 45 秒阈值或发送额外 QQ 消息。第四刀的 TTS 结构化恢复和端到端 live 通过；视觉只通过失败事件观察验收，功能与失败文案仍待下一阶段。
+
+主人批准实现确定性视觉失败提示，但明确不自动重试、不停止或重启 Ollama。新增固定 `VISION_FAILURE_DESCRIPTION` 与 `VISION_FAILURE_REPLY`；处理过的 VisionError、图片源无法解析和 Graph 捕获的未知异常都只把固定失败描述交给聊天链，不再把异常类型或细节放入图片上下文。`ChatUserContent` 增加默认 false 的 `vision_failed`，只在非空描述全部为固定失败标记时置 true；`generate_chat_text_response` 在任何 `ask_llm` 前直接返回“本次图片识别失败了，请稍后再试，或者换一张更清晰的图片。”，因此 ChatAgent 无法再把单次失败扩写成永久没有视觉能力。两条文本发送路径在该固定回复上同时跳过远程表情分类和本地自动附件，避免正文确定后又出现非确定性附加消息。部分成功批次仍进入 ChatAgent 并保留合格观察；视觉模型对每个 URL 的调用次数、全失败/部分失败结构化结果和 observer fail-open 均不变。
+
+新增测试确认全失败固定提示、不包含原始异常中的 Key/URL、单图失败不重试、部分成功不短路，以及生产源码的失败 guard 位于 Chat LLM 调用之前。视觉专项 31 tests、可靠性与 Graph/适配器相邻 74 tests、合计 105 tests OK；完整 Python 回归 650 tests OK（skipped=3），src/tests AST 145 files 和 git diff --check 通过。未调用真实视觉模型，未停止或重启 Ollama，未重启 Bot，QQ 文案 live 待单独批准；未 commit 或 push。
+
+主人随后批准只重启 Bot 加载补丁，并继续禁止停止/重启 Ollama和自动图片重试。旧 Bot 被受控强制停止，新进程于 15:00:08 启动，15:00:10 加载 ai_chat 并监听 127.0.0.1:8080，15:00:37 OneBot V11 连接成功；stderr 为空。强制停止按既有合同形成生命周期疑似异常退出证据，不归因到视觉。
+
+主人在 QQ 手动发送一条图片请求并反馈收到连贯的可见内容描述。安全结构化表在 15:15:59 只新增一条 vision/infer/operation_succeeded/succeeded，occurrence_count=1；本次 runtime 没有第二条视觉事件。运行日志为 1 个 matcher 正常完成、0 matcher 错误、0 traceback，8080 与 OneBot 在线、stderr 为空。该成功晚于 01:11 的 invalid_model_response/failed，因此视觉故障组具备 recovered 证据，真实识图功能验收通过。由于本次走成功路径，固定失败提示没有在 QQ 中触发，不能宣称失败文案 live 已覆盖；自动化证据保持有效，不人为制造模型故障。本文与结构化事件均未保存图片内容或主人贴出的回复原文。本轮未停止/重启 Ollama、未自动重试图片、未 commit 或 push。
+
+主人随后批准重启 Owner Console，并只读验收 bot_runtime、vision、tts 三组件筛选及视觉/TTS 两组恢复。8090 原先无进程，start-owner-console 于 15:36 完成启动，PID 19748 在 127.0.0.1:8090 监听；可靠性页面路由返回 HTTP 200、UTF-8 HTML。生产 `/api/v1/owner-console/reliability` 为 read_only=true、web_write_enabled=false，coverage 7；查询前后 chatbot.db 大小和 mtime 均不变，boundary 中 ensure database、正文/异常/用户/runtime/database ID 暴露、LLM、RAG、告警、修复、重试、重启、清理和写副作用全部 false。没有为筛选制造假故障。
+
+真实 24 小时与 7 天数据当前均为 9 次失败/降级、4 个故障组：bot_runtime/lifecycle/suspected_abnormal_exit 5 次、证据不足；tts/synthesize/request_timeout 2 次、已恢复；vision/infer/invalid_model_response 1 次、已恢复；此外 sticker_classifier/classify_intent/data_validation_failed 1 次、未恢复。该表情分类器事件发生于 15:16:05，是生产结构化观测，不因原验收只点名三个组件而隐藏或删除，也不自动修复。前端同一精确谓词对生产数组计算为全部 4、bot_runtime/vision/tts 各 1、recovered 2 且恰为 tts/vision，vision+recovered 与 tts+recovered 各 1；源码确认清除筛选同时把 component/category/recovery 复位为 all。
+
+ReliabilityPage Vitest 1 test、TypeScript typecheck 和 GET-only guard 通过；guard 检查 27 个 TypeScript 文件、GET-only fetch、只读 allowlist、受控 timer、页面路由及无写式 API 名称。当前会话虽然列出 Browser 技能，但未暴露其唯一允许的内置浏览器控制接口；按技能边界没有改用外部 Playwright 或其他浏览器自动化。主人随后人工打开生产页面，反馈各阶段均符合预期：bot_runtime、vision、tts 组件筛选正确，recovered 只保留 vision/tts 两组，组合筛选结果正确，清除筛选恢复全部 4 组。至此生产 API、页面可达、前端自动化、源码谓词、生产数据计算和真实 DOM 人工验收全部通过。未重启 Bot/Ollama/TTS，未告警、修复、重试、清理、commit 或 push。
+
+主人批准只读排查新 sticker_classifier/classify_intent/data_validation_failed，明确不改配置、不重试、不读取聊天正文。结构化表只含 15:16:05 一次失败，前两次成功均早于失败，故 unresolved 正确。代码有限映射显示 data_validation_failed 只对应 `input_invalid`；配置存在性与默认预算安全检查为远程分类/附件开启、Key/Base/模型均已配置、timeout 8、max input 2400。调用路径保证 user/reply 类型为字符串且回复已发送；主人进一步确认当次只发送图片，因此纯文本 user_text 为空是已证实根因。纯函数占位复现为 status=input_invalid、transport_calls=0；该路径未调用 DeepSeek、未消耗分类 token、未加载本地表情库。库只读复核为 schema 2、revision 18、enabled 14、disabled 2。排查未读取消息/回复正文、QQ、Key、URL 或异常原文，未修改任何状态。
+
+主人随后批准纯图片消息在远程分类前本地跳过，同时要求超长和类型错误继续保留 data_validation_failed。`schedule_remote_sticker_classifier_shadow` 在 sample ID 后、附件频率 preflight 前新增精确门控：仅 `isinstance(user_text, str) and not user_text.strip()` 时写内存安全快照 `skipped / empty_user_text / preflight_blocked` 并 return。该分支不调用 classify、可靠性记录器或发送函数。底层 classify 对空文本、非字符串和超长仍返回 input_invalid；只有调度器已知的合法纯图片空文本被跳过，因此不会掩盖真实错误。分类器专项 8 tests，reliability runtime 7、attachment 5、library 29（skipped=2）、media reliability 7，合计相邻 56 tests OK；完整回归 650 tests OK（skipped=3）。本轮未调用 DeepSeek、未发送表情、未重启 Bot/Ollama/TTS、未改配置、未清理历史事件、未 commit 或 push。门控待批准重启 Bot 加载；旧故障只允许由未来真实合格文本分类成功自然 recovered。
+
+主人批准后只重启 Bot，不重启 Ollama、不自动重试或发送表情。新进程于 21:26:05 启动，21:26:07 加载 ai_chat 并监听 8080，21:26:34 OneBot V11 连接，stderr 为空。重启前只读基线意外但合法地发现 21:25:23 已有一条真实 sticker_classifier operation_succeeded，晚于 15:16:05 的 data_validation_failed，因此历史故障已自然 recovered；未删除、改写或伪造事件。
+
+主人发送纯图片后执行 `/表情意图状态`，真实返回样本 1、classifier_status=skipped、无有效建议、confidence=0、decision_reason=empty_user_text、匹配 0、无选中 ID；自动附带显示“频率门控中，未调用分类模型”。结构化 classifier 基线复核四个桶及所有 occurrence_count/last_seen 完全未变化，证明没有写 succeeded/failed/skipped、没有进入 DeepSeek observer 或表情发送。21:26 后运行日志为 3 个 matcher 完成、0 错误、0 traceback，8080 与 OneBot 在线、stderr 为空。同期 vision 结构化表有 21:50:02 data_validation_failed 与 21:50:43 operation_succeeded，故该组也 recovered；不归因到 sticker classifier。本轮 Owner Console 最新趋势为失败/降级 9 次、5 组，recovered 4、unresolved 0、recurring 0、insufficient_evidence 1。
+
+主人批准继续下一步后，完成 `/表情意图状态` 的最小展示细分。新增纯展示函数按 `attachment_status + decision_reason` 组合映射：仅当 `preflight_blocked + empty_user_text` 同时成立时显示“纯图片无文本，已在本地跳过；未调用分类模型，未发送表情”；cooldown、message_gap、hourly_cap、preflight_unavailable 等真实阻断继续显示“频率门控中，未调用分类模型”，其他既有状态和未知状态回退保持原义。状态 handler 移除内联标签并调用该纯函数。此改动不触碰纯图片门控、结构化事件、DeepSeek 调用、自动附件或发送逻辑。
+
+分类器、状态命令和附件定向 21 tests OK；完整 Python 回归 651 tests OK（skipped=3），pip check 与 git diff --check 通过。未调用模型、未写可靠性事件、未发送表情，未停止或重启 Bot/Ollama/TTS/Owner Console，未重试图片/分类，未 commit 或 push。主人随后批准只重启 Bot。旧目标进程被受控停止，新进程于 2026-07-21 00:50:36 启动，00:50:39 成功加载 ai_chat、启动 8080 和 OneBot V11 adapter，00:51:05 OneBot WebSocket 连接；stderr 为空。未停止或重启 Ollama/TTS/Owner Console，未自动发送图片、调用表情分类或发送表情。展示补丁已经加载，但仍不得宣称 QQ 新文案 live 已通过；下一步由主人发送一条纯图片消息，再执行 `/表情意图状态` 做最小文案验收。
+
+2026-07-21 10:41 的验收前只读检查发现 00:50 实例已不在线，8080 未监听；可访问日志最后活动为 01:37:13，没有正常 shutdown、stderr 或 traceback。生命周期表保留该实例的 `runtime_started` 而没有 `runtime_stopped`，因此只能记录为疑似非正常退出或外部终止，不能推断具体原因；开发代理没有自动重启。当前 Bot 启动链于 10:43:20 恢复，8080 只有一个监听者且归属于该 Bot，OneBot 会话已建立。
+
+主人随后只发送一张图片，等待正文回复完成后执行 `/表情意图状态`。QQ 真实返回样本 1、classifier_status=skipped、无有效建议、confidence=0.00、decision_reason=empty_user_text、匹配 0、影子选中 ID 无；最后一行精确显示“纯图片无文本，已在本地跳过；未调用分类模型，未发送表情”。验收前后 `sticker_classifier` 仍为同四个结构化桶，所有固定字段、occurrence_count 和 last_seen_at 逐项完全一致，没有新增 succeeded、failed、degraded 或 skipped；历史 data_validation_failed 与其后真实成功形成的 recovered 证据保持原样。当前 8080 在线且有已建立会话，可访问错误记录仍为 stderr 空、0 traceback；没有自动重试图片、调用 DeepSeek、进入本地表情选择或发送表情。Bot 已加载且 QQ 新文案 live 已通过，P2.47 这项纯图片门控与展示文案正式收口；未开始下一阶段开发，未 commit 或 push。
+```
+
 从当前阶段开始：
 
 ```text

@@ -56,6 +56,28 @@ class StickerClassifierResult:
     input_chars: int = 0
 
 
+def format_remote_sticker_attachment_status(
+    attachment_status: str,
+    decision_reason: str,
+) -> str:
+    if (
+        attachment_status == "preflight_blocked"
+        and decision_reason == "empty_user_text"
+    ):
+        return "纯图片无文本，已在本地跳过；未调用分类模型，未发送表情"
+    labels = {
+        "pending": "处理中",
+        "ready": "待发送",
+        "sent": "已发送",
+        "not_triggered": "未触发",
+        "suspended": "已熔断",
+        "sent_commit_failed": "图片已发送，但状态提交失败并已熔断",
+        "send_failed": "发送失败，未重试",
+        "preflight_blocked": "频率门控中，未调用分类模型",
+    }
+    return labels.get(attachment_status, f"未发送（{attachment_status}）")
+
+
 StickerClassifierTransport = Callable[
     [RemoteStickerClassifierSettings, list[dict[str, str]]],
     Awaitable[str],

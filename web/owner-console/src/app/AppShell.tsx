@@ -1,5 +1,6 @@
 import {
   Brain,
+  ChartNoAxesCombined,
   ClipboardCheck,
   FileClock,
   Gauge,
@@ -42,6 +43,11 @@ const navItems: NavItem[] = [
   { label: "任务", path: "/owner-console/tasks", icon: ListChecks },
   { label: "审批", path: "/owner-console/approvals", icon: ClipboardCheck },
   { label: "诊断", path: "/owner-console/diagnostics", icon: FileClock },
+  {
+    label: "可靠性",
+    path: "/owner-console/reliability",
+    icon: ChartNoAxesCombined,
+  },
   { label: "联网查询", path: "/owner-console/external-read", icon: SearchCheck },
   { label: "记忆", path: "/owner-console/memory", icon: Brain },
   { label: "访问控制", path: "/owner-console/access-control", icon: LockKeyhole },

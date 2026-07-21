@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,7 +47,19 @@ class DatabaseSchemaUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("agent_tasks", table_names)
         self.assertIn("agent_task_events", table_names)
         self.assertIn("agent_approvals", table_names)
+        self.assertIn("reliability_event_buckets", table_names)
         self.assertEqual(schema_row["value"], self.database.SCHEMA_VERSION)
+
+    def test_read_only_connection_does_not_create_missing_database(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            database_path = self.database.DATABASE_PATH
+            with self.assertRaises(sqlite3.OperationalError):
+                with self.database.connect_read_only():
+                    pass
+            exists_after_read = database_path.exists()
+
+        self.assertFalse(exists_after_read)
 
 
 class TrialPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):

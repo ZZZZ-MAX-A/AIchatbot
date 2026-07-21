@@ -19,6 +19,9 @@ class MainAgentLLMInvocationError(RuntimeError):
     """Raised when a configured Main LLM object cannot be invoked."""
 
 
+MainAgentLLMResultObserver = Callable[[Exception | None], None]
+
+
 async def _maybe_await(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
@@ -64,11 +67,13 @@ def create_main_agent_lc_call_handler(
     llm: Any | None = None,
     context_metadata_key: str = "agent_context",
     tool_registry: ToolRegistry | None = None,
+    result_observer: MainAgentLLMResultObserver | None = None,
 ) -> Callable[[MainAgentState], Awaitable[MainAgentState]]:
     return create_main_agent_call_handler(
         create_main_llm_call(config, llm=llm),
         context_metadata_key=context_metadata_key,
         tool_registry=tool_registry,
+        result_observer=result_observer,
     )
 
 

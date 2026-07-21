@@ -7,7 +7,7 @@ from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_PATH = PROJECT_ROOT / "data" / "chatbot.db"
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 
 def utc_now() -> str:
@@ -24,6 +24,19 @@ def connect() -> Iterator[sqlite3.Connection]:
     try:
         yield connection
         connection.commit()
+    finally:
+        connection.close()
+
+
+@contextmanager
+def connect_read_only() -> Iterator[sqlite3.Connection]:
+    database_uri = DATABASE_PATH.resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(database_uri, uri=True, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield connection
     finally:
         connection.close()
 
@@ -286,6 +299,88 @@ def ensure_database() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_agent_approvals_status_id
             ON agent_approvals (status, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reliability_event_buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema_version INTEGER NOT NULL,
+                bucket_start TEXT NOT NULL,
+                runtime_id TEXT NOT NULL,
+                component TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                category TEXT NOT NULL,
+                code TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                CHECK (schema_version = 1),
+                CHECK (length(runtime_id) = 36),
+                CHECK (
+                    (component = 'bot_runtime' AND operation = 'lifecycle') OR
+                    (component = 'chat_llm' AND operation = 'generate_reply') OR
+                    (component = 'main_llm' AND operation = 'plan_action') OR
+                    (component = 'sticker_classifier' AND operation = 'classify_intent') OR
+                    (component = 'document_artifact' AND operation = 'render_document') OR
+                    (component = 'document_delivery' AND operation = 'send_document') OR
+                    (component = 'project_doc_rag' AND operation IN ('rebuild_index', 'retrieve')) OR
+                    (component = 'memory_rag' AND operation = 'retrieve') OR
+                    (component = 'vision' AND operation = 'infer') OR
+                    (component = 'tts' AND operation = 'synthesize') OR
+                    (component = 'qq_adapter' AND operation = 'send_message') OR
+                    (component = 'database' AND operation IN ('read', 'write'))
+                ),
+                CHECK (category IN ('', 'configuration', 'model', 'permission', 'network', 'data')),
+                CHECK (
+                    code IN (
+                        'request_timeout',
+                        'connection_failed',
+                        'model_rate_limited',
+                        'model_not_found',
+                        'invalid_model_response',
+                        'authorization_failed',
+                        'invalid_configuration',
+                        'data_validation_failed',
+                        'presentation_slide_limit_exceeded',
+                        'artifact_integrity_failed',
+                        'document_delivery_failed',
+                        'approval_context_invalid',
+                        'required_arguments_unavailable',
+                        'unexpected_runtime_state',
+                        'suspected_abnormal_exit',
+                        'operation_succeeded',
+                        'operation_skipped',
+                        'runtime_started',
+                        'runtime_stopped'
+                    )
+                ),
+                CHECK (outcome IN ('succeeded', 'failed', 'degraded', 'skipped')),
+                CHECK (occurrence_count >= 1),
+                CHECK (first_seen_at <= last_seen_at),
+                UNIQUE (
+                    bucket_start,
+                    runtime_id,
+                    component,
+                    operation,
+                    category,
+                    code,
+                    outcome
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reliability_event_buckets_window
+            ON reliability_event_buckets (last_seen_at, component, operation)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reliability_event_buckets_runtime
+            ON reliability_event_buckets (runtime_id, component, operation, code)
             """
         )
         connection.execute(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import metadata
 import json
 from typing import Any, TypeAlias
@@ -59,6 +60,12 @@ from .owner_console_read_models import (
     OwnerConsoleProjectDocRagSnapshot,
     OwnerConsoleProviderWiringRow,
     OwnerConsoleProviderWiringSnapshot,
+    OwnerConsoleReliabilityBoundary,
+    OwnerConsoleReliabilityCoverageRow,
+    OwnerConsoleReliabilitySnapshot,
+    OwnerConsoleReliabilityStateCounts,
+    OwnerConsoleReliabilityTrendItem,
+    OwnerConsoleReliabilityWindow,
     OwnerConsoleReadRouteContractSnapshot,
     OwnerConsoleReadRouteRow,
     OwnerConsoleRoleCardRow,
@@ -72,6 +79,13 @@ from .owner_console_read_models import (
     OwnerConsoleToolInputPreview,
     owner_console_page_response,
     owner_console_to_jsonable,
+)
+from .failure_diagnostics import CATEGORY_LABELS
+from .reliability_events import (
+    RECOVERY_STATE_LABELS,
+    ReliabilityRecoveryState,
+    ReliabilityTrendSummary,
+    read_reliability_trend,
 )
 
 
@@ -147,6 +161,13 @@ OWNER_CONSOLE_READ_ROUTE_SPECS = (
             "main_agent_observation_lines",
             "root_graph_observation_lines",
         ),
+    ),
+    OwnerConsoleReadRouteSpec(
+        page="reliability",
+        response_page="reliability",
+        runtime_method="build_reliability_snapshot",
+        read_model="OwnerConsoleReliabilitySnapshot",
+        requires_context=False,
     ),
     OwnerConsoleReadRouteSpec(
         page="external_read",
@@ -229,6 +250,18 @@ AccessProvider: TypeAlias = Callable[[], AccessStore]
 RoleCardsProvider: TypeAlias = Callable[[], list[Any]]
 ActiveRoleCardKeyProvider: TypeAlias = Callable[[], str]
 StatsProvider: TypeAlias = Callable[[], dict[str, Any]]
+ReliabilityTrendProvider: TypeAlias = Callable[..., ReliabilityTrendSummary]
+
+
+OWNER_CONSOLE_RELIABILITY_COVERAGE = (
+    ("bot_runtime", "lifecycle"),
+    ("main_llm", "plan_action"),
+    ("sticker_classifier", "classify_intent"),
+    ("document_delivery", "send_document"),
+    ("project_doc_rag", "rebuild_index"),
+    ("vision", "infer"),
+    ("tts", "synthesize"),
+)
 
 
 def _empty_role_cards_provider() -> list[Any]:
@@ -313,6 +346,13 @@ OWNER_CONSOLE_READ_PROVIDER_SPECS = (
         owner_console_methods=("build_memory_snapshot",),
         fallback_behavior="zero RAG document counters",
     ),
+    OwnerConsoleReadProviderSpec(
+        provider_name="reliability_trend_provider",
+        required=False,
+        read_model_area="reliability",
+        owner_console_methods=("build_reliability_snapshot",),
+        fallback_behavior="P2.47 SQLite mode=ro trend reader",
+    ),
 )
 
 
@@ -326,6 +366,7 @@ class OwnerConsoleReadProviders:
     manual_memory_stats_provider: StatsProvider | None = None
     gap_scene_stats_provider: StatsProvider | None = None
     rag_document_stats_provider: StatsProvider | None = None
+    reliability_trend_provider: ReliabilityTrendProvider | None = None
 
     def missing_required(self) -> list[str]:
         return [
@@ -385,6 +426,9 @@ def create_owner_console_read_runtime(
         or _empty_stats_provider,
         rag_document_stats_provider=providers.rag_document_stats_provider
         or _empty_stats_provider,
+        reliability_trend_provider=(
+            providers.reliability_trend_provider or read_reliability_trend
+        ),
     )
 
 
@@ -400,6 +444,7 @@ class OwnerConsoleReadRuntime:
     manual_memory_stats_provider: StatsProvider = _empty_stats_provider
     gap_scene_stats_provider: StatsProvider = _empty_stats_provider
     rag_document_stats_provider: StatsProvider = _empty_stats_provider
+    reliability_trend_provider: ReliabilityTrendProvider = read_reliability_trend
 
     def build_route_contract_snapshot(self) -> OwnerConsoleReadRouteContractSnapshot:
         return build_owner_console_route_contract_snapshot()
@@ -511,6 +556,11 @@ class OwnerConsoleReadRuntime:
             context,
         )
 
+    def build_reliability_snapshot(self) -> OwnerConsoleReliabilitySnapshot:
+        return build_owner_console_reliability_snapshot(
+            trend_provider=self.reliability_trend_provider,
+        )
+
     def build_health_snapshot(
         self,
         *,
@@ -543,6 +593,90 @@ class OwnerConsoleReadRuntime:
 
     def serialize_page(self, page: str, model: Any) -> dict[str, Any]:
         return owner_console_page_response(page, model)
+
+
+def _owner_console_reliability_state_counts(
+    summary: ReliabilityTrendSummary,
+) -> OwnerConsoleReliabilityStateCounts:
+    counts = {
+        state: sum(1 for item in summary.items if item.recovery_state == state)
+        for state in ReliabilityRecoveryState
+    }
+    return OwnerConsoleReliabilityStateCounts(
+        unresolved=counts[ReliabilityRecoveryState.UNRESOLVED],
+        recovered=counts[ReliabilityRecoveryState.RECOVERED],
+        recurring=counts[ReliabilityRecoveryState.RECURRING],
+        insufficient_evidence=counts[
+            ReliabilityRecoveryState.INSUFFICIENT_EVIDENCE
+        ],
+    )
+
+
+def _owner_console_reliability_window(
+    summary: ReliabilityTrendSummary,
+) -> OwnerConsoleReliabilityWindow:
+    rows = []
+    for item in summary.items:
+        last_success_at = ""
+        if (
+            item.last_success_at is not None
+            and item.recovery_state
+            != ReliabilityRecoveryState.INSUFFICIENT_EVIDENCE
+        ):
+            last_success_at = item.last_success_at.isoformat()
+        rows.append(
+            OwnerConsoleReliabilityTrendItem(
+                component=item.component,
+                operation=item.operation,
+                category=item.category.value,
+                category_label=CATEGORY_LABELS[item.category],
+                code=item.code,
+                occurrence_count=item.occurrence_count,
+                first_seen_at=item.first_seen_at.isoformat(),
+                last_seen_at=item.last_seen_at.isoformat(),
+                last_success_at=last_success_at,
+                recovery_state=item.recovery_state.value,
+                recovery_state_label=RECOVERY_STATE_LABELS[item.recovery_state],
+            )
+        )
+    return OwnerConsoleReliabilityWindow(
+        window_hours=summary.window_hours,
+        failure_occurrence_count=summary.failure_occurrence_count,
+        failure_group_count=len(summary.items),
+        state_counts=_owner_console_reliability_state_counts(summary),
+        items=rows,
+    )
+
+
+def build_owner_console_reliability_snapshot(
+    *,
+    trend_provider: ReliabilityTrendProvider = read_reliability_trend,
+    now: datetime | None = None,
+) -> OwnerConsoleReliabilitySnapshot:
+    generated_at = (now or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0)
+    recent = trend_provider(window_hours=24, now=generated_at)
+    weekly = trend_provider(window_hours=24 * 7, now=generated_at)
+    return OwnerConsoleReliabilitySnapshot(
+        generated_at=generated_at.isoformat(),
+        recent=_owner_console_reliability_window(recent),
+        weekly=_owner_console_reliability_window(weekly),
+        coverage=[
+            OwnerConsoleReliabilityCoverageRow(
+                component=component,
+                operation=operation,
+            )
+            for component, operation in OWNER_CONSOLE_RELIABILITY_COVERAGE
+        ],
+        scope_note=(
+            "只统计已接入 P2.47 的固定结构化失败/降级事件；"
+            "不读取聊天正文或原始异常。"
+        ),
+        evidence_note=(
+            "没有结构化故障不等于已证明系统持续在线；"
+            "未接入组件仍需结合可靠性巡检和最近错误查看。"
+        ),
+        boundary=OwnerConsoleReliabilityBoundary(),
+    )
 
 
 def _safe_limit(value: int) -> int:
