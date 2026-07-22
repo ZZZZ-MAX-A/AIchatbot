@@ -13,6 +13,20 @@ from pure_ai_chat_loader import REPO_ROOT
 
 
 class OwnerConsoleFastApiLauncherTests(unittest.TestCase):
+    def test_start_script_registers_independent_manual_diagnostic_switches(self):
+        script = (REPO_ROOT / "scripts" / "start-owner-console.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("[switch]$EnableProjectDocRagProbe", script)
+        self.assertIn("[switch]$EnableMemoryRagConsistencyProbe", script)
+        self.assertIn("[switch]$EnableMainLlmContractProbe", script)
+        self.assertIn("$EnableProjectDocRagProbe -or", script)
+        self.assertIn("$EnableMemoryRagConsistencyProbe -or", script)
+        self.assertIn("$EnableMainLlmContractProbe", script)
+        self.assertIn("OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED", script)
+        self.assertIn("OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED", script)
+
     def test_launcher_import_does_not_execute_ai_chat_plugin_entrypoint(self):
         script = """
 import json
@@ -63,6 +77,10 @@ print(json.dumps(payload, sort_keys=True))
                 "/api/v1/owner-console/external-read",
                 "/api/v1/owner-console/diagnostics",
                 "/api/v1/owner-console/reliability",
+                "/api/v1/owner-console/manual-diagnostics",
+                "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+                "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
+                "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
             ],
         )
 

@@ -96,6 +96,19 @@ class OllamaEmbeddingProvider:
             )
         return vector
 
+    def embed_once(self, text: str) -> list[float]:
+        """Use the current Ollama embedding API exactly once without fallback."""
+
+        if not text.strip():
+            raise EmbeddingProviderError("Cannot embed empty text.")
+        vector = self._embed_new_api(text)
+        if self.expected_dimension > 0 and len(vector) != self.expected_dimension:
+            raise EmbeddingProviderError(
+                f"Embedding dimension {len(vector)} does not match expected "
+                f"{self.expected_dimension}."
+            )
+        return vector
+
     def _post_json(self, path: str, payload: dict[str, object]) -> dict[str, Any]:
         request = Request(
             f"{self.base_url}{path}",

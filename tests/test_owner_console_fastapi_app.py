@@ -76,8 +76,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(payload["schema_version"], "owner_console.http.v1")
         self.assertEqual(payload["api_prefix"], "/api/v1/owner-console")
         self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["snapshot_read_only"])
         self.assertTrue(payload["http_api_enabled"])
         self.assertFalse(payload["web_write_enabled"])
+        self.assertFalse(payload["manual_diagnostic_actions_enabled"])
+        self.assertFalse(payload["automatic_diagnostics_enabled"])
+        self.assertFalse(payload["configuration_write_enabled"])
+        self.assertFalse(payload["business_data_write_enabled"])
         self.assertEqual(
             payload["enabled_routes"],
             [
@@ -94,6 +99,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/diagnostics",
                 "/api/v1/owner-console/reliability",
                 "/api/v1/owner-console/external-read",
+                "/api/v1/owner-console/manual-diagnostics",
             ],
         )
 
@@ -117,10 +123,10 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
 
         data = payload["data"]
         self.assertEqual(data["api_prefix"], "/api/v1/owner-console")
-        self.assertEqual(data["allowed_methods"], ["GET"])
+        self.assertEqual(data["allowed_methods"], ["GET", "POST"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 12)
+        self.assertEqual(data["route_count"], 16)
         rows = {row["name"]: row for row in data["rows"]}
         self.assertEqual(
             rows["routes"]["path"],
@@ -148,6 +154,45 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["diagnostics"]["http_api_enabled"])
         self.assertTrue(rows["reliability"]["http_api_enabled"])
         self.assertTrue(rows["external-read"]["http_api_enabled"])
+        self.assertTrue(rows["manual-diagnostics"]["http_api_enabled"])
+        self.assertFalse(
+            rows["manual-diagnostics.project-doc-rag"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.memory-rag-consistency"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
+        )
+        self.assertFalse(data["manual_runtime_action_routes_enabled"])
+        self.assertEqual(
+            rows["manual-diagnostics.project-doc-rag"]["method"],
+            "POST",
+        )
+        self.assertFalse(rows["manual-diagnostics.project-doc-rag"]["read_only"])
+        self.assertTrue(
+            rows["manual-diagnostics.project-doc-rag"][
+                "manual_runtime_action_allowed"
+            ]
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.memory-rag-consistency"]["method"],
+            "POST",
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.memory-rag-consistency"][
+                "manual_runtime_action_allowed"
+            ]
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.main-llm-contract"]["method"],
+            "POST",
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.main-llm-contract"][
+                "manual_runtime_action_allowed"
+            ]
+        )
         self.assertEqual(rows["tasks.detail"]["path_params"], ["task_id"])
         self.assertEqual(
             rows["approvals.detail"]["path_params"],
@@ -160,6 +205,83 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             data["boundary"]["ordinary_chat_can_trigger_main_agent"]
         )
         self.assertTrue(data["boundary"]["owner_write_requires_approval"])
+
+    def test_memory_manual_action_route_requires_its_explicit_switch(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_CONSOLE_STATIC_ENABLED": "false",
+                "OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED": "true",
+                "OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED": "false",
+                "OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED": "true",
+                "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            app = self.fastapi_app_module.create_owner_console_fastapi_app()
+        client = TestClient(app)
+
+        health = client.get("/healthz").json()
+        self.assertTrue(health["manual_diagnostic_actions_enabled"])
+        self.assertIn(
+            "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
+            health["enabled_routes"],
+        )
+        self.assertNotIn(
+            "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+            health["enabled_routes"],
+        )
+        rows = {
+            row["name"]: row
+            for row in client.get(
+                "/api/v1/owner-console/routes"
+            ).json()["data"]["rows"]
+        }
+        self.assertTrue(
+            rows["manual-diagnostics.memory-rag-consistency"][
+                "http_api_enabled"
+            ]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.project-doc-rag"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
+        )
+
+    def test_main_llm_manual_action_route_requires_its_explicit_switch(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_CONSOLE_STATIC_ENABLED": "false",
+                "OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED": "true",
+                "OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED": "false",
+                "OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED": "false",
+                "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = self.fastapi_app_module.create_owner_console_fastapi_app()
+        client = TestClient(app)
+
+        health = client.get("/healthz").json()
+        self.assertTrue(health["manual_diagnostic_actions_enabled"])
+        self.assertIn(
+            "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
+            health["enabled_routes"],
+        )
+        rows = {
+            row["name"]: row
+            for row in client.get(
+                "/api/v1/owner-console/routes"
+            ).json()["data"]["rows"]
+        }
+        self.assertTrue(
+            rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.memory-rag-consistency"]["http_api_enabled"]
+        )
 
     def test_app_only_exposes_enabled_get_routes_without_writes(self):
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
@@ -194,6 +316,27 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(
             self.client.post("/api/v1/owner-console/reliability").status_code,
             405,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+                json={"confirmation": "run_registered_project_doc_rag_probe"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
+                json={"confirmation": "run_registered_memory_rag_consistency"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
+                json={"confirmation": "run_registered_main_llm_contract"},
+            ).status_code,
+            403,
         )
 
     def test_reliability_endpoint_reads_structured_events_without_writing(self):
@@ -234,17 +377,26 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
         item = data["recent"]["items"][0]
         self.assertEqual(item["component"], "bot_runtime")
+        self.assertEqual(item["component_label"], "Bot 运行状态")
         self.assertEqual(item["operation"], "lifecycle")
+        self.assertEqual(item["operation_label"], "进程启动与停止")
         self.assertEqual(item["code"], "suspected_abnormal_exit")
+        self.assertEqual(
+            item["code_label"],
+            "上次运行没有发现正常停止记录",
+        )
         self.assertEqual(item["last_success_at"], "")
         self.assertEqual(
             set(item),
             {
                 "component",
+                "component_label",
                 "operation",
+                "operation_label",
                 "category",
                 "category_label",
                 "code",
+                "code_label",
                 "occurrence_count",
                 "first_seen_at",
                 "last_seen_at",
@@ -255,11 +407,21 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertEqual(len(data["coverage"]), 7)
         self.assertIn(
-            {"component": "vision", "operation": "infer"},
+            {
+                "component": "vision",
+                "component_label": "图片理解",
+                "operation": "infer",
+                "operation_label": "识别图片内容",
+            },
             data["coverage"],
         )
         self.assertIn(
-            {"component": "tts", "operation": "synthesize"},
+            {
+                "component": "tts",
+                "component_label": "语音合成",
+                "operation": "synthesize",
+                "operation_label": "生成语音",
+            },
             data["coverage"],
         )
         self.assertTrue(data["boundary"]["sqlite_mode_ro"])

@@ -683,6 +683,30 @@ class RagProviderUnitTests(unittest.TestCase):
         with self.assertRaises(self.providers.EmbeddingProviderError):
             self.providers.parse_ollama_embedding_response({"embeddings": []})
 
+    def test_embed_once_uses_current_api_without_legacy_fallback(self):
+        provider = self.providers.OllamaEmbeddingProvider(
+            model="bge-m3",
+            expected_dimension=2,
+        )
+        calls: list[str] = []
+
+        def fail_current(_text: str) -> list[float]:
+            calls.append("current")
+            raise self.providers.EmbeddingProviderError("current API failed")
+
+        def unexpected_legacy(_text: str) -> list[float]:
+            calls.append("legacy")
+            return [1.0, 0.0]
+
+        with (
+            patch.object(provider, "_embed_new_api", fail_current),
+            patch.object(provider, "_embed_legacy_api", unexpected_legacy),
+        ):
+            with self.assertRaises(self.providers.EmbeddingProviderError):
+                provider.embed_once("registered diagnostic query")
+
+        self.assertEqual(calls, ["current"])
+
     def test_check_embedding_provider_uses_capped_timeout_and_reports_dimension(self):
         captured = {}
 

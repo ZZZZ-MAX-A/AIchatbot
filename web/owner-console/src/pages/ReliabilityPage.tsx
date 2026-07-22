@@ -22,6 +22,17 @@ type ReliabilityPageState = {
 
 type WindowKey = "recent" | "weekly";
 
+type ReliabilityOption = {
+  value: string;
+  label: string;
+};
+
+type ReliabilityReading = {
+  tone: "neutral" | "success" | "warning" | "danger";
+  headline: string;
+  detail: string;
+};
+
 const RECOVERY_TONES: Record<
   string,
   "neutral" | "success" | "warning" | "danger"
@@ -58,22 +69,105 @@ function apiErrorDescription(error: Error): string {
   return error.message;
 }
 
-function uniqueValues(
+function uniqueOptions(
   rows: OwnerConsoleReliabilityTrendItem[],
-  select: (row: OwnerConsoleReliabilityTrendItem) => string,
-): string[] {
-  return [...new Set(rows.map(select))].sort((left, right) =>
-    left.localeCompare(right),
-  );
+  valueOf: (row: OwnerConsoleReliabilityTrendItem) => string,
+  labelOf: (row: OwnerConsoleReliabilityTrendItem) => string,
+): ReliabilityOption[] {
+  const options = new Map<string, string>();
+  for (const row of rows) {
+    options.set(valueOf(row), labelOf(row));
+  }
+  return [...options.entries()]
+    .map(([value, label]) => ({ value, label }))
+    .sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
+}
+
+const RECOVERY_PRIORITY: Record<string, number> = {
+  recurring: 0,
+  unresolved: 1,
+  insufficient_evidence: 2,
+  recovered: 3,
+};
+
+function buildReliabilityReading(
+  rows: OwnerConsoleReliabilityTrendItem[],
+  allRowCount: number,
+): ReliabilityReading {
+  if (rows.length === 0) {
+    return allRowCount === 0
+      ? {
+          tone: "neutral",
+          headline: "当前窗口没有结构化故障记录",
+          detail: "这不等于系统持续在线，也不覆盖尚未接入的组件。",
+        }
+      : {
+          tone: "neutral",
+          headline: "当前筛选没有匹配的故障组",
+          detail: "可以调整或清除筛选；完整英文技术证据仍保留在明细中。",
+        };
+  }
+
+  const counts = {
+    unresolved: rows.filter((row) => row.recovery_state === "unresolved").length,
+    recurring: rows.filter((row) => row.recovery_state === "recurring").length,
+    recovered: rows.filter((row) => row.recovery_state === "recovered").length,
+    insufficient: rows.filter(
+      (row) => row.recovery_state === "insufficient_evidence",
+    ).length,
+  };
+  const attention = counts.unresolved + counts.recurring;
+  const top = [...rows].sort((left, right) => {
+    const priority =
+      (RECOVERY_PRIORITY[left.recovery_state] ?? 9) -
+      (RECOVERY_PRIORITY[right.recovery_state] ?? 9);
+    if (priority !== 0) return priority;
+    if (left.occurrence_count !== right.occurrence_count) {
+      return right.occurrence_count - left.occurrence_count;
+    }
+    return Date.parse(right.last_seen_at) - Date.parse(left.last_seen_at);
+  })[0];
+  const topEvidence = `${top.component_label} · ${top.operation_label}：${top.code_label}（${top.code}），证据状态为${top.recovery_state_label}（${top.recovery_state}）`;
+
+  if (attention > 0) {
+    const parts = [];
+    if (counts.recurring > 0) parts.push(`反复发生 ${counts.recurring} 组`);
+    if (counts.unresolved > 0) parts.push(`未恢复 ${counts.unresolved} 组`);
+    return {
+      tone: counts.recurring > 0 ? "warning" : "danger",
+      headline: `当前筛选有 ${attention} 组需要关注`,
+      detail: `${parts.join("，")}。优先查看 ${topEvidence}。`,
+    };
+  }
+
+  if (counts.recovered > 0 && counts.insufficient === 0) {
+    return {
+      tone: "success",
+      headline: "当前筛选没有未恢复或反复发生的故障组",
+      detail: `${counts.recovered} 组在最后失败之后已有真实成功证据；历史英文错误码继续保留。`,
+    };
+  }
+
+  if (counts.recovered > 0) {
+    return {
+      tone: "neutral",
+      headline: "当前筛选没有可判定为未恢复的故障组",
+      detail: `${counts.recovered} 组已有恢复证据，${counts.insufficient} 组证据不足。优先查看 ${topEvidence}。`,
+    };
+  }
+
+  return {
+    tone: "neutral",
+    headline: "当前筛选没有可判定为未恢复的故障组",
+    detail: `${counts.insufficient} 组证据不足，不能据此判断仍在故障或已经恢复。优先查看 ${topEvidence}。`,
+  };
 }
 
 function ReliabilityMetrics({ window }: { window: OwnerConsoleReliabilityWindow }) {
   const metrics = [
-    ["失败/降级次数", window.failure_occurrence_count],
-    ["故障组", window.failure_group_count],
-    ["未恢复", window.state_counts.unresolved],
-    ["已恢复", window.state_counts.recovered],
-    ["反复发生", window.state_counts.recurring],
+    ["失败/降级记录", window.failure_occurrence_count],
+    ["需要关注", window.state_counts.unresolved + window.state_counts.recurring],
+    ["已有恢复证据", window.state_counts.recovered],
     ["证据不足", window.state_counts.insufficient_evidence],
   ] as const;
   return (
@@ -129,15 +223,30 @@ export function ReliabilityPage() {
   const window = data?.[windowKey] ?? null;
   const allRows = window?.items ?? [];
   const components = useMemo(
-    () => uniqueValues(allRows, (row) => row.component),
+    () =>
+      uniqueOptions(
+        allRows,
+        (row) => row.component,
+        (row) => `${row.component_label}（${row.component}）`,
+      ),
     [allRows],
   );
   const categories = useMemo(
-    () => uniqueValues(allRows, (row) => row.category),
+    () =>
+      uniqueOptions(
+        allRows,
+        (row) => row.category,
+        (row) => `${row.category_label}（${row.category}）`,
+      ),
     [allRows],
   );
   const recoveries = useMemo(
-    () => uniqueValues(allRows, (row) => row.recovery_state),
+    () =>
+      uniqueOptions(
+        allRows,
+        (row) => row.recovery_state,
+        (row) => `${row.recovery_state_label}（${row.recovery_state}）`,
+      ),
     [allRows],
   );
   const filteredRows = useMemo(
@@ -151,6 +260,14 @@ export function ReliabilityPage() {
       ),
     [allRows, categoryFilter, componentFilter, recoveryFilter],
   );
+  const reading = useMemo(
+    () => buildReliabilityReading(filteredRows, allRows.length),
+    [allRows.length, filteredRows],
+  );
+  const hasActiveFilters =
+    componentFilter !== "all" ||
+    categoryFilter !== "all" ||
+    recoveryFilter !== "all";
 
   return (
     <section className="page reliability-page">
@@ -158,7 +275,7 @@ export function ReliabilityPage() {
         <div>
           <p className="page-header__eyebrow">主人控制台</p>
           <h1>结构化可靠性</h1>
-          <p className="page-header__resource">P2.47 固定事件合同 · SQLite 真只读</p>
+          <p className="page-header__resource">P2.48 中文解读 · 英文证据保留 · SQLite 真只读</p>
         </div>
         <button
           className="refresh-button"
@@ -217,7 +334,7 @@ export function ReliabilityPage() {
             <div className="detail-panel__header">
               <div>
                 <h2>故障组</h2>
-                <p className="panel-note">按 component + operation + category + code 聚合</p>
+                <p className="panel-note">中文用于解读；英文 component / operation / category / code 保留为原始证据。</p>
               </div>
               <span className="reliability-result-count">
                 显示 {filteredRows.length} / {allRows.length} 组
@@ -226,24 +343,24 @@ export function ReliabilityPage() {
 
             <div className="reliability-filters" aria-label="故障组筛选">
               <label>
-                <span>组件</span>
+                <span>功能</span>
                 <select value={componentFilter} onChange={(event) => setComponentFilter(event.target.value)}>
-                  <option value="all">全部组件</option>
-                  {components.map((value) => <option key={value} value={value}>{value}</option>)}
+                  <option value="all">全部功能</option>
+                  {components.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               </label>
               <label>
-                <span>类别</span>
+                <span>问题类别</span>
                 <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
                   <option value="all">全部类别</option>
-                  {categories.map((value) => <option key={value} value={value}>{value}</option>)}
+                  {categories.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               </label>
               <label>
-                <span>恢复状态</span>
+                <span>证据状态</span>
                 <select value={recoveryFilter} onChange={(event) => setRecoveryFilter(event.target.value)}>
                   <option value="all">全部状态</option>
-                  {recoveries.map((value) => <option key={value} value={value}>{value}</option>)}
+                  {recoveries.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               </label>
               <button
@@ -254,27 +371,38 @@ export function ReliabilityPage() {
                   setCategoryFilter("all");
                   setRecoveryFilter("all");
                 }}
+                disabled={!hasActiveFilters}
               >
                 清除筛选
               </button>
             </div>
 
+            <section
+              className={`reliability-reading reliability-reading--${reading.tone}`}
+              aria-label="当前可靠性解读"
+            >
+              <strong>{reading.headline}</strong>
+              <p>{reading.detail}</p>
+            </section>
+
             {filteredRows.length > 0 ? (
               <div className="reliability-table-scroll">
                 <div className="reliability-table" role="table" aria-label="结构化故障组">
                   <div className="reliability-table__row reliability-table__row--head" role="row">
-                    <span>组件 / 操作</span><span>类别 / 代码</span><span>次数</span>
-                    <span>首次失败</span><span>最后失败</span><span>最近成功</span><span>恢复状态</span>
+                    <span>功能 / 操作</span><span>问题解读 / 英文代码</span><span>次数</span>
+                    <span>时间证据</span><span>证据状态</span>
                   </div>
                   {filteredRows.map((row) => (
                     <div className="reliability-table__row" role="row" key={`${row.component}:${row.operation}:${row.category}:${row.code}`}>
-                      <span><strong>{row.component}</strong><small>{row.operation}</small></span>
-                      <span><strong>{row.category_label}</strong><small>{row.code}</small></span>
-                      <span>{row.occurrence_count}</span>
-                      <span>{formatTime(row.first_seen_at)}</span>
-                      <span>{formatTime(row.last_seen_at)}</span>
-                      <span>{formatTime(row.last_success_at)}</span>
-                      <span><StatusBadge label="状态" value={row.recovery_state_label} tone={RECOVERY_TONES[row.recovery_state] ?? "neutral"} /></span>
+                      <span><strong>{row.component_label} · {row.operation_label}</strong><small>{row.component} / {row.operation}</small></span>
+                      <span><strong>{row.category_label} · {row.code_label}</strong><small>{row.category} / {row.code}</small></span>
+                      <span>{row.occurrence_count} 次</span>
+                      <span className="reliability-time-list">
+                        <span><small>首次失败</small>{formatTime(row.first_seen_at)}</span>
+                        <span><small>最后失败</small>{formatTime(row.last_seen_at)}</span>
+                        <span><small>最近成功</small>{formatTime(row.last_success_at)}</span>
+                      </span>
+                      <span><StatusBadge label="证据" value={row.recovery_state_label} tone={RECOVERY_TONES[row.recovery_state] ?? "neutral"} /><small>{row.recovery_state}</small></span>
                     </div>
                   ))}
                 </div>
@@ -292,7 +420,10 @@ export function ReliabilityPage() {
               <h2>当前接入范围</h2>
               <div className="coverage-list">
                 {data.coverage.map((row) => (
-                  <code key={`${row.component}:${row.operation}`}>{row.component} / {row.operation}</code>
+                  <code key={`${row.component}:${row.operation}`}>
+                    <span>{row.component_label} · {row.operation_label}</span>
+                    <small>{row.component} / {row.operation}</small>
+                  </code>
                 ))}
               </div>
               <p className="panel-note">{data.evidence_note}</p>

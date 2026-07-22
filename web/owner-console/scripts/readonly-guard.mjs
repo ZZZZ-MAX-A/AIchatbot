@@ -15,6 +15,7 @@ const expectedStaticPaths = [
   "`${API_BASE}/routes`",
   "`${API_BASE}/overview`",
   "`${API_BASE}/diagnostics`",
+  "`${API_BASE}/manual-diagnostics`",
   "`${API_BASE}/reliability`",
   "`${API_BASE}/memory`",
   "`${API_BASE}/access-control`",
@@ -28,6 +29,9 @@ const expectedApiMethods = [
   "getRoutes",
   "getOverview",
   "getDiagnostics",
+  "getManualDiagnostics",
+  "runProjectDocRagProbe",
+  "runMemoryRagConsistency",
   "getReliability",
   "getMemory",
   "getAccessControl",
@@ -131,8 +135,11 @@ if (fetchLocations.length !== 1 || fetchLocations[0] !== "src/api/ownerConsoleAp
 for (const file of sourceTexts) {
   const methodMatches = file.text.matchAll(/\bmethod\s*:\s*["'`](\w+)["'`]/g);
   for (const match of methodMatches) {
-    if (match[1] !== "GET") {
-      fail(`${file.rel} uses HTTP method ${match[1]}; Owner Console frontend v0 must only use GET.`);
+    if (
+      match[1] !== "GET" &&
+      !(file.rel === "src/api/ownerConsoleApi.ts" && match[1] === "POST")
+    ) {
+      fail(`${file.rel} uses unregistered HTTP method ${match[1]}.`);
     }
   }
 
@@ -174,6 +181,45 @@ for (const file of sourceTexts) {
     /\bsetInterval\s*\(/.test(file.text)
   ) {
     fail(`${file.rel} uses setInterval outside the controlled auto-refresh hook.`);
+  }
+}
+
+if (!apiText.includes("const allowedPostPaths = new Set([")) {
+  fail("ownerConsoleApi.ts is missing the fixed manual-action POST allowlist.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/project-doc-rag`")) {
+  fail("ownerConsoleApi.ts is missing the ProjectDocRAG manual action path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/memory-rag-consistency`")) {
+  fail("ownerConsoleApi.ts is missing the MemoryRAG consistency action path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/main-llm-contract`")) {
+  fail("ownerConsoleApi.ts is missing the Main LLM contract action path.");
+}
+const allowedPostBlock = apiText.match(
+  /const allowedPostPaths = new Set\(\[([\s\S]*?)\]\);/,
+)?.[1] ?? "";
+const registeredPostPathCount = [
+  ...allowedPostBlock.matchAll(/`\$\{API_BASE\}\/manual-diagnostics\//g),
+].length;
+if (registeredPostPathCount !== 3) {
+  fail(`ownerConsoleApi.ts must register exactly three manual-action POST paths; found ${registeredPostPathCount}.`);
+}
+const postMethodCount = [...apiText.matchAll(/method:\s*"POST"/g)].length;
+if (postMethodCount !== 1) {
+  fail(`ownerConsoleApi.ts must contain exactly one POST transport; found ${postMethodCount}.`);
+}
+for (const requiredToken of [
+  '"X-Owner-Console-Action": "manual-project-doc-rag-probe-v1"',
+  'confirmation: "run_registered_project_doc_rag_probe"',
+  '"X-Owner-Console-Action": "manual-memory-rag-consistency-v1"',
+  'confirmation: "run_registered_memory_rag_consistency"',
+  '"X-Owner-Console-Action": "manual-main-llm-contract-v1"',
+  'confirmation: "run_registered_main_llm_contract"',
+  '"Content-Type": "application/json"',
+]) {
+  if (!apiText.includes(requiredToken)) {
+    fail(`ownerConsoleApi.ts manual action is missing ${requiredToken}.`);
   }
 }
 
@@ -234,6 +280,6 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log("Owner Console frontend read-only guard passed.");
+console.log("Owner Console frontend boundary guard passed.");
 console.log(`Checked ${sourceFiles.length} TypeScript source files.`);
-console.log("Verified GET-only fetch usage, read-only allowlist, controlled timers, page routes, and absence of write-style API names.");
+console.log("Verified read-only GET paths, three fixed manual POST actions, controlled timers, page routes, and absence of generic write APIs.");
