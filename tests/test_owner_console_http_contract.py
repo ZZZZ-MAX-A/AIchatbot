@@ -38,10 +38,11 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
             self.read_runtime.OWNER_CONSOLE_SCHEMA_VERSION,
         )
         self.assertEqual(snapshot.api_prefix, "/api/v1/owner-console")
-        self.assertEqual(snapshot.allowed_methods, ["GET"])
+        self.assertEqual(snapshot.allowed_methods, ["GET", "POST"])
         self.assertEqual(snapshot.context_strategy, "owner_private_session_from_config")
         self.assertFalse(snapshot.context_override_allowed)
         self.assertFalse(snapshot.write_routes_enabled)
+        self.assertFalse(snapshot.manual_runtime_action_routes_enabled)
         self.assertFalse(snapshot.boundary.ordinary_chat_can_trigger_main_agent)
         self.assertTrue(snapshot.boundary.owner_write_requires_approval)
 
@@ -78,6 +79,30 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "access_control",
             ),
             ("settings", "settings", "/api/v1/owner-console/settings", "settings"),
+            (
+                "manual-diagnostics",
+                "manual-diagnostics",
+                "/api/v1/owner-console/manual-diagnostics",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.project-doc-rag",
+                "manual-diagnostics/project-doc-rag",
+                "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.memory-rag-consistency",
+                "manual-diagnostics/memory-rag-consistency",
+                "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.main-llm-contract",
+                "manual-diagnostics/main-llm-contract",
+                "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
+                "manual_diagnostics",
+            ),
         ]
         self.assertEqual(
             [(row.name, row.resource, row.path, row.read_page) for row in snapshot.rows],
@@ -87,15 +112,31 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
 
         runtime_class = self.read_runtime.OwnerConsoleReadRuntime
         for row in snapshot.rows:
-            self.assertEqual(row.method, "GET")
             self.assertTrue(row.path.startswith("/api/v1/owner-console/"))
             self.assertEqual(row.path, row.path.lower())
-            self.assertTrue(row.read_only)
             self.assertFalse(row.http_api_enabled)
             self.assertFalse(row.web_write_enabled)
             self.assertFalse(row.direct_qq_dependency_allowed)
-            self.assertFalse(row.write_side_effect_allowed)
-            self.assertTrue(hasattr(runtime_class, row.runtime_method), row.name)
+            if row.name in {
+                "manual-diagnostics.project-doc-rag",
+                "manual-diagnostics.memory-rag-consistency",
+                "manual-diagnostics.main-llm-contract",
+            }:
+                self.assertEqual(row.method, "POST")
+                self.assertFalse(row.read_only)
+                self.assertTrue(row.write_side_effect_allowed)
+                self.assertTrue(row.manual_runtime_action_allowed)
+            elif row.name == "manual-diagnostics":
+                self.assertEqual(row.method, "GET")
+                self.assertTrue(row.read_only)
+                self.assertFalse(row.write_side_effect_allowed)
+                self.assertFalse(row.manual_runtime_action_allowed)
+            else:
+                self.assertEqual(row.method, "GET")
+                self.assertTrue(row.read_only)
+                self.assertFalse(row.write_side_effect_allowed)
+                self.assertFalse(row.manual_runtime_action_allowed)
+                self.assertTrue(hasattr(runtime_class, row.runtime_method), row.name)
             for segment in row.path.split("/"):
                 if not segment or segment.startswith("{"):
                     continue
@@ -132,6 +173,18 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         self.assertEqual(
             rows["external-read"].read_model,
             "OwnerConsoleExternalReadSnapshot",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.project-doc-rag"].runtime_method,
+            "run_project_doc_rag_probe",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.memory-rag-consistency"].runtime_method,
+            "run_memory_rag_consistency",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.main-llm-contract"].runtime_method,
+            "run_main_llm_contract",
         )
 
     def test_http_response_and_error_envelopes_are_stable_and_json_safe(self):
@@ -200,4 +253,6 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         self.assertNotIn("bot.send", lower_source)
         self.assertNotIn("fastapi", lower_source)
         self.assertNotIn("owner_write_runtime", combined_source)
-        self.assertIsNone(re.search(r"\bpost\b|\bput\b|\bpatch\b|\bdelete\b", lower_source))
+        self.assertIsNone(re.search(r"\bput\b|\bpatch\b|\bdelete\b", lower_source))
+        self.assertIn('method="post"', lower_source)
+        self.assertIn('owner_console_http_allowed_methods = ("get", "post")', lower_source)

@@ -147,6 +147,8 @@ export function AppShell() {
     const writeClosed =
       health?.web_write_enabled === false &&
       routes?.web_write_enabled === false;
+    const manualDiagnostics =
+      health?.manual_diagnostic_actions_enabled === true;
     const schemaVersion =
       routes?.schema_version ?? health?.schema_version ?? "未知";
     const routeCount = routes?.data?.route_count ?? 0;
@@ -155,6 +157,7 @@ export function AppShell() {
       connected,
       readOnly,
       writeClosed,
+      manualDiagnostics,
       schemaVersion,
       routeCount,
     };
@@ -195,19 +198,24 @@ export function AppShell() {
         <header className="top-status-bar">
           <div className="top-status-bar__title">
             <span className="top-status-bar__eyebrow">主人控制台</span>
-            <strong>只读工作台</strong>
+            <strong>诊断工作台</strong>
           </div>
 
           <div className="top-status-bar__badges" aria-live="polite">
             <StatusBadge
-              label="只读模式"
-              value={status.readOnly ? "已开启" : "异常"}
+              label="快照读取"
+              value={status.readOnly ? "只读" : "异常"}
               tone={status.readOnly ? "success" : "danger"}
             />
             <StatusBadge
               label="网页写入"
               value={status.writeClosed ? "已关闭" : "异常"}
               tone={status.writeClosed ? "success" : "danger"}
+            />
+            <StatusBadge
+              label="手动诊断"
+              value={status.manualDiagnostics ? "按需开放" : "未开放"}
+              tone={status.manualDiagnostics ? "warning" : "success"}
             />
             <StatusBadge
               label="后端连接"

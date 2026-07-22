@@ -263,6 +263,48 @@ OWNER_CONSOLE_RELIABILITY_COVERAGE = (
     ("tts", "synthesize"),
 )
 
+RELIABILITY_COMPONENT_LABELS = {
+    "bot_runtime": "Bot 运行状态",
+    "main_llm": "MainAgent 规划模型",
+    "sticker_classifier": "表情意图分类",
+    "document_delivery": "文档交付",
+    "project_doc_rag": "项目文档索引",
+    "vision": "图片理解",
+    "tts": "语音合成",
+}
+
+RELIABILITY_OPERATION_LABELS = {
+    "lifecycle": "进程启动与停止",
+    "plan_action": "生成行动计划",
+    "classify_intent": "判断表情意图",
+    "send_document": "发送新文档",
+    "rebuild_index": "重建项目文档索引",
+    "infer": "识别图片内容",
+    "synthesize": "生成语音",
+}
+
+RELIABILITY_CODE_LABELS = {
+    "request_timeout": "请求在限定时间内没有完成",
+    "connection_failed": "服务连接或传输失败",
+    "model_rate_limited": "模型服务拒绝或限制了当前请求",
+    "model_not_found": "配置的模型当前不可用",
+    "invalid_model_response": "模型响应未通过格式或质量校验",
+    "authorization_failed": "鉴权或权限检查未通过",
+    "invalid_configuration": "功能配置不完整或不合法",
+    "data_validation_failed": "输入或产物未通过数据校验",
+    "presentation_slide_limit_exceeded": "演示文稿页数超过安全上限",
+    "artifact_integrity_failed": "文档产物完整性复核失败",
+    "document_delivery_failed": "文档交付没有完成",
+    "approval_context_invalid": "审批上下文与当前任务不一致",
+    "required_arguments_unavailable": "执行所需参数不完整",
+    "unexpected_runtime_state": "运行状态不在已知安全范围内",
+    "suspected_abnormal_exit": "上次运行没有发现正常停止记录",
+}
+
+
+def _reliability_label(labels: dict[str, str], value: str) -> str:
+    return labels.get(value, "未收录中文解读")
+
 
 def _empty_role_cards_provider() -> list[Any]:
     return []
@@ -627,10 +669,19 @@ def _owner_console_reliability_window(
         rows.append(
             OwnerConsoleReliabilityTrendItem(
                 component=item.component,
+                component_label=_reliability_label(
+                    RELIABILITY_COMPONENT_LABELS,
+                    item.component,
+                ),
                 operation=item.operation,
+                operation_label=_reliability_label(
+                    RELIABILITY_OPERATION_LABELS,
+                    item.operation,
+                ),
                 category=item.category.value,
                 category_label=CATEGORY_LABELS[item.category],
                 code=item.code,
+                code_label=_reliability_label(RELIABILITY_CODE_LABELS, item.code),
                 occurrence_count=item.occurrence_count,
                 first_seen_at=item.first_seen_at.isoformat(),
                 last_seen_at=item.last_seen_at.isoformat(),
@@ -663,7 +714,15 @@ def build_owner_console_reliability_snapshot(
         coverage=[
             OwnerConsoleReliabilityCoverageRow(
                 component=component,
+                component_label=_reliability_label(
+                    RELIABILITY_COMPONENT_LABELS,
+                    component,
+                ),
                 operation=operation,
+                operation_label=_reliability_label(
+                    RELIABILITY_OPERATION_LABELS,
+                    operation,
+                ),
             )
             for component, operation in OWNER_CONSOLE_RELIABILITY_COVERAGE
         ],

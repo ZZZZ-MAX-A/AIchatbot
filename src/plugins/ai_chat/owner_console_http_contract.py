@@ -32,6 +32,9 @@ class OwnerConsoleHttpRouteSpec:
     requires_context: bool
     path_params: tuple[str, ...] = ()
     query_params: tuple[str, ...] = ()
+    read_only: bool = True
+    write_side_effect_allowed: bool = False
+    manual_runtime_action_allowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,65 @@ def _spec_for_mapping(
 OWNER_CONSOLE_HTTP_ROUTE_SPECS = tuple(
     _spec_for_mapping(mapping)
     for mapping in _HTTP_ROUTE_MAPPINGS
+) + (
+    OwnerConsoleHttpRouteSpec(
+        name="manual-diagnostics",
+        resource="manual-diagnostics",
+        method="GET",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/manual-diagnostics",
+        read_page="manual_diagnostics",
+        runtime_method="build_snapshot",
+        read_model="OwnerConsoleManualDiagnosticsSnapshot",
+        requires_context=False,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="manual-diagnostics.project-doc-rag",
+        resource="manual-diagnostics/project-doc-rag",
+        method="POST",
+        path=(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/project-doc-rag"
+        ),
+        read_page="manual_diagnostics",
+        runtime_method="run_project_doc_rag_probe",
+        read_model="OwnerConsoleManualDiagnosticRun",
+        requires_context=False,
+        read_only=False,
+        write_side_effect_allowed=True,
+        manual_runtime_action_allowed=True,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="manual-diagnostics.memory-rag-consistency",
+        resource="manual-diagnostics/memory-rag-consistency",
+        method="POST",
+        path=(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/memory-rag-consistency"
+        ),
+        read_page="manual_diagnostics",
+        runtime_method="run_memory_rag_consistency",
+        read_model="OwnerConsoleMemoryRagConsistencyRun",
+        requires_context=False,
+        read_only=False,
+        write_side_effect_allowed=True,
+        manual_runtime_action_allowed=True,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="manual-diagnostics.main-llm-contract",
+        resource="manual-diagnostics/main-llm-contract",
+        method="POST",
+        path=(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/main-llm-contract"
+        ),
+        read_page="manual_diagnostics",
+        runtime_method="run_main_llm_contract",
+        read_model="OwnerConsoleMainLlmContractRun",
+        requires_context=False,
+        read_only=False,
+        write_side_effect_allowed=True,
+        manual_runtime_action_allowed=True,
+    ),
 )
 
 
@@ -213,11 +275,12 @@ def build_owner_console_http_route_contract_snapshot(
             requires_context=spec.requires_context,
             path_params=list(spec.path_params),
             query_params=list(spec.query_params),
-            read_only=True,
+            read_only=spec.read_only,
             http_api_enabled=spec.name in enabled_routes,
             web_write_enabled=False,
             direct_qq_dependency_allowed=False,
-            write_side_effect_allowed=False,
+            write_side_effect_allowed=spec.write_side_effect_allowed,
+            manual_runtime_action_allowed=spec.manual_runtime_action_allowed,
         )
         for spec in OWNER_CONSOLE_HTTP_ROUTE_SPECS
     ]
@@ -232,5 +295,9 @@ def build_owner_console_http_route_contract_snapshot(
         context_strategy="owner_private_session_from_config",
         context_override_allowed=False,
         write_routes_enabled=False,
+        manual_runtime_action_routes_enabled=any(
+            row.http_api_enabled and row.manual_runtime_action_allowed
+            for row in rows
+        ),
         boundary=OwnerConsoleRuntimeBoundary(),
     )

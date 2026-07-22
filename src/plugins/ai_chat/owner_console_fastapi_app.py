@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from .agent_tasks import AGENT_APPROVAL_STATUSES, AGENT_TASK_STATUSES
 from .config import PROJECT_ROOT, load_config
@@ -23,8 +26,21 @@ from .owner_console_http_contract import (
 from .owner_console_http_models import (
     OWNER_CONSOLE_HTTP_API_PREFIX,
     OWNER_CONSOLE_HTTP_SCHEMA_VERSION,
+    owner_console_http_action_error_response,
+    owner_console_http_action_success_response,
     owner_console_http_error_response,
     owner_console_http_success_response,
+)
+from .owner_console_manual_diagnostics import (
+    MAIN_LLM_CONTRACT_ACTION_HEADER,
+    MAIN_LLM_CONTRACT_CONFIRMATION,
+    MEMORY_RAG_CONSISTENCY_ACTION_HEADER,
+    MEMORY_RAG_CONSISTENCY_CONFIRMATION,
+    PROJECT_DOC_RAG_PROBE_ACTION_HEADER,
+    PROJECT_DOC_RAG_PROBE_CONFIRMATION,
+    OwnerConsoleManualDiagnosticBusy,
+    OwnerConsoleManualDiagnosticDisabled,
+    create_owner_console_manual_diagnostics_runtime,
 )
 from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT, OWNER_CONSOLE_WORK_TYPES
 
@@ -33,6 +49,20 @@ OWNER_CONSOLE_FASTAPI_APP_TITLE = "AIchatbot Owner Console API"
 OWNER_CONSOLE_STATIC_PREFIX = "/owner-console"
 OWNER_CONSOLE_STATIC_ENABLED_ENV = "OWNER_CONSOLE_STATIC_ENABLED"
 OWNER_CONSOLE_STATIC_DIR_ENV = "OWNER_CONSOLE_STATIC_DIR"
+OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED_ENV = (
+    "OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED"
+)
+OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED_ENV = (
+    "OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED"
+)
+OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED_ENV = (
+    "OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED"
+)
+OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED_ENV = (
+    "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED"
+)
+OWNER_CONSOLE_ACTION_COOKIE = "owner_console_action_session"
+OWNER_CONSOLE_ACTION_HEADER = "x-owner-console-action"
 OWNER_CONSOLE_DEFAULT_STATIC_DIR = PROJECT_ROOT / "web" / "owner-console" / "dist"
 OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
     {
@@ -48,6 +78,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
         "diagnostics",
         "reliability",
         "external-read",
+        "manual-diagnostics",
     }
 )
 OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
@@ -64,6 +95,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/reliability",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/external-read",
+    f"{OWNER_CONSOLE_HTTP_API_PREFIX}/manual-diagnostics",
 )
 
 
@@ -80,6 +112,34 @@ def _owner_console_bool(value: bool) -> str:
 
 def _owner_console_static_enabled() -> bool:
     return _owner_console_bool_env(OWNER_CONSOLE_STATIC_ENABLED_ENV, False)
+
+
+def _owner_console_manual_diagnostics_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_project_doc_rag_probe_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_memory_rag_consistency_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_main_llm_contract_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED_ENV,
+        False,
+    )
 
 
 def _owner_console_static_dir() -> Path:
@@ -169,6 +229,51 @@ def _owner_console_internal_error(
         code="internal_error",
         message=message,
         details={"error_type": type(exc).__name__},
+    )
+
+
+def _owner_console_action_success(resource: str, data: Any) -> dict[str, Any]:
+    return owner_console_http_action_success_response(
+        resource,
+        data,
+        http_api_enabled=True,
+    )
+
+
+def _owner_console_action_error_response(
+    resource: str,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    payload = owner_console_http_action_error_response(
+        resource,
+        code=code,
+        message=message,
+        details={},
+        http_api_enabled=True,
+    )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _owner_console_loopback_host(host_header: str) -> bool:
+    hostname = urlsplit(f"//{host_header}").hostname
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def _owner_console_same_origin_request(request: Request) -> bool:
+    host = request.headers.get("host", "").strip().lower()
+    origin = request.headers.get("origin", "").strip().lower()
+    if not host or not origin or not _owner_console_loopback_host(host):
+        return False
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme == "http"
+        and parsed.netloc == host
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
     )
 
 
@@ -269,7 +374,65 @@ def _register_owner_console_static_routes(app: FastAPI, static_dir: Path) -> Non
         return FileResponse(index_file, media_type="text/html")
 
 
-def create_owner_console_fastapi_app() -> FastAPI:
+def create_owner_console_fastapi_app(
+    *,
+    manual_diagnostics_runtime: Any | None = None,
+    action_session_token: str | None = None,
+) -> FastAPI:
+    manual_runtime = manual_diagnostics_runtime
+    if manual_runtime is None:
+        manual_runtime = create_owner_console_manual_diagnostics_runtime(
+            config_provider=load_config,
+            manual_diagnostic_actions_enabled=(
+                _owner_console_manual_diagnostics_enabled()
+            ),
+            project_doc_rag_probe_enabled=(
+                _owner_console_project_doc_rag_probe_enabled()
+            ),
+            memory_rag_consistency_enabled=(
+                _owner_console_memory_rag_consistency_enabled()
+            ),
+            main_llm_contract_enabled=(
+                _owner_console_main_llm_contract_enabled()
+            ),
+        )
+    manual_snapshot = manual_runtime.build_snapshot()
+    project_doc_rag_action_enabled = bool(
+        manual_snapshot.project_doc_rag_probe_enabled
+    )
+    memory_rag_action_enabled = bool(
+        manual_snapshot.memory_rag_consistency_enabled
+    )
+    main_llm_action_enabled = bool(
+        manual_snapshot.main_llm_contract_enabled
+    )
+    manual_action_enabled = bool(
+        project_doc_rag_action_enabled
+        or memory_rag_action_enabled
+        or main_llm_action_enabled
+    )
+    enabled_route_names = set(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES)
+    enabled_routes = list(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES)
+    if project_doc_rag_action_enabled:
+        enabled_route_names.add("manual-diagnostics.project-doc-rag")
+        enabled_routes.append(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/project-doc-rag"
+        )
+    if memory_rag_action_enabled:
+        enabled_route_names.add("manual-diagnostics.memory-rag-consistency")
+        enabled_routes.append(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/memory-rag-consistency"
+        )
+    if main_llm_action_enabled:
+        enabled_route_names.add("manual-diagnostics.main-llm-contract")
+        enabled_routes.append(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/main-llm-contract"
+        )
+    action_token = action_session_token or secrets.token_urlsafe(32)
+
     app = FastAPI(
         title=OWNER_CONSOLE_FASTAPI_APP_TITLE,
         docs_url=None,
@@ -285,16 +448,21 @@ def create_owner_console_fastapi_app() -> FastAPI:
             "schema_version": OWNER_CONSOLE_HTTP_SCHEMA_VERSION,
             "api_prefix": OWNER_CONSOLE_HTTP_API_PREFIX,
             "read_only": True,
+            "snapshot_read_only": True,
             "http_api_enabled": True,
             "web_write_enabled": False,
-            "enabled_routes": list(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES),
+            "manual_diagnostic_actions_enabled": manual_action_enabled,
+            "automatic_diagnostics_enabled": False,
+            "configuration_write_enabled": False,
+            "business_data_write_enabled": False,
+            "enabled_routes": enabled_routes,
         }
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/routes", response_model=None)
     async def owner_console_routes() -> Any:
         try:
             snapshot = build_owner_console_http_route_contract_snapshot(
-                enabled_route_names=OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES,
+                enabled_route_names=frozenset(enabled_route_names),
             )
         except Exception as exc:
             return _owner_console_internal_error(
@@ -679,6 +847,266 @@ def create_owner_console_fastapi_app() -> FastAPI:
             "reliability",
             snapshot,
         )
+
+    @app.get(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}/manual-diagnostics",
+        response_model=None,
+    )
+    async def owner_console_manual_diagnostics() -> Any:
+        payload = _owner_console_success(
+            "manual-diagnostics",
+            manual_runtime.build_snapshot(),
+        )
+        response = JSONResponse(content=payload)
+        response.set_cookie(
+            OWNER_CONSOLE_ACTION_COOKIE,
+            action_token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path=OWNER_CONSOLE_HTTP_API_PREFIX,
+        )
+        return response
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/project-doc-rag",
+        response_model=None,
+    )
+    async def owner_console_project_doc_rag_probe(request: Request) -> Any:
+        resource = "manual-diagnostics/project-doc-rag"
+        if not project_doc_rag_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="project document RAG manual probe is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            PROJECT_DOC_RAG_PROBE_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": PROJECT_DOC_RAG_PROBE_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.run_project_doc_rag_probe
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="project document RAG manual probe is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/memory-rag-consistency",
+        response_model=None,
+    )
+    async def owner_console_memory_rag_consistency(request: Request) -> Any:
+        resource = "manual-diagnostics/memory-rag-consistency"
+        if not memory_rag_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="MemoryRAG consistency diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            MEMORY_RAG_CONSISTENCY_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": MEMORY_RAG_CONSISTENCY_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.run_memory_rag_consistency
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="MemoryRAG consistency diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/main-llm-contract",
+        response_model=None,
+    )
+    async def owner_console_main_llm_contract(request: Request) -> Any:
+        resource = "manual-diagnostics/main-llm-contract"
+        if not main_llm_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="Main LLM contract diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            MAIN_LLM_CONTRACT_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": MAIN_LLM_CONTRACT_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.run_main_llm_contract
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="Main LLM contract diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
 
     if _owner_console_static_enabled():
         _register_owner_console_static_routes(

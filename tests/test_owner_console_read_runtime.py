@@ -863,6 +863,15 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(snapshot.weekly.failure_group_count, 1)
         self.assertEqual(snapshot.recent.state_counts.insufficient_evidence, 1)
         self.assertEqual(snapshot.recent.items[0].last_success_at, "")
+        self.assertEqual(snapshot.recent.items[0].component_label, "Bot 运行状态")
+        self.assertEqual(
+            snapshot.recent.items[0].operation_label,
+            "进程启动与停止",
+        )
+        self.assertEqual(
+            snapshot.recent.items[0].code_label,
+            "上次运行没有发现正常停止记录",
+        )
         self.assertEqual(snapshot.recent.items[0].recovery_state, "insufficient_evidence")
         self.assertEqual(len(snapshot.coverage), 7)
         self.assertEqual(
@@ -888,10 +897,13 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             set(payload["recent"]["items"][0]),
             {
                 "component",
+                "component_label",
                 "operation",
+                "operation_label",
                 "category",
                 "category_label",
                 "code",
+                "code_label",
                 "occurrence_count",
                 "first_seen_at",
                 "last_seen_at",
@@ -900,6 +912,8 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
                 "recovery_state_label",
             },
         )
+        self.assertEqual(snapshot.coverage[0].component_label, "Bot 运行状态")
+        self.assertEqual(snapshot.coverage[0].operation_label, "进程启动与停止")
 
     def test_read_model_serialization_contract_is_json_safe_and_read_only(self):
         temp_dir, patcher = self.temp_database()

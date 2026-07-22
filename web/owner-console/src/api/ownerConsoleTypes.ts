@@ -4,8 +4,13 @@ export type OwnerConsoleHealth = {
   schema_version: string;
   api_prefix: string;
   read_only: boolean;
+  snapshot_read_only: boolean;
   http_api_enabled: boolean;
   web_write_enabled: boolean;
+  manual_diagnostic_actions_enabled: boolean;
+  automatic_diagnostics_enabled: boolean;
+  configuration_write_enabled: boolean;
+  business_data_write_enabled: boolean;
   enabled_routes: string[];
 };
 
@@ -43,6 +48,9 @@ export type OwnerConsoleRouteRow = {
   read_only: boolean;
   http_api_enabled: boolean;
   web_write_enabled: boolean;
+  direct_qq_dependency_allowed?: boolean;
+  write_side_effect_allowed?: boolean;
+  manual_runtime_action_allowed?: boolean;
 };
 
 export type OwnerConsoleRouteContract = {
@@ -50,6 +58,7 @@ export type OwnerConsoleRouteContract = {
   allowed_methods: string[];
   context_override_allowed: boolean;
   write_routes_enabled: boolean;
+  manual_runtime_action_routes_enabled: boolean;
   route_count: number;
   rows: OwnerConsoleRouteRow[];
   boundary: Record<string, boolean>;
@@ -181,6 +190,155 @@ export type OwnerConsoleOverviewEnvelope =
 
 export type OwnerConsoleDiagnosticsEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleHealthSnapshot>;
+
+export type OwnerConsoleManualDiagnosticRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  document_count: number;
+  embedding_count: number;
+  result_count: number;
+  expected_document_matched: boolean;
+  top_score: number;
+  elapsed_ms: number;
+  runtime_feature_enabled: boolean;
+  owner_triggered: boolean;
+  query_text_exposed: boolean;
+  result_content_exposed: boolean;
+  index_rebuild_executed: boolean;
+  database_write_allowed: boolean;
+  llm_called: boolean;
+  dev_context_called: boolean;
+  automatic_retry: boolean;
+};
+
+export type OwnerConsoleMemoryRagConsistencyRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  manual_fact_documents: number;
+  manual_preference_documents: number;
+  session_summary_documents: number;
+  active_document_count: number;
+  valid_embedding_count: number;
+  missing_embedding_count: number;
+  missing_manual_fact_embeddings: number;
+  missing_manual_preference_embeddings: number;
+  missing_session_summary_embeddings: number;
+  active_documents_missing_source: number;
+  source_records_missing_document: number;
+  inactive_document_embedding_count: number;
+  runtime_feature_enabled: boolean;
+  elapsed_ms: number;
+  owner_triggered: boolean;
+  memory_content_read: boolean;
+  private_memory_query_executed: boolean;
+  embedding_called: boolean;
+  index_rebuild_executed: boolean;
+  database_write_allowed: boolean;
+  llm_called: boolean;
+  dev_context_called: boolean;
+  automatic_retry: boolean;
+};
+
+export type OwnerConsoleMainLlmContractRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  configured_model: string;
+  runtime_feature_enabled: boolean;
+  contract_version: string;
+  probe_id: string;
+  contract_valid: boolean;
+  usage_metadata_available: boolean;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  tool_calls_present: boolean;
+  elapsed_ms: number;
+  owner_triggered: boolean;
+  llm_called: boolean;
+  tool_definitions_sent: boolean;
+  tool_execution_allowed: boolean;
+  client_automatic_retry: boolean;
+  chat_history_read: boolean;
+  chat_history_written: boolean;
+  agent_task_written: boolean;
+  approval_written: boolean;
+  reliability_event_written: boolean;
+  database_write_allowed: boolean;
+  memory_rag_called: boolean;
+  project_doc_rag_called: boolean;
+  dev_context_called: boolean;
+  combined_rag_called: boolean;
+  tavily_called: boolean;
+  tts_called: boolean;
+  vision_called: boolean;
+  qq_write_executed: boolean;
+  prompt_exposed: boolean;
+  response_content_exposed: boolean;
+};
+
+export type OwnerConsoleManualDiagnosticsSnapshot = {
+  generated_at: string;
+  manual_diagnostic_actions_enabled: boolean;
+  project_doc_rag_probe_enabled: boolean;
+  memory_rag_consistency_enabled: boolean;
+  main_llm_contract_enabled: boolean;
+  automatic_diagnostics_enabled: boolean;
+  configuration_write_enabled: boolean;
+  business_data_write_enabled: boolean;
+  supported_workflows: string[];
+  latest_run:
+    | OwnerConsoleManualDiagnosticRun
+    | OwnerConsoleMemoryRagConsistencyRun
+    | OwnerConsoleMainLlmContractRun
+    | null;
+  project_doc_rag_latest_run: OwnerConsoleManualDiagnosticRun | null;
+  memory_rag_consistency_latest_run: OwnerConsoleMemoryRagConsistencyRun | null;
+  main_llm_contract_latest_run: OwnerConsoleMainLlmContractRun | null;
+};
+
+export type OwnerConsoleManualDiagnosticsEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleManualDiagnosticsSnapshot>;
+
+export type OwnerConsoleActionEnvelope<TData> =
+  OwnerConsoleEnvelope<TData> & {
+    read_only: false;
+    manual_runtime_action: true;
+    configuration_write_enabled: false;
+    business_data_write_enabled: false;
+  };
+
+export type OwnerConsoleProjectDocRagProbeEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleManualDiagnosticRun>;
+
+export type OwnerConsoleMemoryRagConsistencyEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleMemoryRagConsistencyRun>;
+
+export type OwnerConsoleMainLlmContractEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleMainLlmContractRun>;
 
 export type OwnerConsoleMemoryCounts = {
   message_count: number;
@@ -314,10 +472,13 @@ export type OwnerConsoleReliabilityStateCounts = {
 
 export type OwnerConsoleReliabilityTrendItem = {
   component: string;
+  component_label: string;
   operation: string;
+  operation_label: string;
   category: string;
   category_label: string;
   code: string;
+  code_label: string;
   occurrence_count: number;
   first_seen_at: string;
   last_seen_at: string;
@@ -336,7 +497,9 @@ export type OwnerConsoleReliabilityWindow = {
 
 export type OwnerConsoleReliabilityCoverageRow = {
   component: string;
+  component_label: string;
   operation: string;
+  operation_label: string;
 };
 
 export type OwnerConsoleReliabilityBoundary = {

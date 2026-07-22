@@ -363,10 +363,13 @@ class OwnerConsoleReliabilityStateCounts:
 @dataclass(frozen=True)
 class OwnerConsoleReliabilityTrendItem:
     component: str
+    component_label: str
     operation: str
+    operation_label: str
     category: str
     category_label: str
     code: str
+    code_label: str
     occurrence_count: int
     first_seen_at: str
     last_seen_at: str
@@ -387,7 +390,9 @@ class OwnerConsoleReliabilityWindow:
 @dataclass(frozen=True)
 class OwnerConsoleReliabilityCoverageRow:
     component: str
+    component_label: str
     operation: str
+    operation_label: str
 
 
 @dataclass(frozen=True)

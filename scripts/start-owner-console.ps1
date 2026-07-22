@@ -2,6 +2,9 @@ param(
     [int]$Port = 8090,
     [string]$HostAddress = "127.0.0.1",
     [string]$StaticDir = "web/owner-console/dist",
+    [switch]$EnableProjectDocRagProbe,
+    [switch]$EnableMemoryRagConsistencyProbe,
+    [switch]$EnableMainLlmContractProbe,
     [switch]$Build,
     [switch]$Foreground,
     [switch]$CheckOnly
@@ -126,6 +129,15 @@ $errLog = Join-Path $logDir "owner-console.err.log"
 
 $env:OWNER_CONSOLE_STATIC_ENABLED = "true"
 $env:OWNER_CONSOLE_STATIC_DIR = $StaticDir
+$manualDiagnosticsEnabled = (
+    $EnableProjectDocRagProbe -or
+    $EnableMemoryRagConsistencyProbe -or
+    $EnableMainLlmContractProbe
+)
+$env:OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED = if ($manualDiagnosticsEnabled) { "true" } else { "false" }
+$env:OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED = if ($EnableProjectDocRagProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED = if ($EnableMemoryRagConsistencyProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = if ($EnableMainLlmContractProbe) { "true" } else { "false" }
 
 $arguments = @(
     "-m",
