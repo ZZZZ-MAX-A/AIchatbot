@@ -184,9 +184,20 @@ class VisionPureUnitTests(unittest.TestCase):
     def test_download_image_base64_accepts_data_urls_without_network(self):
         payload = base64.b64encode(b"image-bytes").decode("ascii")
 
-        result = self.vision._download_image_base64(f"data:image/png;base64,{payload}", 1, 1)
+        result = self.vision._download_image_base64(
+            f"data:image/png;base64,{payload}",
+            1,
+            100,
+        )
 
         self.assertEqual(result, payload)
+
+        with self.assertRaises(self.vision.VisionError):
+            self.vision._download_image_base64(
+                f"data:image/png;base64,{payload}",
+                1,
+                1,
+            )
 
     def test_download_image_base64_accepts_local_paths_and_file_urls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -250,6 +261,46 @@ class VisionPureUnitTests(unittest.TestCase):
             successful_count=2,
             error=None,
         )
+
+    def test_production_image_description_uses_bailian_without_local_fallback(self):
+        config = types.SimpleNamespace()
+        cloud_result = types.SimpleNamespace(
+            content="角色双手捧着爱心，神情兴奋而可爱，表达出浓烈的爱意。"
+        )
+        with (
+            patch.object(
+                self.vision,
+                "request_aliyun_bailian_vision",
+                return_value=cloud_result,
+            ) as cloud_request,
+            patch.object(self.vision, "_ollama_chat_vision") as local_request,
+        ):
+            result = self.vision._bailian_chat_vision(config, "AAAA")
+
+        self.assertIn("浓烈的爱意", result)
+        cloud_request.assert_called_once_with(config, "AAAA", self.vision.VISION_PROMPT)
+        local_request.assert_not_called()
+
+    def test_production_cloud_failure_is_fixed_and_does_not_fallback(self):
+        failure = self.vision.AliyunBailianVisionError(
+            "cloud_vision_request_timeout",
+            "阿里云百炼视觉请求超时",
+        )
+        with (
+            patch.object(
+                self.vision,
+                "request_aliyun_bailian_vision",
+                side_effect=failure,
+            ),
+            patch.object(self.vision, "_ollama_chat_vision") as local_request,
+        ):
+            with self.assertRaisesRegex(
+                self.vision.VisionError,
+                "cloud_vision_request_timeout",
+            ):
+                self.vision._bailian_chat_vision(types.SimpleNamespace(), "AAAA")
+
+        local_request.assert_not_called()
 
     def test_describe_images_records_partial_batch_as_one_degraded_candidate(self):
         config = types.SimpleNamespace(

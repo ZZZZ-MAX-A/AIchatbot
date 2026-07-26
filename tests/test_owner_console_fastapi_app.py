@@ -126,7 +126,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(data["allowed_methods"], ["GET", "POST"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 16)
+        self.assertEqual(data["route_count"], 28)
         rows = {row["name"]: row for row in data["rows"]}
         self.assertEqual(
             rows["routes"]["path"],
@@ -164,6 +164,21 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(
             rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
         )
+        self.assertFalse(
+            rows["manual-diagnostics.tts-synthesis"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.tts-audio-preview"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.tts-audio-quality-accept"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.tts-audio-quality-reject"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.vision-inference"]["http_api_enabled"]
+        )
         self.assertFalse(data["manual_runtime_action_routes_enabled"])
         self.assertEqual(
             rows["manual-diagnostics.project-doc-rag"]["method"],
@@ -190,6 +205,24 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertTrue(
             rows["manual-diagnostics.main-llm-contract"][
+                "manual_runtime_action_allowed"
+            ]
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-synthesis"]["method"],
+            "POST",
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.tts-synthesis"][
+                "manual_runtime_action_allowed"
+            ]
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.vision-inference"]["method"],
+            "POST",
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.vision-inference"][
                 "manual_runtime_action_allowed"
             ]
         )
@@ -283,6 +316,93 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             rows["manual-diagnostics.memory-rag-consistency"]["http_api_enabled"]
         )
 
+    def test_tts_manual_action_route_requires_its_explicit_switch(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_CONSOLE_STATIC_ENABLED": "false",
+                "OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED": "true",
+                "OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED": "false",
+                "OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED": "false",
+                "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED": "false",
+                "OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = self.fastapi_app_module.create_owner_console_fastapi_app()
+        client = TestClient(app)
+
+        health = client.get("/healthz").json()
+        self.assertTrue(health["manual_diagnostic_actions_enabled"])
+        self.assertIn(
+            "/api/v1/owner-console/manual-diagnostics/tts-synthesis",
+            health["enabled_routes"],
+        )
+        rows = {
+            row["name"]: row
+            for row in client.get(
+                "/api/v1/owner-console/routes"
+            ).json()["data"]["rows"]
+        }
+        self.assertTrue(
+            rows["manual-diagnostics.tts-synthesis"]["http_api_enabled"]
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.tts-audio-preview"]["http_api_enabled"]
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.tts-audio-quality-accept"]["http_api_enabled"]
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.tts-audio-quality-reject"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
+        )
+
+    def test_vision_manual_action_route_requires_its_explicit_switch(self):
+        with patch.dict(
+            os.environ,
+            {
+                "OWNER_CONSOLE_STATIC_ENABLED": "false",
+                "OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED": "true",
+                "OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED": "false",
+                "OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED": "false",
+                "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED": "false",
+                "OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED": "false",
+                "OWNER_CONSOLE_VISION_INFERENCE_ENABLED": "false",
+                "OWNER_CONSOLE_CLOUD_VISION_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            app = self.fastapi_app_module.create_owner_console_fastapi_app()
+        client = TestClient(app)
+
+        health = client.get("/healthz").json()
+        self.assertTrue(health["manual_diagnostic_actions_enabled"])
+        self.assertIn(
+            "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description",
+            health["enabled_routes"],
+        )
+        rows = {
+            row["name"]: row
+            for row in client.get(
+                "/api/v1/owner-console/routes"
+            ).json()["data"]["rows"]
+        }
+        self.assertTrue(
+            rows["manual-diagnostics.cloud-vision-fixed-description"]["http_api_enabled"]
+        )
+        self.assertTrue(
+            rows["manual-diagnostics.cloud-vision-reference-preview"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.vision-inference"]["http_api_enabled"]
+        )
+        self.assertFalse(
+            rows["manual-diagnostics.tts-synthesis"]["http_api_enabled"]
+        )
+
     def test_app_only_exposes_enabled_get_routes_without_writes(self):
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
         self.assertEqual(self.client.get("/docs").status_code, 404)
@@ -335,6 +455,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             self.client.post(
                 "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
                 json={"confirmation": "run_registered_main_llm_contract"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis",
+                json={"confirmation": "run_registered_tts_synthesis"},
             ).status_code,
             403,
         )
@@ -1258,7 +1385,10 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         )
         self.assertIn("enable_main_agent=true", data["config"]["display_lines"])
         self.assertIn("main_agent_use_llm=false", data["config"]["display_lines"])
-        self.assertIn("vision_model=qwen2.5vl:3b", data["vision"]["display_lines"])
+        self.assertIn("vision_provider=aliyun_bailian", data["vision"]["display_lines"])
+        self.assertIn("vision_model=qwen3.7-flash", data["vision"]["display_lines"])
+        self.assertIn("vision_region=cn-beijing", data["vision"]["display_lines"])
+        self.assertIn("automatic_local_fallback=false", data["vision"]["display_lines"])
         self.assertIn("ollama_probe_executed=false", data["vision"]["display_lines"])
         self.assertIn(
             "vision_inference_executed=false",

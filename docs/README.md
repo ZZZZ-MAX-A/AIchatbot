@@ -6,13 +6,13 @@
 
 | 目的 | 首选文档 | 说明 |
 |---|---|---|
-| 查看当前阶段 | [current-development-status.md](current-development-status.md) | 当前完成项、延后项、安全边界和建议；不代表实时 Git 或进程状态 |
-| 查看实际完成记录 | [version-runlog.md](version-runlog.md) | 实现、测试、live 验收、补丁和经验 |
+| 查看当前阶段 | [current-development-status.md](current-development-status.md) | 唯一权威快照：主人批准方向、完成度、待办优先级、授权边界和唯一下一步；带时间的运行态不替代实时核对 |
+| 查看实际完成记录 | [version-runlog.md](version-runlog.md) | 按日期记录实现、测试、live 验收和补丁；历史“当前/下一步”不是当前授权 |
 | 启动和维护 Bot | [runbook.md](runbook.md) | 环境、启动、诊断、维护和常见故障 |
 | 使用或维护 RAG | [project-rag-usage.md](project-rag-usage.md) | MemoryRAG、ProjectDocRAG、DevContextGraph 和索引维护 |
 | 了解整体架构 | [architecture.md](architecture.md) | 基础架构草案 |
 | 了解未来方向 | [future-runtime-architecture.md](future-runtime-architecture.md) | 未来运行时方向，不等于已批准计划 |
-| 运行 Web Owner Console | [web-owner-console-v0-runbook.md](web-owner-console-v0-runbook.md) | 当前只读控制台的构建、启动、停止和排障 |
+| 运行 Web Owner Console | [web-owner-console-v0-runbook.md](web-owner-console-v0-runbook.md) | 业务只读控制台与逐项授权固定手动诊断的构建、启动、停止和排障 |
 | 阅读对外文章 | [juejin/](juejin/) | 按文章序号排列的稀土掘金草稿 |
 
 当前状态发生冲突时，人工判断顺序为：
@@ -26,6 +26,26 @@
 ```
 
 该顺序是阅读约定。普通 ProjectDocRAG 仍按语义相似度检索；只有正式主人研发上下文报告对 `current-development-status.md` 使用代码固定的当前状态锚点。
+
+### 1.1 权威快照内容合同
+
+`current-development-status.md` 不是缩短版运行日志。它必须固定包含：
+
+```text
+1. 快照元数据
+2. 当前主人批准方向
+3. 当前阶段已完成
+4. 当前阶段待完成
+5. 任务优先级
+6. 主人授权与禁止动作
+7. 已知问题和真实风险
+8. 唯一下一步
+9. 证据入口
+```
+
+已完成事项必须区分 `implemented`、`regression_passed`、`loaded`、`live_passed` 和 `owner_accepted`。待完成事项必须写明“是否仍存在、实际影响、优先级、批准状态、下一动作、可否自动开始”。只有明确标记为 `owner_approved` 的事项可以开始；高优先级、旧 backlog、历史“下一步”或一句未命名方向的“继续下一阶段”都不等于主人批准。
+
+快照目标为 8–15 KB、通常不超过 250 行、只保留 5–8 个近期完成项、恰好一个“唯一下一步”。进程、端口、数据库计数等会变化的事实必须带 `observed_at` 或明确标为历史；详细过程、旧重启状态和长测试流水放入 `version-runlog.md`，不继续累积在快照中。
 
 ## 2. 命名规则
 
@@ -115,12 +135,15 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 **MainAgent 与研发上下文**
 
 - [main-agent-command-capability-audit.md](main-agent-command-capability-audit.md)：`/agent` 严格命令、语义路由、工具/provider、真实读写、LLM/RAG、副作用、输出和测试覆盖的内部能力审计；不等同于 `/权限帮助`。
-- [main-agent-external-read-security-design.md](main-agent-external-read-security-design.md)：`system_diagnostics_report` 之后的外部只读安全设计；定义固定 provider、查询最小化、SSRF/redirect/DNS、内容注入、任务持久化与分步实现边界，当前不开放联网工具。
+- [main-agent-external-read-security-design.md](main-agent-external-read-security-design.md)：固定 Tavily 外部只读能力的安全设计与分刀历史；严格主人私聊命令已完成真实 live，普通聊天和 Main LLM 仍不可见。
 - [main-agent-first-readonly-work-task-design.md](main-agent-first-readonly-work-task-design.md)
 - [main-agent-useful-development-context-report-design.md](main-agent-useful-development-context-report-design.md)
-- [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：MainAgent 分区分层系统诊断；当前已注册 overview、vision、voice、memory_rag，并完成主人 QQ live 与语音服务层输出复验。
+- [main-agent-system-diagnostics-report-design.md](main-agent-system-diagnostics-report-design.md)：MainAgent 分区分层系统诊断。已提交并 live 的正式 scope 为 overview、vision、voice、memory_rag；未获方向批准的 core 本地实验已撤销，仅保留数据库探针 `connect_read_only()` 安全修正，不得从历史段落恢复。
 - [development-context-current-state-retrieval-design.md](development-context-current-state-retrieval-design.md)
 - [project-rag-document-state-consistency-audit.md](project-rag-document-state-consistency-audit.md)：稳定设计中的当前/历史状态一致性审计。
+- [main-agent-document-artifact-design.md](main-agent-document-artifact-design.md)：审批门控的 MainAgent TXT/DOCX/PPTX 产物设计。
+- [local-static-sticker-library-design.md](local-static-sticker-library-design.md)：本地静态/动态表情库及分类解耦设计。
+- [reliability-failure-taxonomy-and-inspection.md](reliability-failure-taxonomy-and-inspection.md)：可靠性失败分类与检查合同；`-inspection.md` 作为已进入 Git/RAG source_id 的兼容命名例外保留，不自动改名。
 
 **Web Owner Console**
 
@@ -130,10 +153,13 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 - [web-owner-console-frontend-contract-guard.md](web-owner-console-frontend-contract-guard.md)、[web-owner-console-local-deployment-design.md](web-owner-console-local-deployment-design.md)
 - [web-owner-console-readonly-auto-refresh-design.md](web-owner-console-readonly-auto-refresh-design.md)、[web-owner-console-v0-runbook.md](web-owner-console-v0-runbook.md)
 - [owner-console-fastapi-smoke-runbook.md](owner-console-fastapi-smoke-runbook.md)
+- [owner-console-reliability-usability-design.md](owner-console-reliability-usability-design.md)、[owner-console-diagnostics-usability-design.md](owner-console-diagnostics-usability-design.md)
+- [owner-console-manual-diagnostics-design.md](owner-console-manual-diagnostics-design.md)：P2.49 固定输入、二次确认、单次执行的手动诊断合同。
+- [owner-console-cloud-vision-diagnostic-design.md](owner-console-cloud-vision-diagnostic-design.md)：阿里云百炼北京地域 `qwen3.7-flash` 固定视觉诊断、生产主视觉和外发边界；隔离样本、Owner Console 页面和两张 QQ 生产图片均已由主人验收通过。
 
 **对外文章草稿**
 
-- [juejin/](juejin/)：当前按 `01` 至 `16` 排序；第 16 篇记录 MainAgent 运行故障路由、分区诊断和 QQ live 收口。文章可以解释设计取舍，但不能替代当前状态、运行手册或正式设计。
+- [juejin/](juejin/)：Git 已跟踪 `01`–`16`、`19`、`20`；`17`、`18` 是主人保留的未跟踪草稿，不得覆盖、暂存或提交。文章可以解释设计取舍，但不能替代当前状态、运行手册或正式设计。
 
 ## 5. 新增文档检查清单
 
@@ -146,6 +172,7 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 是否误把 P2 任务号写进长期文件名
 是否在本导航和相关领域文档中增加入口
 是否包含当前边界、非目标和验收方式
+是否把主人批准状态与候选 backlog 明确分开
 是否误写入密钥、环境值、私人路径、用户标识或日志正文
 是否需要重建 ProjectDocRAG
 ```

@@ -149,27 +149,22 @@ function Get-MissingModels {
     return $missing
 }
 
-$enableVision = Get-BoolConfig "ENABLE_VISION" $true
 $enableMemoryRag = Get-BoolConfig "ENABLE_MEMORY_RAG" $false
 $enableProjectDocRag = Get-BoolConfig "ENABLE_PROJECT_DOC_RAG" $false
 $embeddingProvider = (Get-ConfigValue "MEMORY_RAG_EMBEDDING_PROVIDER" "ollama").Trim().ToLowerInvariant()
 
-$needsOllama = $enableVision -or (($enableMemoryRag -or $enableProjectDocRag) -and $embeddingProvider -eq "ollama")
+$needsOllama = ($enableMemoryRag -or $enableProjectDocRag) -and $embeddingProvider -eq "ollama"
 if (-not $needsOllama) {
-    Write-Ensure "OK" "Ollama ensure skipped: vision and Ollama-backed RAG are disabled."
+    Write-Ensure "OK" "Ollama ensure skipped: Ollama-backed RAG is disabled."
     exit 0
 }
 
-$visionBaseUrl = Get-ConfigValue "VISION_OLLAMA_BASE_URL" "http://127.0.0.1:11434"
 $embeddingBaseUrl = Get-ConfigValue "MEMORY_RAG_EMBEDDING_BASE_URL" "http://127.0.0.1:11434"
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-    $BaseUrl = if ($enableVision) { $visionBaseUrl } else { $embeddingBaseUrl }
+    $BaseUrl = $embeddingBaseUrl
 }
 
 $requiredModels = @()
-if ($enableVision) {
-    $requiredModels += Get-ConfigValue "VISION_MODEL" "qwen2.5vl:3b"
-}
 if (($enableMemoryRag -or $enableProjectDocRag) -and $embeddingProvider -eq "ollama") {
     $requiredModels += Get-ConfigValue "MEMORY_RAG_EMBEDDING_MODEL" "bge-m3"
 }
@@ -186,7 +181,7 @@ try {
     $models = Get-ModelNames $tags
     $missing = Get-MissingModels $models $requiredModels
     if ($missing.Count -eq 0) {
-        Write-Ensure "OK" ("Ollama is ready. Models: " + ($models -join ", "))
+        Write-Ensure "OK" ("Ollama is ready. Required RAG model(s): " + ($requiredModels -join ", "))
         exit 0
     }
     Write-Ensure "WARN" ("Ollama is reachable, but required model(s) are missing: " + ($missing -join ", "))
@@ -226,7 +221,7 @@ do {
         $models = Get-ModelNames $tags
         $missing = Get-MissingModels $models $requiredModels
         if ($missing.Count -eq 0) {
-            Write-Ensure "OK" ("Ollama is ready after start. Models: " + ($models -join ", "))
+            Write-Ensure "OK" ("Ollama is ready after start. Required RAG model(s): " + ($requiredModels -join ", "))
             exit 0
         }
         Write-Ensure "WARN" ("Ollama started, but required model(s) are still missing: " + ($missing -join ", "))

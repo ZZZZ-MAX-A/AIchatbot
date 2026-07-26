@@ -300,12 +300,247 @@ export type OwnerConsoleMainLlmContractRun = {
   response_content_exposed: boolean;
 };
 
+export type OwnerConsoleTtsSynthesisRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  runtime_feature_enabled: boolean;
+  service_health_checked: boolean;
+  service_healthy: boolean;
+  model_loaded_before: boolean;
+  runtime_imported_before: boolean;
+  model_load_may_have_occurred: boolean;
+  configured_voice_present: boolean;
+  tts_called: boolean;
+  output_contract_valid: boolean;
+  output_file_created: boolean;
+  output_bytes: number;
+  output_duration_ms: number;
+  output_retained: boolean;
+  partial_artifact_state: string;
+  health_elapsed_ms: number;
+  synthesis_elapsed_ms: number;
+  elapsed_ms: number;
+  fixed_text: string;
+  technical_outcome: string;
+  technical_code: string;
+  audio_preview_available: boolean;
+  audio_quality_review_required: boolean;
+  audio_quality_reviewed: boolean;
+  audio_quality_accepted: boolean | null;
+  audio_reviewed_at: string;
+  owner_triggered: boolean;
+  service_preexisting: boolean;
+  service_start_attempted: boolean;
+  service_started: boolean;
+  service_owned_by_diagnostic: boolean;
+  service_stop_attempted: boolean;
+  service_stopped: boolean;
+  segment_directory_retained: boolean;
+  artifact_cleanup_attempted: boolean;
+  artifact_cleanup_succeeded: boolean;
+  startup_elapsed_ms: number;
+  cleanup_elapsed_ms: number;
+  automatic_retry: boolean;
+  qq_write_executed: boolean;
+  reliability_event_written: boolean;
+  database_write_allowed: boolean;
+  local_file_write_expected: boolean;
+  cleanup_executed: boolean;
+  chat_history_read: boolean;
+  memory_rag_called: boolean;
+  project_doc_rag_called: boolean;
+  dev_context_called: boolean;
+  combined_rag_called: boolean;
+  main_llm_called: boolean;
+  vision_called: boolean;
+  prompt_exposed: boolean;
+  response_content_exposed: boolean;
+  output_path_exposed: boolean;
+  fixed_text_exposed: boolean;
+  audio_preview_persisted: boolean;
+  audio_preview_path_exposed: boolean;
+  audio_review_action_executed: boolean;
+};
+
+export type OwnerConsoleVisionInferenceRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  configured_model: string;
+  runtime_feature_enabled: boolean;
+  fixed_image_contract: string;
+  fixed_image_bytes: number;
+  fixed_image_contract_valid: boolean;
+  reference_sticker_id: string;
+  registered_reference_asset_read: boolean;
+  expected_answer_disclosed_in_prompt: boolean;
+  service_tags_checked: boolean;
+  service_healthy: boolean;
+  service_preexisting: boolean;
+  service_start_attempted: boolean;
+  service_started: boolean;
+  service_owned_by_diagnostic: boolean;
+  service_ownership_basis: string;
+  service_stop_attempted: boolean;
+  service_stopped: boolean;
+  model_available: boolean;
+  model_residency_checked: boolean;
+  model_loaded_before: boolean;
+  keep_alive_zero_used: boolean;
+  vision_called: boolean;
+  response_contract_valid: boolean;
+  response_mode: string;
+  structured_output_requested: boolean;
+  semantic_contract_automatically_validated: boolean;
+  owner_visual_judgment_required: boolean;
+  response_preview: string;
+  response_description: string;
+  response_content_exposed_to_owner: boolean;
+  usage_metadata_available: boolean;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  model_cleanup_required: boolean;
+  model_cleanup_verified: boolean;
+  model_cleanup_poll_count: number;
+  startup_elapsed_ms: number;
+  discovery_elapsed_ms: number;
+  residency_elapsed_ms: number;
+  inference_elapsed_ms: number;
+  cleanup_elapsed_ms: number;
+  elapsed_ms: number;
+  technical_outcome: string;
+  technical_code: string;
+  reference_preview_available: boolean;
+  visual_quality_review_required: boolean;
+  visual_quality_reviewed: boolean;
+  visual_quality_accepted: boolean | null;
+  visual_reviewed_at: string;
+  visual_review_action_executed: boolean;
+  response_preview_persisted: boolean;
+  response_preview_path_exposed: boolean;
+  reference_image_exposed_to_owner: boolean;
+  owner_triggered: boolean;
+  client_automatic_retry: boolean;
+  tool_definitions_sent: boolean;
+  qq_write_executed: boolean;
+  reliability_event_written: boolean;
+  database_write_allowed: boolean;
+  project_file_write_allowed: boolean;
+  project_artifact_write_expected: boolean;
+  external_runtime_local_write_possible: boolean;
+  model_pull_allowed: boolean;
+  chat_history_read: boolean;
+  memory_rag_called: boolean;
+  project_doc_rag_called: boolean;
+  dev_context_called: boolean;
+  combined_rag_called: boolean;
+  main_llm_called: boolean;
+  tts_called: boolean;
+  image_content_exposed: boolean;
+  response_content_exposed: boolean;
+};
+
+export type OwnerConsoleCloudVisionRun = {
+  run_id: number;
+  workflow: string;
+  status: string;
+  outcome: string;
+  stage: string;
+  code: string;
+  code_label: string;
+  started_at: string;
+  finished_at: string;
+  attempt_count: number;
+  provider: string;
+  region: string;
+  configured_model: string;
+  returned_model: string;
+  runtime_feature_enabled: boolean;
+  endpoint_contract_valid: boolean;
+  workspace_configured: boolean;
+  credentials_configured: boolean;
+  fixed_image_contract: string;
+  fixed_image_bytes: number;
+  fixed_image_contract_valid: boolean;
+  reference_sticker_id: string;
+  registered_reference_asset_read: boolean;
+  external_image_upload_planned: boolean;
+  external_image_upload_executed: boolean;
+  provider_side_persistence_controlled_by_app: boolean;
+  cloud_vision_called: boolean;
+  request_count: number;
+  client_automatic_retry: boolean;
+  tool_definitions_sent: boolean;
+  thinking_enabled: boolean;
+  response_mode: string;
+  structured_output_requested: boolean;
+  semantic_contract_automatically_validated: boolean;
+  owner_visual_judgment_required: boolean;
+  response_contract_valid: boolean;
+  response_preview: string;
+  response_description: string;
+  response_cleanup_applied: boolean;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  request_elapsed_ms: number;
+  technical_outcome: string;
+  technical_code: string;
+  reference_preview_available: boolean;
+  visual_quality_review_required: boolean;
+  visual_quality_reviewed: boolean;
+  visual_quality_accepted: boolean | null;
+  visual_reviewed_at: string;
+  visual_review_action_executed: boolean;
+  owner_triggered: boolean;
+  api_key_exposed: boolean;
+  workspace_id_exposed: boolean;
+  image_base64_exposed: boolean;
+  response_preview_persisted: boolean;
+  local_gpu_model_loaded: boolean;
+  database_write_allowed: boolean;
+  project_artifact_write_expected: boolean;
+  reliability_event_written: boolean;
+  qq_write_executed: boolean;
+  chat_history_written: boolean;
+  agent_task_written: boolean;
+  approval_written: boolean;
+  memory_rag_called: boolean;
+  project_doc_rag_called: boolean;
+  dev_context_called: boolean;
+  combined_rag_called: boolean;
+  main_llm_called: boolean;
+  tts_called: boolean;
+  local_vision_called: boolean;
+};
+
 export type OwnerConsoleManualDiagnosticsSnapshot = {
   generated_at: string;
   manual_diagnostic_actions_enabled: boolean;
   project_doc_rag_probe_enabled: boolean;
   memory_rag_consistency_enabled: boolean;
   main_llm_contract_enabled: boolean;
+  tts_synthesis_enabled: boolean;
+  vision_inference_enabled: boolean;
+  cloud_vision_enabled: boolean;
+  cloud_vision_workspace_configured: boolean;
+  cloud_vision_credentials_configured: boolean;
   automatic_diagnostics_enabled: boolean;
   configuration_write_enabled: boolean;
   business_data_write_enabled: boolean;
@@ -314,10 +549,16 @@ export type OwnerConsoleManualDiagnosticsSnapshot = {
     | OwnerConsoleManualDiagnosticRun
     | OwnerConsoleMemoryRagConsistencyRun
     | OwnerConsoleMainLlmContractRun
+    | OwnerConsoleTtsSynthesisRun
+    | OwnerConsoleVisionInferenceRun
+    | OwnerConsoleCloudVisionRun
     | null;
   project_doc_rag_latest_run: OwnerConsoleManualDiagnosticRun | null;
   memory_rag_consistency_latest_run: OwnerConsoleMemoryRagConsistencyRun | null;
   main_llm_contract_latest_run: OwnerConsoleMainLlmContractRun | null;
+  tts_synthesis_latest_run: OwnerConsoleTtsSynthesisRun | null;
+  vision_inference_latest_run: OwnerConsoleVisionInferenceRun | null;
+  cloud_vision_latest_run: OwnerConsoleCloudVisionRun | null;
 };
 
 export type OwnerConsoleManualDiagnosticsEnvelope =
@@ -339,6 +580,15 @@ export type OwnerConsoleMemoryRagConsistencyEnvelope =
 
 export type OwnerConsoleMainLlmContractEnvelope =
   OwnerConsoleActionEnvelope<OwnerConsoleMainLlmContractRun>;
+
+export type OwnerConsoleTtsSynthesisEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleTtsSynthesisRun>;
+
+export type OwnerConsoleVisionInferenceEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleVisionInferenceRun>;
+
+export type OwnerConsoleCloudVisionEnvelope =
+  OwnerConsoleActionEnvelope<OwnerConsoleCloudVisionRun>;
 
 export type OwnerConsoleMemoryCounts = {
   message_count: number;

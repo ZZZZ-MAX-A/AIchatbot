@@ -21,11 +21,18 @@ class OwnerConsoleFastApiLauncherTests(unittest.TestCase):
         self.assertIn("[switch]$EnableProjectDocRagProbe", script)
         self.assertIn("[switch]$EnableMemoryRagConsistencyProbe", script)
         self.assertIn("[switch]$EnableMainLlmContractProbe", script)
+        self.assertIn("[switch]$EnableTtsSynthesisProbe", script)
+        self.assertIn("[switch]$EnableCloudVisionProbe", script)
         self.assertIn("$EnableProjectDocRagProbe -or", script)
         self.assertIn("$EnableMemoryRagConsistencyProbe -or", script)
         self.assertIn("$EnableMainLlmContractProbe", script)
+        self.assertIn("$EnableTtsSynthesisProbe", script)
+        self.assertIn("$EnableCloudVisionProbe", script)
         self.assertIn("OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED", script)
         self.assertIn("OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED", script)
+        self.assertIn("OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED", script)
+        self.assertIn("OWNER_CONSOLE_VISION_INFERENCE_ENABLED", script)
+        self.assertIn("OWNER_CONSOLE_CLOUD_VISION_ENABLED", script)
 
     def test_launcher_import_does_not_execute_ai_chat_plugin_entrypoint(self):
         script = """
@@ -79,8 +86,20 @@ print(json.dumps(payload, sort_keys=True))
                 "/api/v1/owner-console/reliability",
                 "/api/v1/owner-console/manual-diagnostics",
                 "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-preview/{run_id}",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/reject",
                 "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
                 "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/reference-preview",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/response-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/response-quality/reject",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
             ],
         )
 

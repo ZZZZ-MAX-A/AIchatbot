@@ -5,6 +5,8 @@ param(
     [switch]$EnableProjectDocRagProbe,
     [switch]$EnableMemoryRagConsistencyProbe,
     [switch]$EnableMainLlmContractProbe,
+    [switch]$EnableTtsSynthesisProbe,
+    [switch]$EnableCloudVisionProbe,
     [switch]$Build,
     [switch]$Foreground,
     [switch]$CheckOnly
@@ -132,12 +134,17 @@ $env:OWNER_CONSOLE_STATIC_DIR = $StaticDir
 $manualDiagnosticsEnabled = (
     $EnableProjectDocRagProbe -or
     $EnableMemoryRagConsistencyProbe -or
-    $EnableMainLlmContractProbe
+    $EnableMainLlmContractProbe -or
+    $EnableTtsSynthesisProbe -or
+    $EnableCloudVisionProbe
 )
 $env:OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED = if ($manualDiagnosticsEnabled) { "true" } else { "false" }
 $env:OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED = if ($EnableProjectDocRagProbe) { "true" } else { "false" }
 $env:OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED = if ($EnableMemoryRagConsistencyProbe) { "true" } else { "false" }
 $env:OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = if ($EnableMainLlmContractProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED = if ($EnableTtsSynthesisProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_VISION_INFERENCE_ENABLED = "false"
+$env:OWNER_CONSOLE_CLOUD_VISION_ENABLED = if ($EnableCloudVisionProbe) { "true" } else { "false" }
 
 $arguments = @(
     "-m",

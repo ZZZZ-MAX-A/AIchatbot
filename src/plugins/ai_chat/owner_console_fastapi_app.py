@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .agent_tasks import AGENT_APPROVAL_STATUSES, AGENT_TASK_STATUSES
@@ -38,8 +38,32 @@ from .owner_console_manual_diagnostics import (
     MEMORY_RAG_CONSISTENCY_CONFIRMATION,
     PROJECT_DOC_RAG_PROBE_ACTION_HEADER,
     PROJECT_DOC_RAG_PROBE_CONFIRMATION,
+    TTS_AUDIO_PREVIEW_ACTION_HEADER,
+    TTS_AUDIO_QUALITY_ACCEPT_ACTION_HEADER,
+    TTS_AUDIO_QUALITY_ACCEPT_CONFIRMATION,
+    TTS_AUDIO_QUALITY_REJECT_ACTION_HEADER,
+    TTS_AUDIO_QUALITY_REJECT_CONFIRMATION,
+    TTS_SYNTHESIS_ACTION_HEADER,
+    TTS_SYNTHESIS_CONFIRMATION,
+    VISION_INFERENCE_ACTION_HEADER,
+    VISION_INFERENCE_CONFIRMATION,
+    VISION_REFERENCE_PREVIEW_ACTION_HEADER,
+    VISION_RESPONSE_QUALITY_ACCEPT_ACTION_HEADER,
+    VISION_RESPONSE_QUALITY_ACCEPT_CONFIRMATION,
+    VISION_RESPONSE_QUALITY_REJECT_ACTION_HEADER,
+    VISION_RESPONSE_QUALITY_REJECT_CONFIRMATION,
+    CLOUD_VISION_ACTION_HEADER,
+    CLOUD_VISION_CONFIRMATION,
+    CLOUD_VISION_REFERENCE_PREVIEW_ACTION_HEADER,
+    CLOUD_VISION_RESPONSE_QUALITY_ACCEPT_ACTION_HEADER,
+    CLOUD_VISION_RESPONSE_QUALITY_ACCEPT_CONFIRMATION,
+    CLOUD_VISION_RESPONSE_QUALITY_REJECT_ACTION_HEADER,
+    CLOUD_VISION_RESPONSE_QUALITY_REJECT_CONFIRMATION,
     OwnerConsoleManualDiagnosticBusy,
     OwnerConsoleManualDiagnosticDisabled,
+    OwnerConsoleTtsAudioReviewUnavailable,
+    OwnerConsoleVisionReviewUnavailable,
+    OwnerConsoleCloudVisionReviewUnavailable,
     create_owner_console_manual_diagnostics_runtime,
 )
 from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT, OWNER_CONSOLE_WORK_TYPES
@@ -61,6 +85,11 @@ OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED_ENV = (
 OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED_ENV = (
     "OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED"
 )
+OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED_ENV = "OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED"
+OWNER_CONSOLE_VISION_INFERENCE_ENABLED_ENV = (
+    "OWNER_CONSOLE_VISION_INFERENCE_ENABLED"
+)
+OWNER_CONSOLE_CLOUD_VISION_ENABLED_ENV = "OWNER_CONSOLE_CLOUD_VISION_ENABLED"
 OWNER_CONSOLE_ACTION_COOKIE = "owner_console_action_session"
 OWNER_CONSOLE_ACTION_HEADER = "x-owner-console-action"
 OWNER_CONSOLE_DEFAULT_STATIC_DIR = PROJECT_ROOT / "web" / "owner-console" / "dist"
@@ -138,6 +167,27 @@ def _owner_console_memory_rag_consistency_enabled() -> bool:
 def _owner_console_main_llm_contract_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_tts_synthesis_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_vision_inference_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_VISION_INFERENCE_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_cloud_vision_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_CLOUD_VISION_ENABLED_ENV,
         False,
     )
 
@@ -303,8 +353,14 @@ def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
         ],
         vision=[
             f"enable_vision={_owner_console_bool(config.enable_vision)}",
-            f"vision_model={config.vision_model}",
-            f"vision_num_ctx={config.vision_num_ctx}",
+            f"vision_provider={getattr(config, 'vision_provider', 'aliyun_bailian')}",
+            f"vision_model={getattr(config, 'vision_cloud_model', 'qwen3.7-flash')}",
+            "vision_region=cn-beijing",
+            f"workspace_configured={_owner_console_bool(bool(str(getattr(config, 'aliyun_bailian_base_url', '') or '').strip()))}",
+            f"credentials_configured={_owner_console_bool(bool(str(getattr(config, 'aliyun_bailian_api_key', '') or '').strip()))}",
+            "thinking_enabled=false",
+            "client_automatic_retry=false",
+            "automatic_local_fallback=false",
             f"vision_max_images={config.vision_max_images}",
             "ollama_probe_executed=false",
             "vision_inference_executed=false",
@@ -395,6 +451,9 @@ def create_owner_console_fastapi_app(
             main_llm_contract_enabled=(
                 _owner_console_main_llm_contract_enabled()
             ),
+            tts_synthesis_enabled=_owner_console_tts_synthesis_enabled(),
+            vision_inference_enabled=False,
+            cloud_vision_enabled=_owner_console_cloud_vision_enabled(),
         )
     manual_snapshot = manual_runtime.build_snapshot()
     project_doc_rag_action_enabled = bool(
@@ -406,10 +465,18 @@ def create_owner_console_fastapi_app(
     main_llm_action_enabled = bool(
         manual_snapshot.main_llm_contract_enabled
     )
+    tts_action_enabled = bool(manual_snapshot.tts_synthesis_enabled)
+    vision_action_enabled = bool(manual_snapshot.vision_inference_enabled)
+    cloud_vision_action_enabled = bool(
+        getattr(manual_snapshot, "cloud_vision_enabled", False)
+    )
     manual_action_enabled = bool(
         project_doc_rag_action_enabled
         or memory_rag_action_enabled
         or main_llm_action_enabled
+        or tts_action_enabled
+        or vision_action_enabled
+        or cloud_vision_action_enabled
     )
     enabled_route_names = set(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES)
     enabled_routes = list(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES)
@@ -430,6 +497,54 @@ def create_owner_console_fastapi_app(
         enabled_routes.append(
             f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
             "/manual-diagnostics/main-llm-contract"
+        )
+    if tts_action_enabled:
+        enabled_route_names.update(
+            {
+                "manual-diagnostics.tts-synthesis",
+                "manual-diagnostics.tts-audio-preview",
+                "manual-diagnostics.tts-audio-quality-accept",
+                "manual-diagnostics.tts-audio-quality-reject",
+            }
+        )
+        enabled_routes.extend(
+            [
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/tts-synthesis",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/tts-synthesis/audio-preview/{run_id}",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/tts-synthesis/audio-quality/accept",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/tts-synthesis/audio-quality/reject",
+            ]
+        )
+    if vision_action_enabled:
+        enabled_route_names.add("manual-diagnostics.vision-inference")
+        enabled_routes.append(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+            "/manual-diagnostics/vision-inference"
+        )
+    if cloud_vision_action_enabled:
+        enabled_route_names.update(
+            {
+                "manual-diagnostics.cloud-vision-fixed-description",
+                "manual-diagnostics.cloud-vision-reference-preview",
+                "manual-diagnostics.cloud-vision-response-quality-accept",
+                "manual-diagnostics.cloud-vision-response-quality-reject",
+            }
+        )
+        enabled_routes.extend(
+            [
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/cloud-vision-fixed-description",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+                "/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
+            ]
         )
     action_token = action_session_token or secrets.token_urlsafe(32)
 
@@ -948,6 +1063,211 @@ def create_owner_console_fastapi_app(
             )
         return _owner_console_action_success(resource, result)
 
+    @app.get(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/tts-synthesis/audio-preview/{run_id}",
+        response_model=None,
+    )
+    async def owner_console_tts_audio_preview(
+        request: Request,
+        run_id: int,
+    ) -> Any:
+        resource = "manual-diagnostics/tts-synthesis/audio-preview"
+        if not tts_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        host = request.headers.get("host", "").strip().lower()
+        if not host or not _owner_console_loopback_host(host):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio preview requires a loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            TTS_AUDIO_PREVIEW_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio preview header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio preview session is invalid",
+            )
+        if isinstance(run_id, bool) or run_id <= 0:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="TTS audio preview run is invalid",
+            )
+        try:
+            content = await run_in_threadpool(
+                manual_runtime.read_tts_audio_preview,
+                run_id,
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        except OwnerConsoleTtsAudioReviewUnavailable:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="TTS audio preview is unavailable",
+            )
+        return Response(
+            content=content,
+            media_type="audio/wav",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": "inline",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def review_tts_audio_quality(
+        request: Request,
+        *,
+        resource: str,
+        expected_header: str,
+        expected_confirmation: str,
+        accepted: bool,
+    ) -> Any:
+        if not tts_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio review requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != expected_header:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio review header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS audio review session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="TTS audio review requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"confirmation", "run_id"}
+            or body.get("confirmation") != expected_confirmation
+            or isinstance(body.get("run_id"), bool)
+            or not isinstance(body.get("run_id"), int)
+            or body["run_id"] <= 0
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="TTS audio review confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.review_tts_audio_quality,
+                body["run_id"],
+                accepted=accepted,
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        except (OwnerConsoleManualDiagnosticBusy, OwnerConsoleTtsAudioReviewUnavailable):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="TTS audio review is unavailable",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/tts-synthesis/audio-quality/accept",
+        response_model=None,
+    )
+    async def owner_console_tts_audio_quality_accept(request: Request) -> Any:
+        return await review_tts_audio_quality(
+            request,
+            resource="manual-diagnostics/tts-synthesis/audio-quality/accept",
+            expected_header=TTS_AUDIO_QUALITY_ACCEPT_ACTION_HEADER,
+            expected_confirmation=TTS_AUDIO_QUALITY_ACCEPT_CONFIRMATION,
+            accepted=True,
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/tts-synthesis/audio-quality/reject",
+        response_model=None,
+    )
+    async def owner_console_tts_audio_quality_reject(request: Request) -> Any:
+        return await review_tts_audio_quality(
+            request,
+            resource="manual-diagnostics/tts-synthesis/audio-quality/reject",
+            expected_header=TTS_AUDIO_QUALITY_REJECT_ACTION_HEADER,
+            expected_confirmation=TTS_AUDIO_QUALITY_REJECT_CONFIRMATION,
+            accepted=False,
+        )
+
     @app.post(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
         "/manual-diagnostics/memory-rag-consistency",
@@ -1107,6 +1427,662 @@ def create_owner_console_fastapi_app(
                 message="another manual diagnostic is already running",
             )
         return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/tts-synthesis",
+        response_model=None,
+    )
+    async def owner_console_tts_synthesis(request: Request) -> Any:
+        resource = "manual-diagnostics/tts-synthesis"
+        if not tts_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            TTS_SYNTHESIS_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": TTS_SYNTHESIS_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(manual_runtime.run_tts_synthesis)
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="TTS synthesis diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/vision-inference",
+        response_model=None,
+    )
+    async def owner_console_vision_inference(request: Request) -> Any:
+        resource = "manual-diagnostics/vision-inference"
+        if not vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            VISION_INFERENCE_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": VISION_INFERENCE_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.run_vision_inference
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.get(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/vision-inference/reference-preview",
+        response_model=None,
+    )
+    async def owner_console_vision_reference_preview(
+        request: Request,
+    ) -> Any:
+        resource = "manual-diagnostics/vision-inference/reference-preview"
+        if not vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        host = request.headers.get("host", "").strip().lower()
+        if not host or not _owner_console_loopback_host(host):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision reference preview requires a loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            VISION_REFERENCE_PREVIEW_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision reference preview header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision reference preview session is invalid",
+            )
+        try:
+            content = await run_in_threadpool(
+                manual_runtime.read_vision_reference_preview
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        except (
+            OwnerConsoleManualDiagnosticBusy,
+            OwnerConsoleVisionReviewUnavailable,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="vision reference preview is unavailable",
+            )
+        return Response(
+            content=content,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": "inline",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def review_vision_response_quality(
+        request: Request,
+        *,
+        resource: str,
+        expected_header: str,
+        expected_confirmation: str,
+        accepted: bool,
+    ) -> Any:
+        if not vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision response review requires a same-origin request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != expected_header:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision response review header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision response review session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="vision response review requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"confirmation", "run_id"}
+            or body.get("confirmation") != expected_confirmation
+            or isinstance(body.get("run_id"), bool)
+            or not isinstance(body.get("run_id"), int)
+            or body["run_id"] <= 0
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="vision response review confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.review_vision_response_quality,
+                body["run_id"],
+                accepted=accepted,
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="vision inference diagnostic is disabled",
+            )
+        except (
+            OwnerConsoleManualDiagnosticBusy,
+            OwnerConsoleVisionReviewUnavailable,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="vision response review is unavailable",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/vision-inference/response-quality/accept",
+        response_model=None,
+    )
+    async def owner_console_vision_response_quality_accept(
+        request: Request,
+    ) -> Any:
+        return await review_vision_response_quality(
+            request,
+            resource=(
+                "manual-diagnostics/vision-inference/response-quality/accept"
+            ),
+            expected_header=VISION_RESPONSE_QUALITY_ACCEPT_ACTION_HEADER,
+            expected_confirmation=(
+                VISION_RESPONSE_QUALITY_ACCEPT_CONFIRMATION
+            ),
+            accepted=True,
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/vision-inference/response-quality/reject",
+        response_model=None,
+    )
+    async def owner_console_vision_response_quality_reject(
+        request: Request,
+    ) -> Any:
+        return await review_vision_response_quality(
+            request,
+            resource=(
+                "manual-diagnostics/vision-inference/response-quality/reject"
+            ),
+            expected_header=VISION_RESPONSE_QUALITY_REJECT_ACTION_HEADER,
+            expected_confirmation=(
+                VISION_RESPONSE_QUALITY_REJECT_CONFIRMATION
+            ),
+            accepted=False,
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/cloud-vision-fixed-description",
+        response_model=None,
+    )
+    async def owner_console_cloud_vision_fixed_description(
+        request: Request,
+    ) -> Any:
+        resource = "manual-diagnostics/cloud-vision-fixed-description"
+        if not cloud_vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            CLOUD_VISION_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="manual diagnostic action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": CLOUD_VISION_CONFIRMATION}:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="manual diagnostic confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.run_cloud_vision_fixed_description
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        except OwnerConsoleManualDiagnosticBusy:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="another manual diagnostic is already running",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.get(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+        response_model=None,
+    )
+    async def owner_console_cloud_vision_reference_preview(
+        request: Request,
+    ) -> Any:
+        resource = (
+            "manual-diagnostics/cloud-vision-fixed-description/reference-preview"
+        )
+        if not cloud_vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        host = request.headers.get("host", "").strip().lower()
+        if not host or not _owner_console_loopback_host(host):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision reference preview requires a loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            CLOUD_VISION_REFERENCE_PREVIEW_ACTION_HEADER
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision reference preview header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision reference preview session is invalid",
+            )
+        try:
+            content = await run_in_threadpool(
+                manual_runtime.read_cloud_vision_reference_preview
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        except (
+            OwnerConsoleManualDiagnosticBusy,
+            OwnerConsoleCloudVisionReviewUnavailable,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="cloud vision reference preview is unavailable",
+            )
+        return Response(
+            content=content,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": "inline",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def review_cloud_vision_response_quality(
+        request: Request,
+        *,
+        resource: str,
+        expected_header: str,
+        expected_confirmation: str,
+        accepted: bool,
+    ) -> Any:
+        if not cloud_vision_action_enabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision response review requires a same-origin request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != expected_header:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision response review header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(
+            cookie_token,
+            action_token,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision response review session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="cloud vision response review requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"confirmation", "run_id"}
+            or body.get("confirmation") != expected_confirmation
+            or isinstance(body.get("run_id"), bool)
+            or not isinstance(body.get("run_id"), int)
+            or body["run_id"] <= 0
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="cloud vision response review confirmation is invalid",
+            )
+        try:
+            result = await run_in_threadpool(
+                manual_runtime.review_cloud_vision_response_quality,
+                body["run_id"],
+                accepted=accepted,
+            )
+        except OwnerConsoleManualDiagnosticDisabled:
+            return _owner_console_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="cloud vision diagnostic is disabled",
+            )
+        except (
+            OwnerConsoleManualDiagnosticBusy,
+            OwnerConsoleCloudVisionReviewUnavailable,
+        ):
+            return _owner_console_action_error_response(
+                resource,
+                status_code=409,
+                code="conflict",
+                message="cloud vision response review is unavailable",
+            )
+        return _owner_console_action_success(resource, result)
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+        response_model=None,
+    )
+    async def owner_console_cloud_vision_response_quality_accept(
+        request: Request,
+    ) -> Any:
+        return await review_cloud_vision_response_quality(
+            request,
+            resource=(
+                "manual-diagnostics/cloud-vision-fixed-description/response-quality/accept"
+            ),
+            expected_header=CLOUD_VISION_RESPONSE_QUALITY_ACCEPT_ACTION_HEADER,
+            expected_confirmation=(
+                CLOUD_VISION_RESPONSE_QUALITY_ACCEPT_CONFIRMATION
+            ),
+            accepted=True,
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
+        "/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
+        response_model=None,
+    )
+    async def owner_console_cloud_vision_response_quality_reject(
+        request: Request,
+    ) -> Any:
+        return await review_cloud_vision_response_quality(
+            request,
+            resource=(
+                "manual-diagnostics/cloud-vision-fixed-description/response-quality/reject"
+            ),
+            expected_header=CLOUD_VISION_RESPONSE_QUALITY_REJECT_ACTION_HEADER,
+            expected_confirmation=(
+                CLOUD_VISION_RESPONSE_QUALITY_REJECT_CONFIRMATION
+            ),
+            accepted=False,
+        )
 
     if _owner_console_static_enabled():
         _register_owner_console_static_routes(

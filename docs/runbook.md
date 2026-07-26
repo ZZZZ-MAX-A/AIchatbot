@@ -1023,7 +1023,7 @@ cd D:\AIchatbot
 .\scripts\start.ps1
 ```
 
-`scripts/start.ps1` 会先调用 `scripts/ensure-ollama.ps1`：如果视觉或 Ollama-backed RAG 需要本地 Ollama，它会检查 `http://127.0.0.1:11434/api/tags`，确认 `qwen2.5vl:3b` / `bge-m3` 等必需模型是否可见；如果 11434 未监听或模型目录被托盘版 Ollama 接管，会调用 `scripts/start-ollama-vision.ps1` 用 `OLLAMA_MODELS=D:\OllamaModels` 重新拉起本地 `ollama serve`。
+`scripts/start.ps1` 会先调用 `scripts/ensure-ollama.ps1`，但百炼生产视觉不再构成本地 Ollama 依赖：`ENABLE_VISION=true` 不会检查 `VISION_MODEL/qwen2.5vl:3b`，也不会因此启动或重启 Ollama。只有启用 MemoryRAG 或 ProjectDocRAG、且 `MEMORY_RAG_EMBEDDING_PROVIDER=ollama` 时，脚本才检查 embedding endpoint 与 `MEMORY_RAG_EMBEDDING_MODEL`（默认 `bge-m3`）；若该必要的本地 RAG 依赖不就绪，才沿用受控 Ollama 启动逻辑。
 
 临时跳过启动前 Ollama 自检：
 

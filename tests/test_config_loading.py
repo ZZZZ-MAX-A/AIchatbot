@@ -65,6 +65,10 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
         self.assertEqual(config.chat_llm_model, "deepseek-v4-flash")
         self.assertEqual(config.chat_llm_timeout_seconds, config.ai_timeout_seconds)
+        self.assertEqual(config.vision_provider, "aliyun_bailian")
+        self.assertEqual(config.vision_cloud_model, "qwen3.7-flash")
+        self.assertEqual(config.aliyun_bailian_base_url, "")
+        self.assertEqual(config.aliyun_bailian_api_key, "")
         self.assertFalse(config.enable_memory_rag)
         self.assertFalse(config.enable_project_doc_rag)
         self.assertEqual(config.memory_rag_embedding_provider, "ollama")
@@ -159,6 +163,10 @@ class ConfigLoadingTests(unittest.TestCase):
                 "ENABLE_AGENT_EXTERNAL_WRITE": "yes",
                 "ENABLE_AGENT_SHELL": "on",
                 "ENABLE_CHAT_GRAPH_RUNTIME": "true",
+                "ALIYUN_BAILIAN_BASE_URL": (
+                    "https://ws-unit123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+                ),
+                "ALIYUN_BAILIAN_API_KEY": "bailian-secret",
                 "ENABLE_LOCAL_STICKERS": "true",
                 "LOCAL_STICKER_MAX_FILE_BYTES": "1024",
                 "LOCAL_STICKER_MAX_DYNAMIC_FILE_BYTES": "2048",
@@ -225,6 +233,14 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertTrue(config.enable_agent_external_write)
         self.assertTrue(config.enable_agent_shell)
         self.assertTrue(config.enable_chat_graph_runtime)
+        self.assertEqual(config.vision_provider, "aliyun_bailian")
+        self.assertEqual(config.vision_cloud_model, "qwen3.7-flash")
+        self.assertEqual(
+            config.aliyun_bailian_base_url,
+            "https://ws-unit123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        )
+        self.assertEqual(config.aliyun_bailian_api_key, "bailian-secret")
+        self.assertNotIn("bailian-secret", repr(config))
         self.assertTrue(config.enable_local_stickers)
         self.assertEqual(config.local_sticker_max_file_bytes, 1024)
         self.assertEqual(config.local_sticker_max_dynamic_file_bytes, 2048)

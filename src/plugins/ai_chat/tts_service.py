@@ -1,15 +1,17 @@
 import asyncio
 import gc
+import hashlib
 import json
+import os
+import re
 import sys
 import time
 import uuid
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-import torch
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -22,9 +24,6 @@ TEMP_DIR = PROJECT_ROOT / "temp_audio"
 if str(INDEXTTS_ROOT) not in sys.path:
     sys.path.insert(0, str(INDEXTTS_ROOT))
 
-from indextts.infer_v2 import IndexTTS2  # noqa: E402
-
-
 EMOTION_PRESETS = {
     "calm": {"emo_last": 0.25, "emo_alpha": 0.5},
     "affection": {"emo_last": 0.35, "emo_alpha": 0.55},
@@ -35,6 +34,12 @@ EMOTION_PRESETS = {
 IDLE_UNLOAD_SECONDS = 600
 DEFAULT_MAX_MEL_TOKENS = 700
 DEFAULT_SILENCE_MS = 550
+LIFECYCLE_OWNER_TOKEN = os.getenv("TTS_LIFECYCLE_OWNER_TOKEN", "")
+LIFECYCLE_OWNER_FINGERPRINT = (
+    hashlib.sha256(LIFECYCLE_OWNER_TOKEN.encode("utf-8")).hexdigest()
+    if LIFECYCLE_OWNER_TOKEN
+    else ""
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,22 @@ class EngineConfig:
     default_voice_id: str
     default_silence_ms: int
     max_mel_tokens: int
+
+
+@dataclass(frozen=True)
+class TtsRuntime:
+    torch_module: Any
+    model_class: Any
+
+
+def load_tts_runtime() -> TtsRuntime:
+    import torch
+    from indextts.infer_v2 import IndexTTS2
+
+    return TtsRuntime(
+        torch_module=torch,
+        model_class=IndexTTS2,
+    )
 
 
 ENGINE_CONFIG = EngineConfig(
@@ -62,6 +83,7 @@ ENGINE_CONFIG = EngineConfig(
 
 
 class TtsRequest(BaseModel):
+    artifact_id: str = ""
     segments: list[str]
     pauses_ms: list[int] | None = None
     voice_id: str = "zh_kelin_raw_20260625_222137"
@@ -72,19 +94,26 @@ class TtsRequest(BaseModel):
 
 
 class ModelState:
-    def __init__(self) -> None:
-        self.tts: IndexTTS2 | None = None
+    def __init__(
+        self,
+        runtime_loader: Callable[[], TtsRuntime] = load_tts_runtime,
+    ) -> None:
+        self.tts: Any | None = None
+        self.runtime: TtsRuntime | None = None
+        self.runtime_loader = runtime_loader
         self.last_used_at = 0.0
         self.lock = asyncio.Lock()
 
     def loaded(self) -> bool:
         return self.tts is not None
 
-    async def ensure_loaded(self) -> IndexTTS2:
+    async def ensure_loaded(self) -> Any:
         async with self.lock:
             if self.tts is None:
                 started = time.perf_counter()
-                self.tts = IndexTTS2(
+                if self.runtime is None:
+                    self.runtime = self.runtime_loader()
+                self.tts = self.runtime.model_class(
                     cfg_path=str(ENGINE_CONFIG.config_path),
                     model_dir=str(ENGINE_CONFIG.model_dir),
                     use_fp16=True,
@@ -103,8 +132,11 @@ class ModelState:
                 return
             self.tts = None
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if (
+                self.runtime is not None
+                and self.runtime.torch_module.cuda.is_available()
+            ):
+                self.runtime.torch_module.cuda.empty_cache()
             print("model_unloaded language=zh reason=idle", flush=True)
 
 
@@ -167,9 +199,10 @@ def concat_wavs(paths: list[Path], output_path: Path, pauses_ms: list[int]) -> f
     return frame_count / params.framerate
 
 
-def gpu_memory_mb() -> dict[str, float] | None:
-    if not torch.cuda.is_available():
+def gpu_memory_mb(runtime: TtsRuntime | None) -> dict[str, float] | None:
+    if runtime is None or not runtime.torch_module.cuda.is_available():
         return None
+    torch = runtime.torch_module
     return {
         "allocated": round(torch.cuda.memory_allocated() / 1024 / 1024, 1),
         "reserved": round(torch.cuda.memory_reserved() / 1024 / 1024, 1),
@@ -195,9 +228,11 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "loaded": state.loaded(),
+        "runtime_imported": state.runtime is not None,
         "language": "zh",
+        "lifecycle_owner_fingerprint": LIFECYCLE_OWNER_FINGERPRINT,
         "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
-        "gpu_memory_mb": gpu_memory_mb(),
+        "gpu_memory_mb": gpu_memory_mb(state.runtime),
     }
 
 
@@ -212,8 +247,11 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
         preset = emotion_preset(request.emotion)
         pauses_ms = request.pauses_ms or [DEFAULT_SILENCE_MS for _ in range(max(len(segments) - 1, 0))]
 
+        artifact_id = request.artifact_id.strip()
+        if artifact_id and re.fullmatch(r"[0-9a-f]{32}", artifact_id) is None:
+            raise ValueError("artifact_id is invalid")
+        run_id = artifact_id or uuid.uuid4().hex
         tts_model = await state.ensure_loaded()
-        run_id = uuid.uuid4().hex
         segment_dir = TEMP_DIR / f"tts_{run_id}_segments"
         segment_dir.mkdir(parents=True, exist_ok=True)
         output_path = TEMP_DIR / f"tts_{run_id}.wav"

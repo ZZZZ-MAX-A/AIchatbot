@@ -1085,6 +1085,74 @@ button {
   font-size: 12px;
 }
 
+.manual-diagnostic-audio-review {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.manual-diagnostic-audio-review audio {
+  width: min(100%, 520px);
+}
+
+.manual-diagnostic-audio-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.manual-diagnostic-vision-review {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.manual-diagnostic-vision-review h3,
+.manual-diagnostic-vision-review p {
+  margin: 0;
+}
+
+.manual-diagnostic-vision-review pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  padding: 9px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #334155;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.manual-diagnostic-vision-review img {
+  display: block;
+  width: min(100%, 320px);
+  height: auto;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.manual-diagnostic-vision-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .manual-diagnostic-result code {
   color: #64748b;
   font-family: "Cascadia Mono", Consolas, monospace;

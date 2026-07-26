@@ -1,10 +1,12 @@
 # MainAgent external-read security design
 
-本文定义 `system_diagnostics_report` 基本稳定之后，MainAgent 外部只读能力的安全设计。纯 query/endpoint/address/budget 安全策略，以及结构化 provider 协议、确定性结果 sanitizer、fake provider executor 和无网络测试已经完成；当前仍不注册联网工具、不调用外部搜索或网页、不把 `ENABLE_AGENT_WEB` 改为 true，也不新增阶段编号。
+本文记录 `system_diagnostics_report` 基本稳定之后，MainAgent 外部只读能力从安全设计到真实严格命令 live 的分刀过程。当前稳定事实是：固定 Tavily Basic executor 已接入，`ENABLE_AGENT_WEB` 已由主人在本地配置中明确开启，严格主人私聊命令已完成一次认证 executor live 和 QQ live；普通聊天、Main LLM 和任意 URL 抓取仍未开放。
 
-## 1. 当前事实与目标
+> 历史阅读规则：第 1–14 节保留各分刀当时的设计起点，其中“当前”“尚未”“下一步”只对所在历史阶段有效。当前能力边界以第 15–17 节、[current-development-status.md](current-development-status.md) 和实时 Git 为准；不得从早期未完成清单重新选择当前任务。
 
-当前代码已经具备：
+## 1. 设计起点与目标（历史）
+
+设计开始时的代码已经具备：
 
 ```text
 RiskLevel.READ_EXTERNAL
@@ -23,7 +25,7 @@ HTML/控制字符/提示注入/来源 host sanitizer
 确定性外部结果 formatter
 ```
 
-当前代码尚不具备：
+设计开始时的代码尚不具备：
 
 ```text
 external-read ToolSpec
@@ -36,7 +38,7 @@ external-read QQ 严格命令
 external-read live 验收
 ```
 
-因此：
+因此，当时的结论是：
 
 > `ENABLE_AGENT_WEB=true` 当前只是 PolicyEngine 的许可位，不代表安全联网能力已经存在，也不应单独打开。
 

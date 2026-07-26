@@ -2,7 +2,7 @@
 
 本文记录稳定设计文档中的“当前状态、尚未实现、下一步”措辞审计。目标是降低普通 ProjectDocRAG / DevContextGraph 把历史阶段描述成当前事实的概率，同时保留版本设计和实施过程的可追溯性。
 
-状态：第一轮审计已完成。
+状态：第一轮与 2026-07-24 第二轮审计均已完成；第二轮将权威快照、版本运行日志、新增设计、命名规范和 Owner Console P2.49 runbook 纳入范围。
 
 本轮只更新文档，不重命名文件、不修改运行时代码、不改变 RAG 排序算法、不开放任何新入口或权限。
 
@@ -23,9 +23,9 @@
 
 发生冲突时，人工阅读优先级遵守 `docs/README.md`：当前状态快照优先，其次是较新的版本运行日志，再到稳定设计、runbook 和历史材料。正式主人研发上下文报告继续由代码固定加载当前状态锚点；本审计主要改善普通语义检索和人工阅读。
 
-## 2. 范围与排除项
+## 2. 第一轮范围与排除项
 
-本轮纳入仍作为设计或操作入口的文档：
+第一轮纳入当时仍作为设计或操作入口的文档：
 
 ```text
 main-agent-first-readonly-work-task-design.md
@@ -38,7 +38,7 @@ owner-console-fastapi-smoke-runbook.md
 v1.6-runtime-service-audit.md
 ```
 
-明确排除：
+第一轮明确排除：
 
 ```text
 version-runlog.md：按当时事实记录实现流水，不回写成今天的状态。
@@ -103,3 +103,79 @@ ProjectDocRAG 重建无错误。
 ```
 
 以后每个改变“当前阶段、未完成事项、延后事项、推荐下一步”的里程碑，应优先更新 `current-development-status.md`。如果稳定设计中的后续路线已经落地，再在同一文档增加带阶段限定的完成状态；不要依赖后续 RAG 或 LLM 自行猜测哪段更新。
+
+## 6. 2026-07-24 第二轮审计
+
+### 6.1 触发原因
+
+一次“继续下一阶段”被错误解释为批准旧 backlog 中的 `system_diagnostics_report/core`，说明第一轮只修正文档局部措辞仍不够。根因不是单个技术条目存在，而是权威快照、历史 runlog 和领域设计没有把“事实存在、候选任务、优先级、主人批准”分开。
+
+第二轮建立以下硬规则：
+
+```text
+事实仍存在 != 应立即实现
+未完成事项 != 当前下一阶段
+候选范围 != 主人批准范围
+历史“下一步” != 当前路线图
+只有 owner_approved 可以自动开始
+```
+
+### 6.2 覆盖与结果
+
+第二轮重点核对：
+
+```text
+current-development-status.md
+version-runlog.md
+docs/README.md
+main-agent-external-read-security-design.md
+main-agent-command-capability-audit.md
+main-agent-system-diagnostics-report-design.md
+owner-console-manual-diagnostics-design.md
+web-owner-console-v0-runbook.md
+可靠性、表情、文档产物和 P2.48/P2.49 新增设计
+```
+
+主要问题与处理：
+
+| 问题 | 处理 |
+|---|---|
+| 权威快照约 50 KB、混入过期监听/等待/live/工作区状态 | 重写为九段固定合同，约 9 KB、150 行，加入批准状态、优先级和唯一下一步 |
+| runlog 中大量历史“当前/下一步/等待”可被误作路线图 | 在文件顶部增加历史阅读规则，明确不构成当前授权 |
+| external-read 文档开头仍称未开放联网，但后文已记录 Tavily live | 把早期章节标为历史设计起点，并在开头写明当前稳定事实 |
+| `/agent` 能力审计基线停留在 `a9e7c4b`，external-read 行仍称未开放 | 更新到 2026-07-24 / `0055dcc` 已提交基线与真实 live 结论 |
+| Owner Console runbook 仍称全站只能 GET、禁止主动探测 | 区分业务 GET-only 与三个逐项授权的固定 POST，补齐启动、二次确认、全局锁和证据核对步骤 |
+| README 漏列六份新文档，文章仍称只有 01–16 | 补齐导航；记录已跟踪 19/20 与主人保留的未跟踪 17/18 |
+| 未获方向批准的 core 实验被写成主人批准 | 先在快照、设计和 runlog 中标明未批准、未加载、未 live；主人随后批准完全撤销正式能力，只保留 `connect_read_only()` 安全修正，且不得从历史记录恢复 |
+
+### 6.3 命名规范复核
+
+命名规范自提交 `f986a27 Add documentation navigation and naming rules` 建立后，Git 新增的 13 份 Markdown 文档机械检查结果为：
+
+```text
+13/13 小写英文
+13/13 kebab-case
+13/13 使用 .md
+13/13 不含 final/new/latest/v2
+13/13 长期文件名不含 P2 编号
+3/3 新 Owner Console 文档使用 owner-console- 前缀
+3/3 新掘金文章使用 NN-topic.md
+```
+
+主人保留的未跟踪文章 17、18 也符合 `NN-topic.md`。`reliability-failure-taxonomy-and-inspection.md` 的 `-inspection.md` 不属于推荐后缀，是唯一软偏差；由于路径已进入 Git、交叉链接和 ProjectDocRAG `source_id`，本轮将其登记为兼容例外，不自动重命名。
+
+### 6.4 后续维护验收
+
+每次里程碑收口至少检查：
+
+```text
+权威快照是否只保留当前批准方向和一个下一步。
+新文档是否进入 README 导航。
+设计中的“当前/尚未/下一步”是否带阶段或日期。
+runbook 是否覆盖已上线的真实操作入口。
+主人批准是否与本地实现、回归、加载、live 分开记录。
+实时运行态是否带 observed_at。
+历史 backlog 是否被误标为 owner_approved。
+```
+
+本轮只修改文档，不执行 ProjectDocRAG 重建、RAG 查询、私人记忆查询、模型调用、TTS、视觉、服务启动/重启、QQ 发送、commit 或 push。

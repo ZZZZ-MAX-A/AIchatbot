@@ -8,15 +8,26 @@ import type {
   OwnerConsoleMemoryRagConsistencyEnvelope,
   OwnerConsoleProjectDocRagProbeEnvelope,
   OwnerConsoleTextSnapshotSection,
+  OwnerConsoleTtsSynthesisEnvelope,
+  OwnerConsoleVisionInferenceEnvelope,
+  OwnerConsoleCloudVisionEnvelope,
 } from "../api/ownerConsoleTypes";
 import { DiagnosticsPage } from "./DiagnosticsPage";
 
-const { getDiagnostics, getManualDiagnostics, runProjectDocRagProbe, runMemoryRagConsistency, runMainLlmContract } = vi.hoisted(() => ({
+const { getDiagnostics, getManualDiagnostics, runProjectDocRagProbe, runMemoryRagConsistency, runMainLlmContract, runTtsSynthesis, getTtsAudioPreview, acceptTtsAudioQuality, rejectTtsAudioQuality, runCloudVisionFixedDescription, getCloudVisionReferencePreview, acceptCloudVisionResponseQuality, rejectCloudVisionResponseQuality } = vi.hoisted(() => ({
   getDiagnostics: vi.fn(),
   getManualDiagnostics: vi.fn(),
   runProjectDocRagProbe: vi.fn(),
   runMemoryRagConsistency: vi.fn(),
   runMainLlmContract: vi.fn(),
+  runTtsSynthesis: vi.fn(),
+  getTtsAudioPreview: vi.fn(),
+  acceptTtsAudioQuality: vi.fn(),
+  rejectTtsAudioQuality: vi.fn(),
+  runCloudVisionFixedDescription: vi.fn(),
+  getCloudVisionReferencePreview: vi.fn(),
+  acceptCloudVisionResponseQuality: vi.fn(),
+  rejectCloudVisionResponseQuality: vi.fn(),
 }));
 
 vi.mock("../api/ownerConsoleApi", () => {
@@ -32,6 +43,14 @@ vi.mock("../api/ownerConsoleApi", () => {
       runProjectDocRagProbe,
       runMemoryRagConsistency,
       runMainLlmContract,
+      runTtsSynthesis,
+      getTtsAudioPreview,
+      acceptTtsAudioQuality,
+      rejectTtsAudioQuality,
+      runCloudVisionFixedDescription,
+      getCloudVisionReferencePreview,
+      acceptCloudVisionResponseQuality,
+      rejectCloudVisionResponseQuality,
     },
   };
 });
@@ -83,7 +102,14 @@ const envelope: OwnerConsoleDiagnosticsEnvelope = {
     ]),
     vision: section("vision", [
       "enable_vision=true",
-      "vision_model=qwen2.5vl:3b",
+      "vision_provider=aliyun_bailian",
+      "vision_model=qwen3.7-flash",
+      "vision_region=cn-beijing",
+      "workspace_configured=true",
+      "credentials_configured=true",
+      "thinking_enabled=false",
+      "client_automatic_retry=false",
+      "automatic_local_fallback=false",
       "ollama_probe_executed=false",
       "vision_inference_executed=false",
     ]),
@@ -143,6 +169,11 @@ const manualEnvelope: OwnerConsoleManualDiagnosticsEnvelope = {
     project_doc_rag_probe_enabled: false,
     memory_rag_consistency_enabled: false,
     main_llm_contract_enabled: false,
+    tts_synthesis_enabled: false,
+    vision_inference_enabled: false,
+    cloud_vision_enabled: false,
+    cloud_vision_workspace_configured: false,
+    cloud_vision_credentials_configured: false,
     automatic_diagnostics_enabled: false,
     configuration_write_enabled: false,
     business_data_write_enabled: false,
@@ -151,6 +182,9 @@ const manualEnvelope: OwnerConsoleManualDiagnosticsEnvelope = {
     project_doc_rag_latest_run: null,
     memory_rag_consistency_latest_run: null,
     main_llm_contract_latest_run: null,
+    tts_synthesis_latest_run: null,
+    vision_inference_latest_run: null,
+    cloud_vision_latest_run: null,
   },
 };
 
@@ -296,8 +330,366 @@ const mainLlmActionEnvelope: OwnerConsoleMainLlmContractEnvelope = {
   data: mainLlmSuccessfulRun,
 };
 
+const ttsSuccessfulRun = {
+  run_id: 1,
+  workflow: "tts_managed_lifecycle",
+  status: "completed",
+  outcome: "attention",
+  stage: "owner_audio_review",
+  code: "tts_audio_quality_review_required",
+  code_label: "TTS 技术合同通过，等待主人试听确认",
+  started_at: "2026-07-24T05:01:00+00:00",
+  finished_at: "2026-07-24T05:01:02+00:00",
+  attempt_count: 1,
+  runtime_feature_enabled: true,
+  service_health_checked: true,
+  service_healthy: true,
+  model_loaded_before: false,
+  runtime_imported_before: false,
+  model_load_may_have_occurred: true,
+  configured_voice_present: true,
+  tts_called: true,
+  output_contract_valid: true,
+  output_file_created: true,
+  output_bytes: 32044,
+  output_duration_ms: 1000,
+  output_retained: false,
+  partial_artifact_state: "artifacts_removed",
+  health_elapsed_ms: 12,
+  synthesis_elapsed_ms: 1988,
+  elapsed_ms: 2000,
+  fixed_text: "这是一次固定语音合成检查。",
+  technical_outcome: "succeeded",
+  technical_code: "tts_managed_lifecycle_succeeded",
+  audio_preview_available: true,
+  audio_quality_review_required: true,
+  audio_quality_reviewed: false,
+  audio_quality_accepted: null,
+  audio_reviewed_at: "",
+  owner_triggered: true,
+  service_preexisting: true,
+  service_start_attempted: false,
+  service_started: false,
+  service_owned_by_diagnostic: false,
+  service_stop_attempted: false,
+  service_stopped: false,
+  segment_directory_retained: false,
+  artifact_cleanup_attempted: true,
+  artifact_cleanup_succeeded: true,
+  startup_elapsed_ms: 0,
+  cleanup_elapsed_ms: 2,
+  automatic_retry: false,
+  qq_write_executed: false,
+  reliability_event_written: false,
+  database_write_allowed: false,
+  local_file_write_expected: true,
+  cleanup_executed: true,
+  chat_history_read: false,
+  memory_rag_called: false,
+  project_doc_rag_called: false,
+  dev_context_called: false,
+  combined_rag_called: false,
+  main_llm_called: false,
+  vision_called: false,
+  prompt_exposed: false,
+  response_content_exposed: false,
+  output_path_exposed: false,
+  fixed_text_exposed: true,
+  audio_preview_persisted: false,
+  audio_preview_path_exposed: false,
+  audio_review_action_executed: false,
+};
+
+const ttsActionEnvelope: OwnerConsoleTtsSynthesisEnvelope = {
+  ...manualEnvelope,
+  resource: "manual-diagnostics/tts-synthesis",
+  generated_at: ttsSuccessfulRun.finished_at,
+  read_only: false,
+  manual_runtime_action: true,
+  configuration_write_enabled: false,
+  business_data_write_enabled: false,
+  data: ttsSuccessfulRun,
+};
+
+const ttsAcceptedRun = {
+  ...ttsSuccessfulRun,
+  outcome: "succeeded",
+  stage: "result_validation",
+  code: "tts_managed_lifecycle_succeeded",
+  code_label: "TTS 启动、固定合成和清理合同通过",
+  audio_preview_available: false,
+  audio_quality_review_required: false,
+  audio_quality_reviewed: true,
+  audio_quality_accepted: true,
+  audio_reviewed_at: "2026-07-24T05:02:00+00:00",
+  audio_review_action_executed: true,
+};
+
+const ttsAcceptedEnvelope: OwnerConsoleTtsSynthesisEnvelope = {
+  ...ttsActionEnvelope,
+  generated_at: ttsAcceptedRun.audio_reviewed_at,
+  data: ttsAcceptedRun,
+};
+
+const ttsRejectedRun = {
+  ...ttsSuccessfulRun,
+  outcome: "failed",
+  stage: "owner_audio_review",
+  code: "tts_audio_quality_rejected",
+  code_label: "TTS 技术合同通过，但主人听检不合格",
+  audio_preview_available: false,
+  audio_quality_review_required: false,
+  audio_quality_reviewed: true,
+  audio_quality_accepted: false,
+  audio_reviewed_at: "2026-07-24T05:02:00+00:00",
+  audio_review_action_executed: true,
+};
+
+const ttsRejectedEnvelope: OwnerConsoleTtsSynthesisEnvelope = {
+  ...ttsActionEnvelope,
+  generated_at: ttsRejectedRun.audio_reviewed_at,
+  data: ttsRejectedRun,
+};
+
+const visionSuccessfulRun = {
+  run_id: 1,
+  workflow: "vision_managed_lifecycle",
+  status: "completed",
+  outcome: "attention",
+  stage: "owner_visual_review",
+  code: "vision_response_quality_review_required",
+  code_label: "视觉技术合同通过，等待主人检查实际图片描述",
+  started_at: "2026-07-24T06:01:00+00:00",
+  finished_at: "2026-07-24T06:01:02+00:00",
+  attempt_count: 1,
+  configured_model: "qwen2.5vl:3b",
+  runtime_feature_enabled: true,
+  fixed_image_contract: "vision.sticker.v1",
+  fixed_image_bytes: 162977,
+  fixed_image_contract_valid: true,
+  reference_sticker_id: "aike_affection_005",
+  registered_reference_asset_read: true,
+  expected_answer_disclosed_in_prompt: false,
+  service_tags_checked: true,
+  service_healthy: true,
+  service_preexisting: true,
+  service_start_attempted: false,
+  service_started: false,
+  service_owned_by_diagnostic: false,
+  service_ownership_basis: "none",
+  service_stop_attempted: false,
+  service_stopped: false,
+  model_available: true,
+  model_residency_checked: true,
+  model_loaded_before: false,
+  keep_alive_zero_used: true,
+  vision_called: true,
+  response_contract_valid: true,
+  response_mode: "natural_text",
+  structured_output_requested: false,
+  semantic_contract_automatically_validated: false,
+  owner_visual_judgment_required: true,
+  response_preview: "一名黑白双色头发的Q版人物抱着一个大爱心，周围漂浮着多个粉红色爱心。",
+  response_description: "一名黑白双色头发的Q版人物抱着一个大爱心，周围漂浮着多个粉红色爱心。",
+  response_content_exposed_to_owner: true,
+  usage_metadata_available: true,
+  input_tokens: 72,
+  output_tokens: 28,
+  total_tokens: 100,
+  model_cleanup_required: true,
+  model_cleanup_verified: true,
+  model_cleanup_poll_count: 1,
+  startup_elapsed_ms: 0,
+  discovery_elapsed_ms: 5,
+  residency_elapsed_ms: 3,
+  inference_elapsed_ms: 1200,
+  cleanup_elapsed_ms: 2,
+  elapsed_ms: 1210,
+  technical_outcome: "succeeded",
+  technical_code: "vision_managed_lifecycle_succeeded",
+  reference_preview_available: true,
+  visual_quality_review_required: true,
+  visual_quality_reviewed: false,
+  visual_quality_accepted: null,
+  visual_reviewed_at: "",
+  visual_review_action_executed: false,
+  response_preview_persisted: false,
+  response_preview_path_exposed: false,
+  reference_image_exposed_to_owner: false,
+  owner_triggered: true,
+  client_automatic_retry: false,
+  tool_definitions_sent: false,
+  qq_write_executed: false,
+  reliability_event_written: false,
+  database_write_allowed: false,
+  project_file_write_allowed: false,
+  project_artifact_write_expected: false,
+  external_runtime_local_write_possible: true,
+  model_pull_allowed: false,
+  chat_history_read: false,
+  memory_rag_called: false,
+  project_doc_rag_called: false,
+  dev_context_called: false,
+  combined_rag_called: false,
+  main_llm_called: false,
+  tts_called: false,
+  image_content_exposed: false,
+  response_content_exposed: false,
+};
+
+const visionAcceptedRun = {
+  ...visionSuccessfulRun,
+  outcome: "succeeded",
+  stage: "result_validation",
+  code: "vision_managed_lifecycle_succeeded",
+  code_label: "视觉服务、自然回复和资源收口技术合同通过",
+  visual_quality_review_required: false,
+  visual_quality_reviewed: true,
+  visual_quality_accepted: true,
+  visual_reviewed_at: "2026-07-24T06:03:00+00:00",
+  visual_review_action_executed: true,
+  reference_image_exposed_to_owner: true,
+};
+
+const visionActionEnvelope: OwnerConsoleVisionInferenceEnvelope = {
+  ...manualEnvelope,
+  resource: "manual-diagnostics/vision-inference",
+  generated_at: visionSuccessfulRun.finished_at,
+  read_only: false,
+  manual_runtime_action: true,
+  configuration_write_enabled: false,
+  business_data_write_enabled: false,
+  data: visionSuccessfulRun,
+};
+
+const visionAcceptedEnvelope: OwnerConsoleVisionInferenceEnvelope = {
+  ...visionActionEnvelope,
+  generated_at: visionAcceptedRun.visual_reviewed_at,
+  data: visionAcceptedRun,
+};
+
+const cloudVisionSuccessfulRun = {
+  run_id: 2,
+  workflow: "cloud_vision_fixed_description",
+  status: "completed",
+  outcome: "attention",
+  stage: "owner_visual_review",
+  code: "cloud_vision_response_quality_review_required",
+  code_label: "百炼视觉基础合同通过，等待主人检查图片描述",
+  started_at: "2026-07-26T12:00:00+00:00",
+  finished_at: "2026-07-26T12:00:02+00:00",
+  attempt_count: 1,
+  provider: "aliyun_bailian",
+  region: "cn-beijing",
+  configured_model: "qwen3.7-flash",
+  returned_model: "qwen3.7-flash",
+  runtime_feature_enabled: true,
+  endpoint_contract_valid: true,
+  workspace_configured: true,
+  credentials_configured: true,
+  fixed_image_contract: "vision.sticker.v1",
+  fixed_image_bytes: 162977,
+  fixed_image_contract_valid: true,
+  reference_sticker_id: "aike_affection_005",
+  registered_reference_asset_read: true,
+  external_image_upload_planned: true,
+  external_image_upload_executed: true,
+  provider_side_persistence_controlled_by_app: false,
+  cloud_vision_called: true,
+  request_count: 1,
+  client_automatic_retry: false,
+  tool_definitions_sent: false,
+  thinking_enabled: false,
+  response_mode: "natural_text",
+  structured_output_requested: false,
+  semantic_contract_automatically_validated: false,
+  owner_visual_judgment_required: true,
+  response_contract_valid: true,
+  response_preview: "角色双手捧着红色爱心，表达出浓烈的爱意、兴奋与撒娇感。",
+  response_description: "角色双手捧着红色爱心，表达出浓烈的爱意、兴奋与撒娇感。",
+  response_cleanup_applied: true,
+  input_tokens: 316,
+  output_tokens: 98,
+  total_tokens: 414,
+  request_elapsed_ms: 1578,
+  technical_outcome: "succeeded",
+  technical_code: "cloud_vision_fixed_description_succeeded",
+  reference_preview_available: true,
+  visual_quality_review_required: true,
+  visual_quality_reviewed: false,
+  visual_quality_accepted: null,
+  visual_reviewed_at: "",
+  visual_review_action_executed: false,
+  owner_triggered: true,
+  api_key_exposed: false,
+  workspace_id_exposed: false,
+  image_base64_exposed: false,
+  response_preview_persisted: false,
+  local_gpu_model_loaded: false,
+  database_write_allowed: false,
+  project_artifact_write_expected: false,
+  reliability_event_written: false,
+  qq_write_executed: false,
+  chat_history_written: false,
+  agent_task_written: false,
+  approval_written: false,
+  memory_rag_called: false,
+  project_doc_rag_called: false,
+  dev_context_called: false,
+  combined_rag_called: false,
+  main_llm_called: false,
+  tts_called: false,
+  local_vision_called: false,
+};
+
+const cloudVisionAcceptedRun = {
+  ...cloudVisionSuccessfulRun,
+  outcome: "succeeded",
+  stage: "result_validation",
+  code: "cloud_vision_fixed_description_succeeded",
+  code_label: "百炼视觉请求与基础回复合同通过",
+  visual_quality_review_required: false,
+  visual_quality_reviewed: true,
+  visual_quality_accepted: true,
+  visual_reviewed_at: "2026-07-26T12:01:00+00:00",
+  visual_review_action_executed: true,
+};
+
+const cloudVisionActionEnvelope: OwnerConsoleCloudVisionEnvelope = {
+  ...manualEnvelope,
+  resource: "manual-diagnostics/cloud-vision-fixed-description",
+  generated_at: cloudVisionSuccessfulRun.finished_at,
+  read_only: false,
+  manual_runtime_action: true,
+  configuration_write_enabled: false,
+  business_data_write_enabled: false,
+  data: cloudVisionSuccessfulRun,
+};
+
+const cloudVisionAcceptedEnvelope: OwnerConsoleCloudVisionEnvelope = {
+  ...cloudVisionActionEnvelope,
+  generated_at: cloudVisionAcceptedRun.visual_reviewed_at,
+  data: cloudVisionAcceptedRun,
+};
+
 beforeEach(() => {
   getManualDiagnostics.mockResolvedValue(manualEnvelope);
+  getTtsAudioPreview.mockResolvedValue(
+    new Blob([new Uint8Array(64)], { type: "audio/wav" }),
+  );
+  acceptTtsAudioQuality.mockResolvedValue(ttsAcceptedEnvelope);
+  getCloudVisionReferencePreview.mockResolvedValue(
+    new Blob([new Uint8Array(162_977)], { type: "image/png" }),
+  );
+  acceptCloudVisionResponseQuality.mockResolvedValue(cloudVisionAcceptedEnvelope);
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:tts-audio-preview"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn(),
+  });
 });
 
 afterEach(() => {
@@ -347,7 +739,7 @@ describe("DiagnosticsPage", () => {
     render(<DiagnosticsPage />);
 
     const reading = await screen.findByLabelText("当前诊断解读");
-    expect(reading.textContent).toContain("1 个读取异常：视觉配置");
+    expect(reading.textContent).toContain("1 个读取异常：云端视觉配置");
     const visionCard = document.querySelector('[data-section="vision"]');
     expect(visionCard).not.toBeNull();
     expect(visionCard?.className).toContain("diagnostic-card--attention");
@@ -461,10 +853,274 @@ describe("DiagnosticsPage", () => {
     expect(screen.getByText("输入 token 51")).toBeTruthy();
     expect(screen.getByText("输出 token 42")).toBeTruthy();
     expect(screen.getByText("code=main_llm_contract_succeeded")).toBeTruthy();
-    expect(screen.getByText("client_automatic_retry=false")).toBeTruthy();
+    expect(screen.getAllByText("client_automatic_retry=false").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("tool_definitions_sent=false")).toBeTruthy();
     expect(screen.getByText("database_write_allowed=false")).toBeTruthy();
     expect(document.body.textContent).not.toContain("amber-17");
     expect(document.body.textContent).not.toContain("run_registered_main_llm_contract");
+  });
+
+  it("runs one fixed TTS synthesis only after confirmation and exposes file boundaries", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: {
+        ...manualEnvelope.data!,
+        manual_diagnostic_actions_enabled: true,
+        tts_synthesis_enabled: true,
+        supported_workflows: ["tts_managed_lifecycle"],
+      },
+    });
+    runTtsSynthesis.mockResolvedValue(ttsActionEnvelope);
+
+    render(<DiagnosticsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "检查启动、合成与清理" }),
+    );
+    expect(screen.getByText("确认执行一次 TTS 生命周期诊断？")).toBeTruthy();
+    expect(runTtsSynthesis).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("若服务明确离线，诊断会启动一个受管理 TTS 子进程");
+    expect(document.body.textContent).toContain("服务原本在线则直接复用且绝不停止");
+    expect(document.body.textContent).toContain("只清理本次 artifact ID");
+    expect(document.body.textContent).toContain("不会发送 QQ、写业务数据库或可靠性事件");
+    expect(document.body.textContent).toContain("不会调用 LLM/RAG 或自动重试");
+
+    fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
+    await screen.findByText("TTS 技术合同通过，等待主人试听确认");
+    expect(runTtsSynthesis).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("stage=owner_audio_review")).toBeTruthy();
+    expect(screen.getByText("code=tts_audio_quality_review_required")).toBeTruthy();
+    expect(screen.getByText("technical_outcome=succeeded")).toBeTruthy();
+    expect(screen.getByText("technical_code=tts_managed_lifecycle_succeeded")).toBeTruthy();
+    expect(screen.getByText("audio_preview_available=true")).toBeTruthy();
+    expect(screen.getByText("audio_quality_review_required=true")).toBeTruthy();
+    expect(document.body.textContent).toContain("应听到：这是一次固定语音合成检查。");
+    expect(screen.getByText("总延迟 2000 ms")).toBeTruthy();
+    expect(screen.getByText("启动 0 ms")).toBeTruthy();
+    expect(screen.getByText("健康检查 12 ms")).toBeTruthy();
+    expect(screen.getByText("合成 1988 ms")).toBeTruthy();
+    expect(screen.getByText("清理 2 ms")).toBeTruthy();
+    expect(screen.getByText("WAV 32044 bytes")).toBeTruthy();
+    expect(screen.getByText("WAV 时长 1000 ms")).toBeTruthy();
+    expect(screen.getByText("调用前模型 未加载")).toBeTruthy();
+    expect(screen.getByText("调用前 runtime 未导入")).toBeTruthy();
+    expect(screen.getByText("服务来源 原本在线")).toBeTruthy();
+    expect(screen.getByText("服务收尾 不停止已有服务")).toBeTruthy();
+    expect(screen.getByText("最终 WAV 已清理")).toBeTruthy();
+    expect(screen.getByText("分段目录 已清理")).toBeTruthy();
+    expect(screen.getByText("workflow=tts_managed_lifecycle")).toBeTruthy();
+    expect(screen.getByText("tts_called=true")).toBeTruthy();
+    expect(screen.getByText("runtime_imported_before=false")).toBeTruthy();
+    expect(screen.getByText("service_preexisting=true")).toBeTruthy();
+    expect(screen.getByText("service_start_attempted=false")).toBeTruthy();
+    expect(screen.getByText("service_started=false")).toBeTruthy();
+    expect(screen.getByText("service_owned_by_diagnostic=false")).toBeTruthy();
+    expect(screen.getByText("service_stop_attempted=false")).toBeTruthy();
+    expect(screen.getByText("service_stopped=false")).toBeTruthy();
+    expect(screen.getByText("artifact_cleanup_attempted=true")).toBeTruthy();
+    expect(screen.getByText("artifact_cleanup_succeeded=true")).toBeTruthy();
+    expect(screen.getByText("output_retained=false")).toBeTruthy();
+    expect(screen.getByText("segment_directory_retained=false")).toBeTruthy();
+    expect(screen.getByText("automatic_retry=false")).toBeTruthy();
+    expect(screen.getByText("qq_write_executed=false")).toBeTruthy();
+    expect(screen.getByText("reliability_event_written=false")).toBeTruthy();
+    expect(screen.getByText("database_write_allowed=false")).toBeTruthy();
+    expect(screen.getByText("local_file_write_expected=true")).toBeTruthy();
+    expect(screen.getByText("cleanup_executed=true")).toBeTruthy();
+    expect(screen.getByText("partial_artifact_state=artifacts_removed")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "加载临时试听" }));
+    const audio = await screen.findByLabelText("TTS 固定语音临时试听");
+    expect(getTtsAudioPreview).toHaveBeenCalledWith(1);
+    const acceptBeforePlayback = screen.getByRole("button", {
+      name: "播放结束后确认合格",
+    });
+    expect(acceptBeforePlayback.hasAttribute("disabled")).toBe(true);
+    fireEvent.ended(audio);
+    const acceptButton = screen.getByRole("button", { name: "语音合格" });
+    expect(acceptButton.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(acceptButton);
+    await screen.findByText("TTS 启动、固定合成和清理合同通过");
+    expect(acceptTtsAudioQuality).toHaveBeenCalledWith(1);
+    expect(runTtsSynthesis).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("stage=result_validation")).toBeTruthy();
+    expect(screen.getByText("code=tts_managed_lifecycle_succeeded")).toBeTruthy();
+    expect(screen.getByText("audio_preview_available=false")).toBeTruthy();
+    expect(screen.getByText("audio_quality_review_required=false")).toBeTruthy();
+    expect(screen.getByText("audio_quality_reviewed=true")).toBeTruthy();
+    expect(screen.getByText("audio_quality_accepted=true")).toBeTruthy();
+    expect(screen.getByText("audio_review_action_executed=true")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("run_registered_tts_synthesis");
+    expect(document.body.textContent).not.toContain("temp_audio/");
+  });
+
+  it("marks a technically valid WAV failed when the owner rejects audio quality", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: {
+        ...manualEnvelope.data!,
+        manual_diagnostic_actions_enabled: true,
+        tts_synthesis_enabled: true,
+        supported_workflows: ["tts_managed_lifecycle"],
+        latest_run: ttsSuccessfulRun,
+        tts_synthesis_latest_run: ttsSuccessfulRun,
+      },
+    });
+    rejectTtsAudioQuality.mockResolvedValue(ttsRejectedEnvelope);
+
+    render(<DiagnosticsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "加载临时试听" }),
+    );
+    await screen.findByLabelText("TTS 固定语音临时试听");
+    fireEvent.click(screen.getByRole("button", { name: "语音不合格" }));
+
+    await screen.findByText("TTS 技术合同通过，但主人听检不合格");
+    expect(rejectTtsAudioQuality).toHaveBeenCalledWith(1);
+    expect(acceptTtsAudioQuality).not.toHaveBeenCalled();
+    expect(runTtsSynthesis).not.toHaveBeenCalled();
+    expect(screen.getByText("stage=owner_audio_review")).toBeTruthy();
+    expect(screen.getByText("code=tts_audio_quality_rejected")).toBeTruthy();
+    expect(screen.getByText("audio_quality_reviewed=true")).toBeTruthy();
+    expect(screen.getByText("audio_quality_accepted=false")).toBeTruthy();
+  });
+
+  it("shows the fixed sticker and actual model description before owner acceptance", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: {
+        ...manualEnvelope.data!,
+        manual_diagnostic_actions_enabled: true,
+        cloud_vision_enabled: true,
+        cloud_vision_workspace_configured: true,
+        cloud_vision_credentials_configured: true,
+        supported_workflows: ["cloud_vision_fixed_description"],
+      },
+    });
+    runCloudVisionFixedDescription.mockResolvedValue(cloudVisionActionEnvelope);
+
+    render(<DiagnosticsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "检查百炼表情描述与感情色彩" }),
+    );
+    expect(screen.getByText("确认把固定 owner_private 表情发送到阿里云百炼？")).toBeTruthy();
+    expect(runCloudVisionFixedDescription).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("aike_affection_005.png");
+    expect(document.body.textContent).toContain("阿里云百炼北京地域");
+    expect(document.body.textContent).toContain("供应商侧的数据处理与留存");
+    expect(document.body.textContent).toContain("不会读取聊天、QQ 临时图片或图片缓存");
+    expect(document.body.textContent).toContain("不会写业务数据库");
+
+    fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
+    await screen.findByText("百炼视觉基础合同通过，等待主人检查图片描述");
+    expect(runCloudVisionFixedDescription).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("配置模型 qwen3.7-flash")).toBeTruthy();
+    expect(screen.getByText("返回模型 qwen3.7-flash")).toBeTruthy();
+    expect(screen.getByText("请求耗时 1578 ms")).toBeTruthy();
+    expect(screen.getByText("固定 PNG 162977 bytes")).toBeTruthy();
+    expect(screen.getByText("固定样例 aike_affection_005")).toBeTruthy();
+    expect(screen.getByText("基础回复合同 通过")).toBeTruthy();
+    expect(screen.getByText("主人质检 待确认")).toBeTruthy();
+    expect(
+      screen.getAllByText(cloudVisionSuccessfulRun.response_description),
+    ).toHaveLength(2);
+    expect(screen.getByText("回复清理 已执行")).toBeTruthy();
+    expect(screen.getByText("图片外发 已执行")).toBeTruthy();
+    expect(screen.getByText("workflow=cloud_vision_fixed_description")).toBeTruthy();
+    expect(screen.getByText("response_contract_valid=true")).toBeTruthy();
+    expect(screen.getByText("response_mode=natural_text")).toBeTruthy();
+    expect(screen.getByText("structured_output_requested=false")).toBeTruthy();
+    expect(screen.getByText("semantic_contract_automatically_validated=false")).toBeTruthy();
+    expect(screen.getByText("owner_visual_judgment_required=true")).toBeTruthy();
+    expect(screen.getByText("reference_sticker_id=aike_affection_005")).toBeTruthy();
+    expect(screen.getByText("registered_reference_asset_read=true")).toBeTruthy();
+    expect(screen.getByText("response_cleanup_applied=true")).toBeTruthy();
+    expect(screen.getByText("external_image_upload_executed=true")).toBeTruthy();
+    expect(screen.getByText("visual_quality_review_required=true")).toBeTruthy();
+    expect(screen.getByText("request_count=1")).toBeTruthy();
+    expect(screen.getAllByText("client_automatic_retry=false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("tool_definitions_sent=false")).toBeTruthy();
+    expect(screen.getAllByText("thinking_enabled=false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("qq_write_executed=false")).toBeTruthy();
+    expect(screen.getByText("database_write_allowed=false")).toBeTruthy();
+    expect(screen.getByText("project_artifact_write_expected=false")).toBeTruthy();
+    expect(screen.getByText("local_vision_called=false")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("run_registered_cloud_vision_fixed_description");
+    expect(document.body.textContent).not.toContain("data:image/");
+    expect(document.body.textContent).not.toContain("Inspect the fixed");
+
+    fireEvent.click(screen.getByRole("button", { name: "加载固定参考图" }));
+    const image = await screen.findByAltText("固定视觉诊断参考表情");
+    expect(getCloudVisionReferencePreview).toHaveBeenCalledTimes(1);
+    fireEvent.load(image);
+    fireEvent.click(screen.getByRole("button", { name: "描述合格" }));
+
+    await screen.findByText("百炼视觉请求与基础回复合同通过");
+    expect(acceptCloudVisionResponseQuality).toHaveBeenCalledWith(2);
+    expect(rejectCloudVisionResponseQuality).not.toHaveBeenCalled();
+    expect(runCloudVisionFixedDescription).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("visual_quality_reviewed=true")).toBeTruthy();
+    expect(screen.getByText("visual_quality_accepted=true")).toBeTruthy();
+  });
+
+  it("disables the other manual workflows while TTS synthesis is running", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: {
+        ...manualEnvelope.data!,
+        manual_diagnostic_actions_enabled: true,
+        project_doc_rag_probe_enabled: true,
+        memory_rag_consistency_enabled: true,
+        main_llm_contract_enabled: true,
+        tts_synthesis_enabled: true,
+        supported_workflows: [
+          "project_doc_rag_fixed_retrieval",
+          "memory_rag_index_consistency",
+          "main_llm_fixed_contract",
+          "tts_managed_lifecycle",
+        ],
+      },
+    });
+    let finishTts: ((value: OwnerConsoleTtsSynthesisEnvelope) => void) | undefined;
+    runTtsSynthesis.mockReturnValue(
+      new Promise<OwnerConsoleTtsSynthesisEnvelope>((resolve) => {
+        finishTts = resolve;
+      }),
+    );
+
+    render(<DiagnosticsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "检查启动、合成与清理" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
+
+    const projectButton = within(
+      screen.getByLabelText("项目文档 RAG 手动检查"),
+    ).getByRole("button") as HTMLButtonElement;
+    const memoryButton = within(
+      screen.getByLabelText("MemoryRAG 索引一致性手动检查"),
+    ).getByRole("button") as HTMLButtonElement;
+    const mainLlmButton = within(
+      screen.getByLabelText("Main LLM 固定问答手动检查"),
+    ).getByRole("button") as HTMLButtonElement;
+    const ttsConfirmButton = within(
+      screen.getByLabelText("确认 TTS 一键生命周期检查"),
+    ).getByRole("button", { name: "正在检查" }) as HTMLButtonElement;
+    expect(projectButton.disabled).toBe(true);
+    expect(memoryButton.disabled).toBe(true);
+    expect(mainLlmButton.disabled).toBe(true);
+    expect(ttsConfirmButton.disabled).toBe(true);
+    expect(runProjectDocRagProbe).not.toHaveBeenCalled();
+    expect(runMemoryRagConsistency).not.toHaveBeenCalled();
+    expect(runMainLlmContract).not.toHaveBeenCalled();
+
+    finishTts?.(ttsActionEnvelope);
+    await screen.findByText("TTS 技术合同通过，等待主人试听确认");
   });
 });

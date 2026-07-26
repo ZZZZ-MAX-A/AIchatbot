@@ -153,10 +153,17 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         vision_collector_source = source[vision_start:voice_start]
         voice_collector_source = source[voice_start:runner_start]
         runner_source = source[runner_start:system_end]
+        database_probe_start = source.index("def _system_database_read_probe()")
+        database_probe_end = source.index(
+            "\ndef _non_negative_observation_int", database_probe_start
+        )
+        database_probe_source = source[database_probe_start:database_probe_end]
         self.assertIn("config.enable_agent_shell", system_source)
         self.assertIn("config.enable_agent_local_write", system_source)
         self.assertIn("config.enable_agent_external_write", system_source)
         self.assertIn("config.enable_agent_web", system_source)
+        self.assertIn("with connect_read_only() as connection:", database_probe_source)
+        self.assertNotIn("with connect() as connection:", database_probe_source)
         self.assertIn("asyncio.to_thread(check_ollama, config)", system_source)
         self.assertIn("build_vision_diagnostics_report", system_source)
         self.assertIn("build_voice_diagnostics_report", system_source)

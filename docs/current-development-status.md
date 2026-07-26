@@ -1,96 +1,203 @@
 # AIchatbot 当前开发状态
 
-快照版本：P2.49c（Main LLM 固定问答基础运行主人 live 已通过，严格 JSON 子合同为 attention）
+## 1. 快照元数据
 
-当前阶段：P2.47 第一刀已实现严格结构化可靠性事件合同、SQLite 五分钟桶去重、只读趋势聚合、恢复状态推导和 Bot 生命周期标记；第二刀确定性只读 `/agent 查看故障趋势` 已通过主人 QQ live；第三刀 Owner Console `/owner-console/reliability` GET-only 页面、生产 API 和主人人工浏览器验收已通过。第四刀已将真实用户视觉推理 `vision / infer` 与真实 TTS 合成 `tts / synthesize` 接入结构化事件：视觉按一次逻辑图片批次记录成功、全失败或部分成功降级，诊断自检、缓存和未执行请求不记录；TTS 只有服务调用后产物通过非空文件、有效时长和上限复核才成功，健康检查、候选保存、功能关闭、冷却和前置长度拒绝不记录，QQ 发送仍与合成分离。组件专属有限映射只输出既有固定 code，不向记录器传入图片、语音文本、QQ、路径、URL、Key 或异常原文；observer 全部 fail-open。Owner Console 已重启并显示 7 项接入范围，生产只读查询前后数据库大小与 mtime 不变，未制造媒体假故障。Bot 于 2026-07-20 01:07 首次加载第四刀；真实图片批次在 01:11 产生唯一 `vision / infer / model / invalid_model_response / failed`，结构化观察通过但当时识图功能失败，ChatAgent 还把单次失败误写成永久不具备视觉能力。主人随后批准确定性视觉失败提示：每张失败图片改用无异常细节的固定内部描述，整批均失败时在调用 Chat LLM 前直接返回“本次图片识别失败了，请稍后再试，或者换一张更清晰的图片。”，并跳过该固定回复的远程表情分类与自动附件；部分成功仍只把合格观察交给 ChatAgent，不改变每批次单一结构化事件。Bot 已于 15:00 重启加载补丁，未停止或重启 Ollama；主人在 15:15 发送一条真实图片请求并收到连贯的可见内容描述，结构化表只新增一条 `vision / infer / operation_succeeded / succeeded`，此前 `invalid_model_response` 因后续成功具备 recovered 证据。该次走成功路径，因此固定失败提示尚未完成 QQ 失败分支 live，不人为制造故障。真实 TTS 首轮及当日下午再次冷启动均在 45 秒服务等待边界产生 `tts / synthesize / network / request_timeout / failed`；服务就绪后的请求于 14:06 生成唯一 `operation_succeeded / succeeded`，主人确认 QQ 语音成功送达，趋势因此具备“已恢复”证据。成功后 IndexTTS2 `loaded=true`，显存 allocated 约 6932 MiB、reserved 约 7476 MiB；8GB 显卡可完成本次合成但余量较小。最新完整 Python 回归 651 tests OK（skipped=3），视觉/可靠性/Graph 相邻 105 tests、src/tests AST 145 files 和 `git diff --check` 通过。自动告警、自动修复、自动清理、自动媒体重试和自动重启仍未开放。
+| 字段 | 当前值 |
+|---|---|
+| 快照日期 | 2026-07-27（Asia/Shanghai） |
+| Git 分支 | `main` |
+| 已提交基线 | `0055dcc Add Owner Console and Main LLM diagnostic articles` |
+| 远端关系 | 本次只读核对时 `main...origin/main`，无领先或落后 |
+| 工作区 | 有未提交修改；包含主人已批准的 P2.49d、P2.49e、本轮百炼云视觉实现、文档治理修改和主人保留文件 |
+| 运行态观测 | 2026-07-27 Owner Console PID 15220 继续监听 8090。Bot 已由主人通过 `scripts/start.ps1` 启动，父/子 PID 24552/15332，监听 8080 并完成 QQ live；主人连续发送两张图片，均得到快速且准确的百炼描述。只读结构化可靠性证据在同一 runtime 记录两次 `vision/infer/operation_succeeded/succeeded`，未读取聊天正文或图片。11434 现有 listener PID 4388 保持在线，7861 无 listener。运行态只代表对应观测时点 |
+| 权威范围 | 当前主人批准方向、阶段完成度、待办优先级、授权与禁止动作 |
 
-Owner Console 于 2026-07-20 15:36 重新启动并监听 `127.0.0.1:8090`。生产可靠性 API 当前 24 小时/7 天均为 9 次失败/降级、4 个故障组：`bot_runtime/lifecycle` 5 次证据不足，`vision/infer` 1 次失败后已恢复，`tts/synthesize` 2 次失败后已恢复，另有 `sticker_classifier/classify_intent/data_validation_failed` 1 次未恢复。两组 recovered 的最近成功分别为视觉 15:15:59、TTS 14:06:28。API `read_only=true`、`web_write_enabled=false`，所有 LLM/RAG/告警/修复/重试/重启/清理/写副作用标志均为 false，查询前后数据库大小和 mtime 不变；页面路由返回 200，可靠性页测试、TypeScript 与 GET-only guard 通过。生产数据按同一前端精确谓词计算为全部 4、bot_runtime/vision/tts 各 1、recovered 2（vision、tts）。当前会话未暴露内置浏览器控制接口，故没有借外部自动化绕过；主人随后人工打开真实页面，确认各阶段符合预期，包括三组件筛选、`recovered` 只显示 vision/tts、组合筛选和清除后恢复全部 4 组。新表情分类器故障只记录固定安全字段，不自动修复或隐藏。
+运行态只代表表中时间点，不代表持续状态。Git 事实以实时 `git status -sb` 和 `git log --oneline -5` 为准；详细历史证据见 [version-runlog.md](version-runlog.md)。
 
-`sticker_classifier/data_validation_failed` 已完成根因修复和 QQ live：主人当次只发送图片，视觉与 ChatAgent 正常，但旧调度收到空 `user_text`；底层分类器在 transport 前返回 `input_invalid`，因此没有调用 DeepSeek、没有分类 token、没有进入本地库选择。这是合法纯图片场景被误记为数据故障。主人批准后，调度入口增加仅针对“类型为 str 且 strip 后为空”的本地门控，安全快照为 `classifier_status=skipped`、`decision_reason=empty_user_text`、`attachment_status=preflight_blocked`，在频率预检、分类调用、可靠性记录和表情发送之前返回。非字符串、空回复和总字符超限继续由底层 `input_invalid` 映射为 `data_validation_failed`。Bot 于 21:26 重启加载门控；主人用纯图片复测后 `/表情意图状态` 显示样本 1、skipped、empty_user_text、匹配 0、无选中 ID，结构化 classifier 行与计数完全未增加，Matcher 0 错误、stderr 为空，也没有进入表情发送。历史故障已由重启前 21:25:23 的另一条真实合格文本分类成功自然 recovered，没有删除或伪造事件。状态展示现已按 `attachment_status + decision_reason` 细分：只有 `preflight_blocked + empty_user_text` 显示“纯图片无文本，已在本地跳过；未调用分类模型，未发送表情”，cooldown、message_gap、hourly_cap 和其他真实预检阻断仍显示“频率门控中，未调用分类模型”。这只是展示修正，不改变门控、结构化事件、模型调用或发送行为；定向 21 tests、完整 Python 651 tests OK（skipped=3）。展示补丁于 2026-07-21 00:50:39 首次加载；该实例稍后在没有正常 shutdown 标记的情况下离线，未据此推断具体原因，也未由开发代理自动重启。当前 Bot 启动链于 10:43:20 恢复，8080 为 Bot 单一监听且 OneBot 会话已建立。主人随后完成纯图片 QQ live，`/表情意图状态` 真实显示样本 1、`skipped`、无有效建议、0.00、`empty_user_text`、匹配 0、影子选中 ID 无，最后一行精确显示“纯图片无文本，已在本地跳过；未调用分类模型，未发送表情”。验收前后四个 `sticker_classifier` 桶及其 `occurrence_count/last_seen_at` 完全不变，没有新增 succeeded、failed、degraded 或 skipped 事件；历史 `data_validation_failed` 与 recovered 证据保持原样。Bot 已加载且 QQ 新文案 live 已通过。
+## 2. 当前主人批准方向
 
-P2.48 Owner Console 可靠性可用性与演进现状审计、设计和 P2.48a 最小可读性优化已经完成。主人要求减少新增内容、以优化原界面为主，并且中文只能解读、不能覆盖英文报错；实现因此为 trend item 与 coverage 增加中文 label，同时完整保留英文 component、operation、category、code 和 recovery_state。原故障面板内只增加两行确定性筛选总结，指标从六项压缩为四项，筛选显示“中文（英文）”，七列表格把三个时间字段合并后缩为五列。总结不调用 LLM，筛选后与同一 `filteredRows` 同步；没有等长前一窗口前禁止生成“上升/下降”结论。后端 34 tests、可靠性页 3 tests、完整 Python 651 tests（skipped=3）、当时完整前端 15 tests、TypeScript、生产构建、GET-only guard、AST 144 files、pip check 和 `git diff --check` 通过。Owner Console 随后启动加载新页面，生产路由和 API 正常，主人在真实页面确认“目前可读性很高”，因此可靠性页最小可读性优化 live 验收通过。设计与实现状态见 `docs/owner-console-reliability-usability-design.md`。
+主人当前明确批准的工作已经推进到以下状态：
 
-P2.48b 已按同一标准完成诊断页的前端最小可读性优化并加载生产页面。现有八个快照区块、观测区和运行边界均保留；顶部只总结区块读取状态，不再把 `section.ok` 误写成外部功能健康，卡片状态改为“已读取/读取异常”。重复 `summary_text` 被消除；已知 `key=value` 使用“中文含义、解释值、原始英文证据”三层紧邻布局，未知字段和英文原始错误继续直接可见。主人在真实页面确认可读性没有问题，但指出页面仍更像配置目录，只显示功能开关，没有执行诊断动作或判断实际问题；因此 P2.48b 可读性验收通过，诊断实用性没有收口。Owner Console 随后按主人要求关闭，8090 当前不监听。详细设计见 `docs/owner-console-diagnostics-usability-design.md`。
+1. `completed`：文档治理规范已落实到权威快照、导航、历史免责声明、陈旧事实、能力审计和 Owner Console 手动诊断 runbook。
+2. `implemented`、`regression_passed`：主人批准的 Owner Console TTS 一键受控生命周期诊断已完成 fake-only 代码、页面、合同和回归；明确离线时可启动受管理子进程，验证后只清理本次产物，并只停止本次持有句柄的进程。
+3. `completed`：未获方向批准的 `system_diagnostics_report/core` 命令、scope、运行时、测试和正式能力表述已撤销；只保留 `_system_database_read_probe()` 改用 `connect_read_only()` 的独立安全修正。
+4. `live_retry_failed_service_start`、`fix_effect_verified`：主人于 2026-07-25 第二次执行 P2.49d 后，`ConnectTimeout` 已正确进入受管理启动；但当时版本的子进程在固定 45 秒内始终未提供有效 `/health`，结果为 `failed/tts_service_start_timeout`。本次 `service_start_attempted=true`、`service_stop_attempted=true`、`service_stopped=true`、`tts_called=false`，没有模型合成或 WAV。
+5. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_technical_passed`：主人随后批准 P2.49d lazy bootstrap 最小修复。第三次真实动作已在 `startup_elapsed_ms=1054` 后获得轻量 health，首次 `/tts` 完成 runtime 导入、模型合成、132140-byte/2995-ms WAV 验证、精确清理和本次服务停止；证明 lazy bootstrap 与基础技术链可用。
+6. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted`：主人听检门控真实验收通过。新 run 总计 59780 ms，合成 56579 ms，WAV 140844 bytes/3193 ms；技术结果成功，主人完成试听并接受，`audio_quality_reviewed=true`、`audio_quality_accepted=true`。接受后内存预览已清除，受保护 GET 返回 409；磁盘产物和本次服务均已收尾。
+7. `live_vision_passed`、`live_cleanup_attention`：主人已执行 P2.49e 真实视觉动作。固定 311-byte PNG 与严格四色回答合同均通过；`qwen2.5vl:3b` 完成一次推理，`vision_called=true`、`response_contract_valid=true`。由于旧实现只在响应后 8 ms 读取一次 `/api/ps`，当时未确认模型释放，严格保留 `attention/vision_model_cleanup_incomplete`；稍后只读检查已见目标模型消失。
+8. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_passed`：主人批准 P2.49e 最小收口验证修订。重跑为 `succeeded/vision_managed_lifecycle_succeeded`，模型调用前未驻留、`keep_alive=0`、收口轮询 2 次/284 ms 后确认释放；不重复 `/api/chat`、不执行 `ollama stop`、不停止已有服务。
+9. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_failed`、`owner_rejected`：固定正式表情严格结构化版完成主人 live。模型完成一次推理且资源收口通过，但多个结构字段返回 `unknown`，自然描述误判为“黑色帽子、白色披风、眼睛被红色心形遮住”；后端正确返回 `failed/result_validation/vision_response_contract_mismatch`，未伪装成成功，也未进入接受门控。
+10. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_technical_passed`、`owner_rejected`：主人执行最小自然描述单变量实验。模型一次请求、usage 与资源收口均完成，底层 `technical_outcome=succeeded`、`technical_code=vision_managed_lifecycle_succeeded`、`model_cleanup_verified=true`；但自然回复仍把黑白长发说成黑帽子和披风，把眼睛说成被心形遮住，对被爱心遮挡的嘴部作无依据判断，并把透明背景说成纯黑背景。主人审核后最终严格保留 `failed/owner_visual_review/vision_response_quality_rejected`，证明关闭 Schema 没有使当前本地模型达到所需描述质量。
+11. `owner_approved`、`configured_privately`、`isolated_live_passed`、`owner_accepted`：主人配置百炼北京地域 OpenAI-compatible URL/Key，并明确批准对同一固定 `owner_private` PNG 做三次逐步提示词实验。最终固定 `qwen3.7-flash`、`enable_thinking=false`、一次请求、零工具、零重试；最佳一次为 1578 ms、input/output/total token 316/98/414，主人接受其对黑白头发、可见眼睛、大小爱心以及爱意/兴奋/撒娇情绪的描述。有限清理只移除完整前导 `<think>…</think>` 或前导孤立 `</think>`。
+12. `owner_approved`、`implemented`、`regression_passed`、`owner_console_loaded`、`ui_smoke_passed`、`bot_loaded`、`qq_live_passed`、`owner_accepted`：主人随后批准把百炼 `qwen3.7-flash` 作为生产 `describe_images()` 的主视觉模型，并原位替换 Owner Console 的本地视觉配置/诊断面板。2026-07-27 Owner Console 页面验收无问题；Bot 加载后主人连续发送两张 QQ 图片，均得到快速且准确的描述，结构化事件记录两次成功。生产云视觉链现已完成 QQ live 验收。
+13. `owner_approved`、`implemented`、`regression_passed`、`next_start_effective`：主人指出 `scripts/start.ps1` 仍因 `ENABLE_VISION=true` 检查本地 `qwen2.5vl:3b`。现已从 `ensure-ollama.ps1` 移除视觉对本地 Ollama 的依赖；未来启动只有启用 MemoryRAG/ProjectDocRAG 且 embedding provider 为 Ollama 时才检查 `bge-m3`。新增 3 项零网络合同测试，全量 Python 737 tests OK（skipped=4）；未重启当前 Bot/Ollama。
 
-P2.49 将诊断边界调整为“默认快照只读、主人批准的固定手动工作流逐项开放”。P2.49a 的 ProjectDocRAG 固定真实检索已经完成代码、一次真实 embedding、mode=ro 前五项检索、数据库零写入和主人页面 live。普通启动仍关闭动作；显式 `start-owner-console.ps1 -EnableProjectDocRagProbe` 才显示对应按钮。第一次点击只展开确认，第二次确认才发送固定 POST；POST 使用固定路径、JSON、动作 Header、loopback 同源 Origin 和进程内 HttpOnly/SameSite Strict 动作 Cookie。状态只保存在 Owner Console 进程内，不写 Agent task、approval、可靠性事件或诊断表。详细合同见 `docs/owner-console-manual-diagnostics-design.md`。
+方向选择规则：
 
-P2.49a 首次手动 live 已验证二次确认、唯一 POST 和安全结果展示确实工作，但执行器在任何 embedding、SQLite 计数或检索之前，把生产 `enable_project_doc_rag=false` 当成硬阻断，返回 `stage=preflight / code=project_doc_rag_disabled`。只读核对确认只有 run_id=1、attempt_count=1，索引重建、数据库写入允许、LLM、DevContext 和自动重试均为 false，8090 单一监听且 stderr 无错误。该生产开关控制原有运行链，不应覆盖主人通过 `-EnableProjectDocRagProbe` 单独批准的固定手动动作。主人批准最小修复后，执行器不再修改或要求开启生产配置，而是把它显示为 `runtime_feature_enabled=false` 证据并继续专用 mode=ro 检索。新增回归强制覆盖“生产功能关闭 + 手动动作显式启用”仍只执行一次；完整 Python 仍为 656 tests OK（skipped=3），完整前端 19 tests、生产构建和单一 POST 边界守卫通过。修复尚待仅重启 Owner Console 加载，第二次真实检索不得自动执行。
+```text
+事实仍存在 != 应立即实现
+未完成事项 != 当前下一阶段
+候选范围 != 主人批准范围
+历史“下一步” != 当前路线图
+未明确命名方向的“继续下一阶段” != 可以自行选择旧 backlog
+```
 
-主人随后完成 P2.49a 第二次手动 live。页面显示“固定项目文档真实检索通过”，生产功能仍为未启用且原始证据 `runtime_feature_enabled=false`；run_id=1、attempt_count=1、status=completed、outcome=succeeded、stage=result_validation、code=project_doc_rag_probe_succeeded。真实只读计数为项目文档 1620、有效向量 1620，前五项返回 5、固定目标命中、最高相似度 0.728。验收后数据库 mtime 明确早于本次动作开始，index_rebuild_executed、database_write_allowed、llm_called、dev_context_called、automatic_retry 全为 false；stderr 只有 4 行启动 INFO、0 个 ERROR/Traceback/Exception，8090 单一监听。P2.49a 的二次确认、一次真实 embedding、mode=ro 元数据检索、中英安全证据和零自动后续动作 live 同时通过；未执行 MemoryRAG、Main LLM、TTS 或视觉。
+任何新阶段开始前，必须先向主人说明目标方向、实际问题、能证明什么、不能证明什么、真实调用、写入、副作用、重启范围、影响模块和验收方式。只有标记为 `owner_approved` 的事项可以开始。
 
-P2.49b 已完成第二个固定手动工作流 `memory_rag_index_consistency`。它只通过 SQLite `mode=ro` 统计 MemoryRAG 活动文档、当前 provider/model 有效向量、按事实/偏好/会话摘要拆分的缺失向量、来源映射缺口和软删除历史文档所带向量；SQL 不选择 `content` 或 `summary`，不生成查询向量，不执行私人记忆检索，不调用 Main LLM、DevContext 或 CombinedRAG，也不重建索引、写数据库或自动修复。生产 `enable_memory_rag` 只作为 `runtime_feature_enabled` 证据，不覆盖主人通过 `-EnableMemoryRagConsistencyProbe` 对固定动作的单独授权。两个手动动作使用独立启用开关、固定路径/Header/confirmation 和各自最近结果，但共享单进程运行锁，不能并发、排队或自动重试。当前安全审计为活动文档 37、有效向量 35、缺失 2，均属于 `manual_fact`；来源缺失为 0，软删除历史文档向量 5。因此预期 live 结论是 `outcome=attention / stage=result_validation / code=memory_rag_active_embedding_gap`，表示真实一致性缺口而不是工作流执行失败。Owner Console 相邻 50 tests、RAG/QQ 边界相邻 41 tests、完整 Python 662 tests OK（skipped=3）；完整前端 20 tests、TypeScript、Vite build、两个固定 POST 边界守卫、AST 146 files、pip check 和 `git diff --check` 通过。自动化只使用临时 SQLite 和 provider identity fake。Owner Console 已于 2026-07-22 00:40 仅重启自身并加载 P2.49b；8090 单一监听，两个工作流均启用，自动诊断和配置/业务数据写入关闭，三个 latest run 均为空，stderr 0 错误，启动前后数据库大小与 mtime 不变。开发代理没有自动执行动作；当前等待主人二次确认后手动验收。
+## 3. 当前阶段已完成
 
-主人于 2026-07-22 完成 P2.49b 页面手动 live。页面显示“2 个活动记忆文档缺少当前有效向量”和“需要关注”，生产功能已启用；活动文档 37、有效向量 35、缺失 2，事实/偏好/会话摘要分别为 10/3/24，缺失分别为 2/0/0，来源缺失 0，软删除历史向量 5。英文原始证据为 `workflow=memory_rag_index_consistency / stage=result_validation / code=memory_rag_active_embedding_gap`，并显示 memory_content_read、private_memory_query_executed、embedding_called 均为 false。后端只存在 run_id=1、attempt_count=1，elapsed_ms=32，日志中固定 POST 恰好 1 次，ProjectDocRAG 最近结果仍为空。验收前后数据库大小 26775552 字节、mtime `2026-07-22T03:30:40.3271009Z` 完全不变；index_rebuild_executed、database_write_allowed、llm_called、dev_context_called、automatic_retry 均为 false。8090 正常监听，stderr 4 行启动 INFO、0 错误。P2.49b live 正式通过；2 条缺失向量只记录为 attention，没有自动修复。
+完成度必须区分 `implemented`、`regression_passed`、`loaded`、`live_passed` 和 `owner_accepted`，不能把本地实现写成线上通过。
 
-P2.49c 第一阶段已按主人确认收窄为“判断 Main LLM 能否正常运行并回答一个固定问题”，不尝试用一次诊断评价任意问题应选择何种工具。新增专属 `main_llm_fixed_contract` executor，只发送后端固定合成问题并严格验证五字段 JSON；不创建 MainAgentState，不进入 MainAgentGraph、ToolRegistry、Policy、审批或工具执行，不挂 reliability observer。专属 client 固定 `max_retries=0`、streaming=false、30 秒硬超时、15 秒关注阈值、256 completion tokens 和 1024 字符本地上限；结果区分 succeeded、attention、failed，只返回模型名、延迟、有限 token 计数、英文 workflow/stage/code 与零副作用证据。新增独立 `-EnableMainLlmContractProbe`、固定同源 POST、共享全局运行锁和紧凑二次确认面板。所有自动化只使用 fake LLM；Owner Console 全邻域 62 tests、完整 Python 674 tests OK（skipped=3），完整前端 21 tests、TypeScript、Vite build、三固定 POST guard、AST 148 files、pip check 和 `git diff --check` 通过。主人随后完成页面二次确认：run_id=1、attempt_count=1、llm_called=true、elapsed_ms=8146、输入/输出/总 token 为 74/126/200，无客户端重试、tool calls、工具执行或业务副作用。模型已正常响应但严格五字段 JSON 未通过，结果保留 `outcome=attention / stage=result_validation / code=main_llm_contract_mismatch`；主人确认第一阶段基础运行成功，因此 P2.49c 以“基础可用 live 通过、结构子合同 attention”收口。
+| 项目 | 已确认状态 | 关键结论 |
+|---|---|---|
+| P2.48 Owner Console 可读性 | `implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 可靠性页和诊断页保留英文证据，中文只作解释；主人页面验收通过 |
+| P2.49a ProjectDocRAG 固定检索 | `implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 二次确认；一次真实 embedding；SQLite `mode=ro` 前五项；数据库零写入 |
+| P2.49b MemoryRAG 一致性 | `implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 37 个活动文档、35 个有效向量、2 个 `manual_fact` 缺失向量；只报告 `attention`，未读取正文、未检索、未修复 |
+| P2.49c Main LLM 固定问答 | `implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | Main LLM 能完成一次固定问答；严格五字段 JSON 未通过，保留 `attention/main_llm_contract_mismatch`；不证明任意工具选择能力 |
+| P2.49a–c 完整回归 | `regression_passed` | 提交前记录为 Python 674 tests OK（skipped=3）、前端 21 tests、TypeScript、Vite build、三条 POST guard、AST 148 files、pip check、`git diff --check` 通过 |
+| 文档治理第二轮 | `implemented`、`docs_validated` | 权威快照改为固定九段；补主人批准状态、优先级和唯一下一步；修正 external-read、能力审计、runbook 和导航陈旧事实 |
+| P2.49d TTS 一键受控生命周期 | `audited`、`designed`、`implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 主人最终听检 run 总计 59780 ms、合成 56579 ms，WAV 140844 bytes/3193 ms；技术合同通过，主人试听并接受。审核后内存预览、磁盘产物和本次受管理服务均已收尾，不自动重复合成 |
+| P2.49d 完整回归 | `regression_passed` | Python 693 tests OK（skipped=4）、前端 24 tests、Owner Console 相关 57 tests、RAG/QQ 边界 13 tests、TypeScript、Vite build、四条 POST guard、Python AST 154 files、pip check、文档链接/围栏和 `git diff --check` 通过 |
+| P2.49e v1 视觉生命周期 | `loaded`、`live_passed` | 第二次主人 live：固定四色结构合同通过；总计 8821 ms、推理 8373 ms、收口 284 ms，`model_cleanup_poll_count=2`、`model_cleanup_verified=true`，证明 5 秒有界轮询修订生效。该版本只能作为接口/结构/资源基础证据；图片简单且 prompt 含预期颜色，不能继续作为内容理解质量终态 |
+| P2.49e v2 严格结构化描述 | `implemented`、`regression_passed`、`loaded`、`live_failed`、`owner_rejected` | 固定资产与单次推理、模型释放均正常；结构合同失败，描述把黑白头发误认为黑帽子/白披风并误称眼睛被爱心遮住。该结果证明严格 Schema 版不满足描述质量，不能倒写成功 |
+| P2.49e 自然描述实验 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_technical_passed`、`owner_rejected` | 请求无 `format`、无 JSON Schema、无字段枚举和视觉答案；本次 `elapsed_ms=11035`、推理 10474 ms、input/output/total token 为 1058/66/1124，模型收口轮询 2 次并确认释放。技术链通过但描述仍有黑帽子/披风、眼睛被遮、嘴型和纯黑背景等错识别，主人拒绝质量，最终为 `failed/owner_visual_review/vision_response_quality_rejected` |
+| P2.49e 自然描述完整回归 | `regression_passed` | 视觉 executor 15 tests、手动诊断 17 tests、Python 720 tests OK（skipped=4）、前端 31 tests、TypeScript、Vite build 通过；没有访问真实视觉、停止/重启 Ollama、修改正式表情资产或执行 QQ |
+| 阿里云百炼隔离真实探测 | `owner_approved`、`configured_privately`、`isolated_live_passed`、`owner_accepted` | 同一固定 `aike_affection_005` owner_private PNG；北京地域 `qwen3.7-flash`；三次主人逐步批准的单次请求。最终 prompt 允许概括可见画面的情绪/感情色彩，最佳回复获主人接受；最后一次 1578 ms，token 316/98/414，没有第四次请求 |
+| 百炼生产视觉与 Owner Console 收口 | `owner_approved`、`implemented`、`regression_passed`、`owner_console_loaded`、`ui_smoke_passed`、`bot_loaded`、`qq_live_passed`、`owner_accepted` | 生产 `describe_images()` 使用百炼且无 Ollama/Plus fallback；Owner Console 原位替换完成。主人确认页面无问题，并在 QQ 连续发送两张图片，均得到快速准确描述；同一 runtime 有两次结构化 vision success |
+| 启动脚本 Ollama 依赖收口 | `owner_approved`、`implemented`、`regression_passed`、`next_start_effective` | `ENABLE_VISION`、`VISION_OLLAMA_BASE_URL`、`VISION_MODEL/qwen2.5vl:3b` 不再参与 `ensure-ollama.ps1`；仅 Ollama-backed MemoryRAG/ProjectDocRAG 检查 embedding URL 与 `bge-m3`。聚焦 3 tests、Python full 737 tests（skipped=4）、PowerShell parse、`git diff --check` 通过 |
+| P2.49d ConnectTimeout 最小修复 | `implemented`、`regression_passed`、`reloaded`、`live_effect_verified` | 新增 `ConnectTimeout -> 受管理启动` fake 端到端测试；主人重试时 `service_start_attempted=true`，证明分类修复生效。`ReadTimeout -> 不盲目启动` 继续成立；新的失败发生在受管理启动后的 health 等待 |
+| P2.49d lazy bootstrap 最小修复 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_technical_passed` | `/health` 不导入 torch/IndexTTS 即可就绪；首次 `/tts` 才导入 runtime 和构造模型；第三次 live 的 `runtime_imported_before=false`、`service_started=true`、`tts_called=true` 和有效 WAV 证明修复真实生效 |
+| P2.49d 主人听检门控 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 固定文本“这是一次固定语音合成检查。”已由主人真实试听并接受；最终 `succeeded/result_validation/tts_managed_lifecycle_succeeded`。`technical_outcome=succeeded`，听检后预览不可再取、磁盘无 WAV、7861 无 listener。Python 719 tests OK（skipped=4）、TTS 18 tests（skipped=1）、Owner Console 102 tests（skipped=1）、前端 29 tests及全部静态边界通过 |
+| `core` 处置 | `implemented`、`regression_passed` | 未批准命令及能力全部撤销；只保留 `connect_read_only()`，源码/测试搜索已无 `core` 正式入口符号 |
 
-P2.46 保留状态：`system_diagnostics_report` 已开放 `overview`、`vision`、`voice` 和 `memory_rag` 四个严格 scope。主人私聊可以分别执行 `/agent 执行系统诊断任务`、`/agent 执行系统诊断任务：视觉`、`/agent 执行系统诊断任务：语音` 和 `/agent 执行系统诊断任务：记忆与RAG`。P2.46a-c 的设计、概览和视觉详情已经完成；P2.46d 的 Bot 加载与主人 QQ live 已由主人反馈未发现问题。本轮语音与记忆/RAG 扩展不另设新的阶段编号。
+P2.49c live 的核心证据：
 
-最近完成事项：语音详情按功能配置、loopback 地址、服务健康、IndexTTS2 模型加载和安全运行观测执行首故障短路；记忆与RAG详情按配置、存储、索引、运行观测执行首故障短路。两者都只保存状态、定位层级、推荐 scope 和安全计数，不保存 URL、日志、路径、RAG 正文、查询正文或错误原文。`/agent 语音状态怎么样` 已补全服务可达性、health、模型加载、语言、最近候选和“未做端到端验证”的说明；`/agent 查看配置状态` 已改为基础入口、聊天模型、MainAgent、记忆与RAG、视觉、语音和高风险边界分区概览。内部 `/agent` 命令能力审计已经建立，覆盖严格入口、28 个主人只读 command、任务/审批、13 个审批写 command、LLM/RAG 和测试边界；`DiagnosticsGraph` 也已按 view 使用显式最小节点计划，局部配置、错误、图片缓存和记忆状态不再隐式执行 TTS health 等无关采集。针对主人 live 观察到的视觉 runner 临时退化，快速视觉状态和多步图片诊断现在只在“服务/模型正常 + 推理低质量重复”时中性提示 runner 可能异常，并给出手动 `ollama stop qwen2.5vl:3b`；诊断本身不执行、不重试。
+```text
+workflow=main_llm_fixed_contract
+outcome=attention
+stage=result_validation
+code=main_llm_contract_mismatch
+configured_model=gpt-5.5
+elapsed_ms=8146
+input_tokens=74
+output_tokens=126
+total_tokens=200
+attempt_count=1
+llm_called=true
+contract_valid=false
+tool_definitions_sent=false
+client_automatic_retry=false
+database_write_allowed=false
+```
 
-路由收口：明确 `/agent 查 <问题>`、`/agent 查询 <问题>`、`/agent search <问题>` 和 `/agent-debug <问题>` 才确定性进入 `dev_context`。没有 Main LLM 且未命中确定性命令的未知表达改为 `ask_owner`，只返回澄清和真实已注册命令，不执行工具、不查询 RAG、不创建 pending intent。Main LLM 的 Action Planner 同样被要求把运行状态/故障与研发上下文分开；对象、范围或运行/研发含义不清时优先 `ask_owner`，不得以 `dev_context` 猜测当前服务、模型、配置、进程、数据库、TTS 或视觉状态。
+## 4. 当前阶段待完成
 
-MainAgent 输出边界：工具与 RAG 结果是只读证据，不是身份设定。MainAgent 不采用召回内容里的角色名，不自称“爱可”或其他聊天角色，不添加括号动作旁白，不声称执行工具未执行的检查。ChatAgent 的角色卡和聊天风格仍只属于普通聊天链路。
+| 事项 | 是否仍存在 | 实际影响 | 优先级 | 批准状态 | 下一动作 | 可自动开始 |
+|---|---|---|---|---|---|---|
+| P2.49d 主人试听质量验收 | 否 | 主人已完成真实试听并明确接受；技术、质量、内存清除、磁盘清理和服务收尾证据完整 | COMPLETED | `live_passed_owner_accepted` | 无后续动作；不自动重复合成 | 否 |
+| P2.49e 本地自然描述复验 | 否 | 主人已执行并拒绝回复质量；技术链和收口通过，但本地 `qwen2.5vl:3b` 对固定复杂表情的语义质量不足 | COMPLETED | `live_technical_passed_owner_rejected` | 不自动重复本地推理；结论作为线上方案对照基线 | 否 |
+| 百炼云视觉页面与 QQ 生产验收 | 否 | Owner Console 页面由主人确认无问题；Bot 已加载，连续两张 QQ 图片均快速准确描述 | COMPLETED | `owner_console_loaded_bot_loaded_qq_live_passed_owner_accepted` | 不自动重复图片测试；按正常生产使用观察 | 否 |
+| `core` 诊断实验 | 否 | 未批准能力已撤销，不再占用路线图；只读连接安全修正独立保留 | REJECTED | `owner_approved_removal_completed` | 无后续动作，不得从历史文档恢复 | 否 |
+| 2 条 MemoryRAG 缺失向量 | 是 | 一致性缺口已观测；当前未影响本阶段验收 | DEFERRED | `not_approved` | 保持现状，不补建、不修复 | 否 |
+| Main LLM 任意工具选择评估 | 未建立 | 单次固定问答不能代表通用 planner/policy 正确性 | DEFERRED | `not_approved` | 未来按具体工具与场景分别设计验收 | 否 |
+| external-read 时间线、页面 stale 提示、更多移动端优化 | 是 | 有用但不是当前阻断 | P2 | `not_approved` | 保留候选，不从历史文档自动启动 | 否 |
 
-本地验证：external-read 已增加 Tavily Basic provider、固定 DNS/IP/TLS HTTP transport、360 字符 content 清理、条件 executor 装配和配置脱敏测试；QQ live 后又补充来源类型、时效提示、分层输出、安全错误中文化、纯本地 `/agent 联网状态`、明确个人信息拒绝、发布日期安全格式、鉴权/限流分类、Unicode/混淆注入加固和最近正式任务安全快照。Owner Console 现已增加 `GET /api/v1/owner-console/external-read`、独立“联网查询”页面和 Dashboard 摘要卡片，只读取本地配置、依赖版本和当前主人私聊的最近正式任务安全元数据；任务列表也已增加三个正式只读 work type 的白名单标签和数据库层精确筛选。普通聊天新增 `BOT_TIMEZONE=Asia/Shanghai` 本地时间能力：明确的今天日期、星期、当前时间和年份问题会生成单次可信时钟快照，将其仅注入本轮 ChatAgent Prompt，由当前角色卡负责自然表达；回复必须通过本地日期事实校验，否则或 LLM 异常时回退到确定性答案。内部时间上下文不写入用户消息、历史或 RAG，不访问 Tavily、MainAgent、MemoryRAG 或 ProjectDocRAG；Windows 无 IANA tzdata 时使用等价的固定中国标准时间 UTC+8。本地角色卡私人外观设定已从公开记录移除；私人回复长度与动作规则已从公开记录移除，私人角色自称规则已从公开记录移除。角色卡仍不得覆盖 MainAgent 的中性输出边界。最新全量回归 `493 tests OK`，119 个 Python 文件 AST 检查、前端生产构建、12 个前端测试、GET-only 守卫和 `git diff --check` 通过。当前 `main` 与 `origin/main` 无提交差异，工作区包含命令能力审计、按 view 采集、runner 建议、external-read、Owner Console 只读视图、本地时间和角色卡修改，未自动 commit 或 push。
+## 5. 任务优先级
 
-本地时间自然问法补丁：主人 QQ live 发现“爱可记得今天几号吗”和带开头括号动作的同一句未命中严格整句解析，已补充受限自然称呼/记得语气、句尾吗/嘛，以及最多三个开头括号动作的解析副本。完整原消息仍原样交给 ChatAgent；可信上下文要求忽略历史旧日期、只陈述一次本轮事实并继续遵守角色卡。定向本地时间 `7 tests OK`、全量回归 `493 tests OK`、`git diff --check` 通过。
+```text
+P0              会误导当前方向、安全边界或实际操作，或正在阻断当前阶段
+P1              主人已明确指定的下一方向
+P2              有价值但不是当前主线
+P3              低频或结构性候选
+DEFERRED        主人明确延后
+REJECTED        明确不采用
+SUPERSEDED      已被后续方案替代
+NEEDS_REVALIDATION  只能在重新核对 Git、代码或 live 后引用
+```
 
-主人 QQ live：正式任务 #33 为系统概览、#34 为视觉详情、#35 为语音详情、#36 为记忆与RAG详情，四条命令均成功完成。#35/#37 当时把本机 TTS 未运行定位为服务层降级；主人随后明确真实设计是为了节省显存而在语音请求时冷启动 TTS。快速状态已 live 显示“按需待机”，但正式语音任务 #40 因 work runtime 的新 `startup` 层 sanitizer 映射漏注册而失败；该 `KeyError` 不是 TTS 故障。补上 `startup -> normal` 并增加正式任务链回归后，主人重启 Bot 再次验证系统概览和正式语音详情，反馈均没有问题；新的任务 ID 未提供，因此不臆造编号。overview、正式语音详情和快速状态现在共同读取 `tts_auto_start`，按需待机不再降级；该验收仍不代表执行过真实 TTS 冷启动、音频生成或 QQ 发送。
+同一事项的“优先级”和“批准状态”必须分别记录。高优先级不自动等于获准执行；旧任务仍存在也不自动获得优先级。
 
-本地时间与角色卡 QQ live：首次自然问法错误沿用 `2025-05-24 星期六`；补丁后主人用带括号动作的同一句复测，ChatAgent 正确角色化回答 `2026-07-13 星期一`，保留“狗修金”角色称呼和完整动作语境。运行日志显示普通聊天 matcher 正常完成且无错误，最新 Agent 任务仍为 #43，没有新增 external-read 或 Tavily 请求。该 live 同时确认普通日期问题先调用 ChatAgent，只有候选事实不合格或模型异常时才使用确定性短句回退。
+## 6. 主人授权与禁止动作
 
-当前保留现象：只读一致性审计确认 MemoryRAG 有 2 条活动 `manual_fact` 文档缺少当前有效向量；37 条活动文档中 35 条具备当前有效向量，来源映射缺口为 0。该现象在 P2.49b 中只作为 `attention` 诊断证据展示，不自动重建 MemoryRAG、不补向量、不创建修复任务。
+当前已授权：
 
-当前未完成事项：真实私人记忆检索仍未批准，2 条缺失向量也未批准修复。P2.49c 已完成基础运行 live，严格 JSON 子合同的 attention 保留为真实兼容性证据，不自动重试或扩展为工具选择测试。核心、聊天和 MainAgent 系统诊断区域详情仍未注册；Owner Console external-read 事件时间线、页面级 stale 提示和进一步移动端验收尚未实现。本地时间第一版尚不计算明天、月底、节假日、调休或农历。本地表情包 A1–A4 已实现；C1 解耦远程分类与 B2 主人私聊自动附带主链均已通过 QQ live。主人不喜欢的首张卖萌 GIF `aike_act_cute_001` 仍保持撤销；2026-07-14 按主人指定的 14 个候选逐项安全批准后，正式库为 revision 18、enabled 14、disabled 2、invalid 0，B2 现在已有可发送资产。B1 ChatAgent 内嵌 marker/JSON 方案保持关闭。本地 3B 视觉模型仍未达到无人复核批量分类质量，但真实识图已通过一条主人 QQ live，先前结构化故障具备 recovered 证据。确定性失败文案代码已加载并通过自动化，因本次识别成功而没有触发 QQ 失败分支；不为补验故意制造模型故障。仍有 16 个表情候选未批准；已撤销资产的重新启用、群聊发送和 QQ 动态继续延后。真实 TTS 合成与 QQ 发送已完成一次 live；其他深度 scope 继续逐项审批。
+- 只读核对 Git、源码、测试和指定文档。
+- 修改文档以落实本快照合同、修正陈旧事实并补齐操作说明。
+- 完成 P2.49d 一键受控生命周期的 fake-only 实现、页面、临时 WAV/fake process 测试和回归，不发起真实请求。
+- 完成 P2.49e Owner Console 固定视觉诊断的独立 executor、显式开关、固定 POST、页面二次确认、fake HTTP/fake process/内存 PNG 自动化和完整回归，不启动、不推理。
+- 按主人批准完成 P2.49d `ConnectTimeout` 最小离线分类修复、fake 回归并重启 Owner Console；不自动重新执行 TTS，重试仍由主人页面二次确认。
+- 按主人批准完成 P2.49d lazy bootstrap：轻量 health 先监听，首次 `/tts` 才导入 torch/IndexTTS；完成 fake/全量回归并重启 Owner Console，不自动执行第三次 live。
+- 按主人批准完成 P2.49d 内存临时试听与主人质量门控，完成完整回归并重载 Owner Console；不自动重新合成或代替主人判断听感。
+- 按主人批准完成 P2.49e 模型收口验证最小修订与 fake/全量回归；只增加有界 `/api/ps` 轮询和安全证据，不自动执行视觉复验。
+- 按主人批准完成 P2.49e v2 固定正式表情样例、无答案泄露 prompt、实际描述展示和主人质检门控的实现与回归；不自动重载或执行 live。
+- 按主人批准完成 P2.49e 最小自然描述单变量实验：移除严格 JSON Schema、枚举与语义答案比对，保留固定图片、固定模型、单次推理和主人质检；不自动重启或执行 live。
+- 按主人逐步批准完成百炼北京地域 `qwen3.7-flash` 的三次隔离固定图片测试、有限 think 标签清理、生产云视觉主链、Owner Console 原位面板替换、服务加载和两张 QQ 图片 live；不自动重复图片请求或扩大测试范围。
+- 撤销未批准的 `core` 命令/scope/运行时/测试，只保留 `connect_read_only()` 安全修正。
 
-明确延后事项：Bot 自动创建系统计划任务、自动告警、自动下钻、自动视觉/TTS 主动探针与失败重试、embedding/RAG 主动探针、外部聊天连通性探针、服务自动重启、模型下载、配置修改和诊断后自动修复均未批准；P2.40b、登录鉴权和 Web 审批操作继续延后。本机只读周期巡检脚本已实现，可由主人手动运行或自行配置 Windows 任务计划程序，但不会自动安装计划任务。
+持续禁止：
 
-当前安全边界：MainAgent 只能通过显式 `/agent` 入口触发；普通聊天不能触发 MainAgent 或正式工作任务；ProjectDocRAG 正文仍只进入显式 `/agent` dev_context；不开放 shell、Git 工具、任意路径或项目文件读写、未注册数据库写入、多步写自动化、自动诊断修复或额外 QQ 发送。唯一新增文件写范围是审批后的 TXT/DOCX/PPTX 新产物，只能写入 Git 忽略的固定 `output/main-agent-workspace/`，不接受 path 参数、不覆盖已有文件、不通过 QQ 发送。Owner Console 保持只读 GET；`/docs`、`/redoc`、`/openapi.json` 继续关闭；不提交 `web/owner-console/dist`。
+- 执行 DevContext、CombinedRAG、QueryDevContext 或私人记忆查询；引用或持久化私人聊天记忆。
+- 修复或补建 2 条 MemoryRAG 缺失向量。
+- 自动修复、自动告警、无归属清理、自动重启、自动视觉/TTS 重试；已获合同批准的“只清理本次 TTS artifact”和未来需另行批准的“只释放本次加载视觉模型”不等于通用自动清理授权。
+- 任意 MainAgent shell、任意项目写入或未批准工具执行。
+- QQ 文件、图片、表情或语音发送。
+- 不由开发代理自动执行 TTS 固定诊断或听检审核；新的质量 live 只允许主人在页面二次确认、试听后手动接受或拒绝。
+- 未经新的 live 批准加载或执行 P2.49e 真实动作；不得调用真实视觉模型、停止已有 Ollama、卸载原本驻留模型或访问主人/QQ 图片。
+- 不读取、输出、记录或改写百炼 API Key 原值；未经新的 live 批准，不再次发送固定 `owner_private` PNG、不调用百炼、不重启 Bot/Owner Console，也不执行生产 QQ 图片验收。不得自动改用更贵模型，不得 fallback 到本地 Ollama 或 Plus。
+- 恢复或扩展已撤销的 `core` 命令、scope 或正式能力。
+- 自动 `commit`、`push` 或 `git add -A`。
 
-本地表情 2026-07-14 批准批次：主人指定草稿序号 4、5、6、9、12、15、18、21、23、24、29、30、31、32，对应 `aike_peek_002`、`aike_surprised_001`、`aike_pleading_001`、`aike_pleading_002`、`aike_pleading_003`、`aike_affection_003`、`aike_recording_001`、`aike_affection_004`、`aike_surprised_003`、`aike_pleasing_001`、`aike_affection_005`、`aike_peek_003`、`aike_tired_002`、`aike_pleading_004`。批准前全量复核候选存在性、完整源 SHA-256、重复来源、重复 ID 和目标文件冲突；批准后完整 loader 复核为 schema 2、revision 18、enabled 14、disabled 2、invalid 0。本批 13 张为动态 GIF、1 张为静态图；14 张均重新解码、规范化并复核动画、帧数和总时长。表情专项回归 81 tests OK（skipped=2，仍为 Windows 符号链接权限）。运行分类每次重新加载 manifest，无需为这批数据单独重启 Bot。
+必须保留且不得清理、删除、移动、覆盖、暂存或提交的主人文件：
 
-主人已完成一晚 QQ live，反馈基本场景、远程分类标签和表情选择均符合预期，未发现功能问题。随后完成 B2 分类前本地频率预检优化：自动附件开启时，若命中 120 秒冷却、4 条消息间隔、每小时 6 张上限或附件熔断，直接跳过远程表情分类，减少 token 使用；正文持久化仍会推进消息间隔。下一步只需重启 Bot 后用 `/表情意图状态` 补验一次冷却样本，预期显示 `classifier_status=skipped`、本地决策 `cooldown/message_gap/hourly_cap` 和“频率门控中，未调用分类模型”。若某张效果不喜欢，继续用可逆的精确撤销，不物理删除文件；剩余 16 个未批准候选继续保留。
+```text
+docs/juejin/17-local-dynamic-sticker-library-and-decoupled-classifier.md
+docs/juejin/18-approval-gated-mainagent-document-artifacts.md
+output/
+tmp/
+scripts/install-codex-browser-mcp-bridge.ps1
+scripts/repair-codex-browser.ps1
+scripts/switch-codex-staged-build.ps1
+```
 
-本地表情校准与 A3：`data/stickers/inbox` 当前扫描到 32 个候选，31 个动态 GIF、1 个静态 PNG，全部通过现有预算。32 个候选均已由主人确认初步语义。A3 schema v2 保存来源哈希、最终哈希、动态属性、强度和动作；批准前重新匹配完整源 SHA-256，静态图去 metadata 后统一编码 PNG，GIF/APNG/WebP 解码重编码并保留动画类型、可见变化、总时长和 loop 语义。编码器可以合并连续相同画面，因此 manifest 保存并复核规范化后的真实帧数，而不是强制等于源容器帧数。正式文件和 manifest 使用临时文件、fsync 与原子替换；重复 ID/来源、候选替换、错误确认和未确认草稿全部 fail closed。真实 `approval-drafts.json` 含 32 个唯一草稿。主人 QQ live 已通过 `/表情草稿`，并成功批准 `aike_angry_002` 静态 PNG 与 `aike_act_cute_001` 动态 GIF；正式库 schema 2、revision 2、enabled 2、disabled 0、invalid 0。动态规范化结果为 2 帧/360ms，源 GIF 的连续相同帧被合并但总时长与可见变化保留。主人随后重复批准静态候选，被重复 ID/来源规则安全拒绝；统一失败提示容易误判，现已细分为“已经批准，未重复写入”等安全类别。两次格式不完整/参数错误的撤销命令未改变状态。全量回归 `543 tests OK（skipped=2）`；Bot 于 17:19 重启加载细分提示，8080 与 OneBot 重连正常，stderr 为空。
+## 7. 已知问题和真实风险
 
-本地表情 A4 显式预览：主人已用最终短哈希成功撤销 `aike_angry_002`，正式库当前 schema 2、revision 3、enabled 1、disabled 1、invalid 0。新增纯本地 `sticker_preview.py`，按精确 sticker ID 重新加载完整 manifest，并在发送前再次复核目标文件的最终 SHA-256、MIME、尺寸、字节、动画、帧数和总时长；任一 invalid issue、disabled、未知 ID 或文件变化均 fail closed。新增主人私聊严格命令 `/表情预览 <sticker_id>`，每次只允许一个参数和一次 `send_private_msg`，使用正式本地文件 `MessageSegment.image`；3 秒主人冷却，失败只记录固定安全类别，不含路径，且不重试、不随机换图。该入口不调用 ChatAgent、MainAgent、Tavily、视觉、RAG、数据库或 Agent 任务，不开放群聊和普通聊天。全量回归 `549 tests OK（skipped=2）`，尚待 Bot 重启与 QQ 动态 GIF live。
+- TTS 当前高层 `request_tts()` 会先调用 `ensure_tts_service()`；配置允许时可能启动本地 TTS 服务，并会记录可靠性事件。它不适合作为“无自动启动、无数据库写入”的 Owner Console 固定探测入口。
+- TTS 服务 `/tts` 会在 `temp_audio/` 创建最终 WAV 和分段目录；P2.49d 专属 executor 已建立按后端 artifact ID 精确清理合同，但仍必须把短暂文件写入明确列为副作用，不能宣称整体只读。
+- 历史 `/视觉状态` 已经执行程序生成 32×32 PNG 的真实 Ollama 推理，但会把异常细节整理进 QQ 状态文本，且没有 Owner Console 独立开关、二次确认、全局锁、受管理服务句柄或 `/api/ps` 模型驻留收口，因此 P2.49e 已新建独立 executor，没有复用生产视觉链。
+- `scripts/start-ollama-vision.ps1` 默认会结束名为 `ollama`/`ollama app` 的所有进程；P2.49e 没有复用该脚本。Ollama 还可能承载 RAG embedding，因此已有服务绝不停止，原本驻留模型绝不卸载；只有初始明确离线且本次 `Popen` 仍可证明所有权时才停止本次句柄。
+- P2.49e 不创建项目图片或诊断 artifact，但真实动作可能启动 Ollama、加载 GPU 模型，Ollama 外部运行时可能写自身日志/缓存；不能宣称整个外部进程零本地写入。
+- P2.49e 首次主人 live 的固定图片与回答合同通过：模型 `qwen2.5vl:3b`，总计 34656 ms、推理 34392 ms、输入/输出/总 token 为 1103/32/1135。调用前模型未驻留并发送 `keep_alive=0`；旧实现仅在响应后 8 ms 立即读取一次 `/api/ps`，当时仍见模型而返回 `attention/vision_model_cleanup_incomplete`。稍后只读 `/api/ps` 显示目标模型不存在，支持异步释放与即时检查之间的竞态，但不能倒写为原运行当时已验证收口；该待复验状态已由下一条第二次 live 更新。
+- P2.49e v1 第二次主人 live 已把上一条“尚未复验”更新为通过：`elapsed_ms=8821`、`inference_elapsed_ms=8373`、`cleanup_elapsed_ms=284`、`model_cleanup_poll_count=2`、`model_cleanup_verified=true`、最终 `succeeded/vision_managed_lifecycle_succeeded`。但源码审计确认 v1 prompt 直接包含预期四色数组，因此该结果只证明基础传输、结构响应和资源生命周期，不能充分证明感知内容来自图片。
+- P2.49e v2 使用 scope=`owner_private` 的正式启用表情资产，只发送给本机 loopback Ollama并通过受保护 Owner Console GET 展示；这明确改变旧 `image_content_exposed=false` 边界为“固定登记参考图对主人可见”，但仍不读取或暴露聊天、QQ 临时图片、图片缓存、其他表情文件或任意路径。
+- 严格结构化版主人 live 为 `failed/result_validation/vision_response_contract_mismatch`；模型实际描述为“一个戴着黑色帽子和白色披风的卡通角色，眼睛被红色心形遮住。”，与参考图主要可见内容不符。模型资源收口已验证通过；失败不能归因于资源生命周期。
+- 最小自然描述版已完成主人 live：`run_id=1`、`elapsed_ms=11035`、推理 10474 ms、input/output/total token 为 1058/66/1124；底层模型请求与 2 次收口轮询成功，`model_cleanup_verified=true`。自然回复仍错误描述黑帽子/披风、眼睛遮挡、嘴部表情和实体纯黑背景，主人执行拒绝，最终为 `failed/owner_visual_review/vision_response_quality_rejected`。这证明问题不能简单归因于严格 JSON Schema；也不能仅凭该样本断言所有本地视觉任务都不可用。
+- 百炼隔离探测已经按主人批准把固定 `scope=owner_private` PNG 发给外部供应商三次，并产生极低但非零的 token 使用；应用无法控制供应商侧数据处理与留存。隔离结果本身不证明 QQ 生产链，但后续两张 QQ 图片 live 已独立证明当前 Bot 的生产路径可用；仍不证明长期稳定性、工具选择或任意图片质量。
+- 生产 `describe_images()` 已加载百炼北京地域 `qwen3.7-flash`，图片进入该函数后会自动外发；没有本地 Ollama 或 Plus 自动 fallback。主人已完成两张 QQ 图片 live 并接受质量。应用仍无法控制供应商侧处理与留存，不能把两张成功外推为所有图片或长期 SLA。
+- `scripts/start.ps1` 仍调用 `ensure-ollama.ps1`，但视觉已不再构成本地 Ollama 依赖；只在启用 MemoryRAG/ProjectDocRAG 且 embedding provider 为 Ollama 时检查/准备 `bge-m3`。当前运行中的 Bot 不需为该脚本修订重启，效果从下一次启动开始体现。
+- P2.49d 首次主人动作结果为 `workflow=tts_managed_lifecycle / stage=health_check / code=tts_health_contract_invalid`，`health_elapsed_ms=2014`、`service_start_attempted=false`、`tts_called=false`。只读复现确认无 7861 listener 时 httpx 返回 `ConnectTimeout`（约 2110 ms），无法进一步归因其 Windows 网络根因；最小修复只调整分类，不把 `ReadTimeout` 或健康合同异常视为离线。
+- P2.49d 第二次主人 live 结果为 `stage=service_start / code=tts_service_start_timeout`，`elapsed_ms=49634`、`startup_elapsed_ms=47304`、`health_elapsed_ms=40542`、`service_start_attempted=true`、`service_started=false`、`service_stop_attempted=true`、`service_stopped=true`、`tts_called=false`。这证明 ConnectTimeout 分类修复生效，并证明受管理句柄安全收尾；不证明 TTS 服务、模型或合成可用。
+- 第二次 live 所用版本曾在 uvicorn 监听前顶层导入 `torch` 和 `indextts.infer_v2.IndexTTS2`；该结构已按主人批准改为 lazy bootstrap。当前 `/health` 不触发 runtime import，首次 `/tts` 才进入重依赖导入与 `IndexTTS2(...)` 构造，并继续受 180 秒固定请求超时约束。第三次 live 已证明该结构与当前机器基础技术合成可用，但最终成功仍受新的主人音质门控约束。
+- P2.49d 第三次主人 live 返回旧合同的 `succeeded/tts_managed_lifecycle_succeeded`：`elapsed_ms=70802`、`startup_elapsed_ms=1054`、`health_elapsed_ms=3201`、`synthesis_elapsed_ms=67565`、`cleanup_elapsed_ms=1`、WAV 132140 bytes/2995 ms；服务与磁盘收尾均通过。该结果证明技术链，不证明音频内容和听感；旧 WAV 已精确清理，不能恢复为本轮试听。
+- 新听检门控会把技术成功先降为 `attention/owner_audio_review/tts_audio_quality_review_required`。预览只在 Owner Console 进程内存存在，不持久化、不暴露路径；主人接受后清除并恢复技术结果，拒绝后清除并返回 `failed/tts_audio_quality_rejected`。浏览器播放结束只负责解锁按钮，最终质量仍是主人明确判断。
+- 主人质量 live 最终结果：`run_id=1`、`outcome=succeeded`、`stage=result_validation`、`code=tts_managed_lifecycle_succeeded`、`elapsed_ms=59780`、`startup_elapsed_ms=1031`、`health_elapsed_ms=3157`、`synthesis_elapsed_ms=56579`、`cleanup_elapsed_ms=1`、WAV 140844 bytes/3193 ms。`audio_quality_reviewed=true`、`audio_quality_accepted=true`、`audio_review_action_executed=true`；听检后 `audio_preview_available=false`，受保护预览 GET 返回 409，7861 无 listener。
+- P2.49c 只证明一次固定 Main LLM 请求能够得到回答；它不验证通用工具选择、MainAgent planner/policy、RAG 索引或 TTS。
+- MemoryRAG 的 2 条缺失向量是已确认事实，但主人未批准修复。
+- 历史 `core` 实验已经按主人决定撤销；旧文档历史条目只说明曾发生，不得据此恢复命令或 scope。保留的 `connect_read_only()` 只加强既有数据库探针，不增加新命令。
+- 2026-07-24 本次观察未发现 8080、8090、7861 监听；没有 shutdown、ERROR 或 traceback 证据时不得臆测原因。
 
-A4 运行与 QQ live：Bot 于 19:07 重启并成功加载 `ai_chat`，8080 正常、OneBot 已重连、stderr 为空。主人于 20:53 执行 `/表情预览 aike_act_cute_001`，QQ/NapCat 正确收到并播放第 1 张“卖萌”动态表情；handler 单次完成且无 stderr。预览没有改写正式库，复核后仍为 schema 2、revision 3、enabled 1、disabled 1、invalid 0。A4 主人显式动态预览链路通过；disabled 预览拒绝 live 仍可选补验。
+## 8. 唯一下一步
 
-B1 有限意图与 shadow 选择：首版新增严格末尾控制标记，只含 `attach/mood/intensity/scene/confidence`；ChatAgent 不能提供 sticker ID、文件名、路径或 URL。首轮 QQ live 的日期事实和明确卖萌样本均为 `marker_absent`，没有图片；日志确认两条消息都正常进入 ChatAgent，同样问题可由完整正式 prompt 最小复现。分层探针显示模型支持简短 prompt 的 marker，但在系统提示、基础规则和爱可角色卡组合下不稳定，不能进入 B2。随后试用 DeepSeek 单次 JSON object envelope；最小探针看似稳定，22:34 左右主人在真实会话连续发送“爱可给我卖萌”时却只得到固定“没有组织好回答”兜底，证明结构模式可能返回空或不合格 reply，并污染正常聊天体验。该方案已从 `ask_llm` 和 ChatAgent 主链完整回退，`.env` 改为 shadow=false、attachments=false。主链恢复普通文本输出；同一近期历史的只读普通模式探针得到 275 字非 JSON、非固定兜底角色回复。原本地硬门控代码仍不发送：owner-private、confidence>=0.82、精确标签匹配、120 秒冷却、至少 4 条消息间隔、每小时最多 6 张、每次最多 1 张；但 shadow 关闭时不会运行意图选择。回退后全量回归 `562 tests OK（skipped=2）`，git diff --check 通过；Bot 于 22:47 重启，ai_chat 和 8080 正常，等待 OneBot 重连及主人普通聊天恢复验收。
+```text
+P2.49d 已完成 live_passed/owner_accepted。P2.49e 本地视觉的接口与资源收口已经 live 通过，但严格结构化版和最小自然描述版都未通过主人内容质量验收；自然描述版最终为 failed/owner_visual_review/vision_response_quality_rejected。
 
-C1 解耦远程分类器：主人确认 QQ 正常聊天恢复，并把第二个 DeepSeek Key 写入本地 `.env`。新增独立、repr 脱敏且不回退的 `STICKER_CLASSIFIER_*` 配置；固定 `https://api.deepseek.com` 和 `deepseek-v4-flash`。新增严格分类模块，只接收本轮有限用户文本和已发送正文，固定 JSON 五字段、temperature 0、8 秒、180 tokens、无重试；鉴权/限流/超时/非法结构均返回安全类别。普通文字发送成功后才可创建 owner-private 后台任务；并发已有任务时返回 busy，不排队，不写数据库/RAG/Agent/Tavily，也没有任何图片发送或 `commit_sent`。`/表情意图状态` 显示样本序号、分类状态、有限意图、本地决策和安全 ID。新 Key 手动探针中卖萌稳定得到 `playful/medium/acting_cute` 0.95，日期事实得到 `not_requested`。全量回归 `571 tests OK（skipped=2）`，Git 口径 Python AST 145 files OK，pip check 与 git diff --check 通过。主人随后明确批准 owner-private 远程 shadow；Bot 于 2026-07-13 23:57 在 remote classifier=true、旧 marker shadow=false、attachments=false 下重启。2026-07-14 00:02–00:03 QQ live 中，日期事实样本 #1 为 not_requested/intent_absent/无选中，卖萌样本 #2 为 requested + `playful/medium/acting_cute` + 0.95，并精确选中 `aike_act_cute_001`；两次正文正常且没有图片。日志 matcher 正常完成、stderr 为空，正式库仍 revision 3、enabled 1、disabled 1，Agent/Tavily 最新任务均仍为 #43，分类模块无图片发送符号。C1 主链通过，B2 尚未授权。
+阿里云百炼固定样本、Owner Console 新页面和 QQ 生产视觉均已通过主人验收。2026-07-27 Bot runtime 对两张主人图片均快速返回准确描述，结构化记录两次 vision success。`scripts/start.ps1` 的陈旧 qwen2.5 检查也已收口：视觉不再触发 Ollama ensure，Ollama-backed RAG 仍保留 `bge-m3` 检查。当前阶段没有自动下一项；后续方向等待主人明确指定。
+```
 
-B2 主人私聊自动附带：主人明确授权后新增纯 `sticker_attachment.py`，选中 ID 在发送前复用 A4 完整 manifest、哈希、MIME、尺寸、metadata、动画与时长复核；运行接线只允许 owner-private，在 `matcher.send(result.reply)` 之后调用一次 `send_private_msg`，失败不重试、不换图、不影响正文，成功后才 `commit_sent`。若图片已发送但 commit 异常则熔断后续自动发送。专项覆盖成功单次 sender、发送失败单次、非法接收者、未知/禁用/篡改资产零发送，以及源码顺序与唯一调用；全量 `576 tests OK（skipped=2）`，Git 口径 Python AST 147 files OK，pip check 与 git diff --check 通过。00:36 attachments=true 重启后，主人 00:39 发送“爱可给我卖萌”，先收到正常文字，随后收到并确认动态 GIF；状态为 requested + `playful/medium/acting_cute` + 0.95、selected、匹配 1、自动附带已发送。日志 matcher 正常、stderr 为空，Agent/Tavily 仍为 #43。主人随即明确表示不喜欢该表情并要求删除；按安全删除语义用精确 ID 与最终短哈希原子撤销，正式库升至 revision 4、`aike_act_cute_001 enabled=false`，当前 enabled 0、disabled 2、invalid 0，规范化文件保留作审计。
+## 9. 证据入口
 
-B1 运行加载：Bot 于 21:33 重启并成功加载 `ai_chat`，8080 正常、OneBot 已重连、stderr 为空；`ENABLE_CHAT_STICKER_INTENT_SHADOW=true` 与 `ENABLE_CHAT_STICKER_ATTACHMENTS=false` 均为唯一且符合预期的本地定义。当前等待主人普通聊天 + `/表情意图状态` shadow live，不会自动发图。
-
-MainAgent 文档产物：新增 `create_txt_document`、`create_word_document` 和 `create_presentation` 三个 `owner_write_command` 子命令。Main LLM 必须生成完整 `title/content` ActionRequest，ToolPolicyCheck 先创建审批，主人确认后才由纯本地渲染器在 `output/main-agent-workspace/` 创建唯一新文件。TXT 使用 UTF-8；DOCX/PPTX 使用 `python-docx`/`python-pptx`，生成后校验 OOXML ZIP、重新打开并复核字节和 SHA-256。标题最多 120 字符、正文最多 20,000 字符、文件最多 10 MiB、PPT 最多 20 页；无 path 参数、无宏、无网络、无覆盖、本地命令无 QQ 文件发送。首次 QQ live 发现 LC Main LLM prompt 误用了默认只读 registry，导致 visible tool 只有 `dev_context`；现已改为 prompt、ActionRequest 校验、Policy 和执行共用同一完整 registry，并新增复现测试。主人随后确认审批 `#20`，任务 `#44` 已成功生成真实 TXT 产物，且按当时授权未通过 QQ 发送。
-
-MainAgent 文档直接交付：保留上述三个本地 `write_local` 命令的原语义，新增独立 `document_delivery_command`。它仅在 `ENABLE_AGENT_EXTERNAL_WRITE=true` 时向 Main LLM 注册，命令为 `create_and_send_txt_document`、`create_and_send_word_document`、`create_and_send_presentation`，风险为 `write_external` 且必须新审批。审批恢复后先在固定工作区生成一个新文件，发送前重新核对路径、格式、字节数和完整 SHA-256，再仅向确认命令所在的当前主人私聊发送一个 OneBot file segment。待发送状态在尝试前消费，失败不重试、不换文件、不换接收者；群聊和非主人均拒绝。旧审批 `#20` 仅授权本地生成，不会被追溯扩权或自动发送。当前 `.env` 未自动修改、Bot 未重启、QQ 文件 live 尚未执行。最新完整回归为 592 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。
-
-MainAgent 文档 QQ live 内容污染补丁：主人已自行开启 `.env` 外部写配置并完成真实 Word 生成/发送链路，证明审批恢复、DOCX 生成和 OneBot 文件发送可达；但产物正文误包含 `Read-only project context`、工具列表和 `User query` 等内部 prompt 包装。根因是生产 `agent_context` 仍使用“只读本地测试”描述，并被 Action Planner 以“项目上下文”标签与主人请求放在同一 user message；Main LLM 将该脚手架误复制到 `content`。现已把该区域改为“非用户内容的运行时元数据”，明确主人 query 是唯一用户指令；文档主题型请求必须生成完整正文并选择已注册交付工具。新增内部 scaffold marker 执行前拒绝，避免污染内容进入审批；“使用我刚才/上一条/上面提供的内容”在未同条内联正文时由确定性规则直接 `ask_owner`，不调 Main LLM、不创建审批、不生成或发送文件。最新完整回归 597 tests OK（skipped=3）；补丁需重启 Bot 后复验。
-MainAgent 文档意图优先级补丁：主人按推荐复验“生成 Word 并发给我”时，文档提纲中的“推荐下一步”被旧确定性分类器提前命中 `agent_task_read / next_step`，导致询问 Agent 下一步而没有进入文档工具。现已对明确的 TXT/Word/PPT「生成/撰写/制作」请求设置文档意图优先：整句直接交给文档能力 Main LLM，不再让正文提纲中的“下一步、任务、状态”抢占成管理查询。普通 `/agent 下一步` 仍保留原 `agent_task_read` 行为。复现用例已验证目标请求进入 `document_delivery_command`、风险为 `write_external` 并创建审批。最新完整回归 598 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过；需重启 Bot 后再做 QQ live。
-
-MainAgent Word 交付复验：主人重启并复验后反馈 Word 文档成功生成且内容质量不错。该结果确认文档意图优先级补丁已加载，完整提纲中的“推荐下一步”不再误路由到 `agent_task_read`；Main LLM 能生成正常 title/content，内部 runtime metadata 和工具列表未再污染正文，审批恢复、DOCX 渲染和主人 QQ 私聊文件交付链路均已通过 live。主人未提供本次任务 ID 或审批 ID，因此不补写编号。TXT 和 PPTX 的相同交付链路仍有自动化合同覆盖，但尚未由主人另行反馈真实 QQ 内容质量验收。
-
-MainAgent 文档延迟与并发顺序补丁：主人观察到文档 ActionRequest 需等待 Main LLM 撰写完整 `title/content`，约二十多秒无首条回复；此时再发 `/agent 在吗`，第二条并发请求会先返回“在”，之后第一条才返回审批。现为 `/agent` 和 `/agent-debug` 增加独立的每会话互斥，不与普通 ChatAgent 会话锁混用。文档请求获得锁后会立即发送“正在生成文档标题、正文和审批请求”回执；同会话后续 `/agent` 不排队、不执行，立即返回忙碌提示。锁保持到最终结果/审批消息真正发送完成，避免释放锁后的极小竞态窗口。该改动改善首条反馈和顺序，不缩短 Main LLM 实际撰写耗时，也不增加 LLM 重试。主人 PPT 测试已正确创建审批 `#23`、任务 `#47`，工具为 `document_delivery_command`、命令为 `create_and_send_presentation`、风险为 `write_external`，当时状态为等待确认；尚不宣称 PPTX 已生成或发送。最新完整回归 599 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过；需重启 Bot 后复验首条回执与忙碌保护。
-
-MainAgent PPT 审批前结构预检：主人确认审批 `#23` 后，恢复执行失败为 `document_delivery_too_many_slides`，因此未生成、未复核、未通过 QQ 发送 PPTX。根因是 PPT 渲染器将每个 `##` 视为内容节，每 8 条非空正文自动拆分续页，并额外生成 1 张标题页；模型内容的最终分页数超过硬上限 20，而旧审批前校验只检查字符数。现新增纯本地 `presentation_slide_count`，使用与真实渲染完全相同的章节和续页算法；`owner_write_argument_error` 会在 ActionRequest 校验、策略和审批创建之前拒绝超限内容，不再先让主人审批后失败。Main LLM 合同也明确不创建额外“封面”章节，建议最多 12 个 `##` 内容节、每节最多 6 条非空正文，硬上限仍为连标题页和续页共 20 张。已失败的审批 `#23` 不自动重试；需重启 Bot 后重新发起 PPT 请求并确认新审批。最新完整回归 601 tests OK（skipped=3），Python AST 149 files OK，pip check 和 `git diff --check` 通过。
-
-MainAgent PPT 视觉质量升级：主人重新发起并确认新 PPT 审批后，PPTX 已成功生成并收到，证明超页预检修复后生成/发送链可达；但主人反馈有瑕疵、整体生成质量不高。对实际收到的 9 页 PPTX 使用本机 PowerPoint 全页导出检查，确认旧版几乎全为纯白背景、单一“标题+项目符号”布局，封面标题约 28pt、页标题约 24pt、正文约 18pt，存在大量无效留白、层级弱、无主题色/页码/节奏且内容表达高度重复的问题。现已将本地渲染器升级为深色标题页、浅色内容页和蓝/青/紫循环强调色；封面标题 52pt、内容标题 36pt、正文 22pt，新增顶部强调线、章节/页面编号、分隔线、页脚和收束页背景。重复 Markdown H1 不再生成重复内容页，正文中的 Markdown 标记会被清理。Main LLM 合同要求按“总览→分组能力→当前亮点/边界→下一步”叙事，每页一个主旨、3–5 条具体要点，减少空泛和重复表述。升级后使用临时 9 页样例通过本机 PowerPoint 全页导出视觉 QA，未见文字裁切、标题换行、元素重叠或页脚异常。主人明确决定保留现有审批语义：Main LLM 审批前准备可审内容，主人确认后才生成文件并发送，不改为无法预览最终正文的“意图审批”。
-
-证据限制：本快照记录截至 2026-07-13 的仓库工作区、本地回归和主人 QQ live 反馈，不代表未来实时 Git、当前进程、QQ、Owner Console 或其他本地/外部服务状态。配置、`/health` 正常和最近安全观测均不能替代端到端功能验证。
-
-可靠性分类与巡检：新增统一五类故障语义 `configuration/model/permission/network/data`、稳定错误 code、脱敏日志和用户可读建议。Main LLM、MainAgent 工具、正式只读工作和审批恢复失败不再只返回模糊失败或任意异常原文。`/agent 做一次可靠性巡检` 确定性进入既有只读聚合诊断；`scripts/inspect-reliability.ps1` 可检查关键配置存在性、NoneBot/Ollama 本机端口、SQLite immutable read-only 状态和固定日志时间窗，并可选择刷新 Git 忽略的固定 `latest.txt`。2026-07-14 本机基线为当前本地状态正常、近 24 小时 0 个失败信号；近 7 天 11 个失败信号，其中数据类 8、网络类 3、超时 1、失败调用 3、疑似异常退出 0。该统计是历史日志信号而非当前未解决事故。Bot 尚未因本轮改动重启，QQ 新入口待 live；自动告警、自动修复和自动创建计划任务仍关闭。
-
-可靠性巡检最终验证：完整回归 607 tests OK（skipped=3，Windows 符号链接权限），Python AST 594 files OK，pip check、`git diff --check` 和固定报告 UTF-8 中文重读通过。未调用外部模型、Tavily 或 QQ，未自动重启 Bot，未 commit 或 push。
-
-P2.47 结构化可靠性事件第一刀：新增 `reliability_events.py`，固定 schema 1、五分钟桶、90 天最大只读查询窗口和无自由文本事件合同。失败/降级必须使用五类 category 与稳定 code；成功和正常跳过不伪造故障类别，`skipped` 不作为恢复证据。趋势按 `component + operation + category + code` 聚合；同操作最后失败之后出现真实成功才标记 recovered，恢复后再失败标记 recurring，没有成功证据则 unresolved；生命周期异常退出保持 insufficient_evidence。每次 Bot 启动使用随机 UUID，上一轮有 start 无 stop 时只记录 `suspected_abnormal_exit`，不保存 PID 或命令行，也不自动重启。临时 SQLite 测试已直接扫描数据库字节，确认原始异常中的 Key、URL 和用户标识未持久化；直接 SQL 写未知组件/操作同样被 CHECK 拒绝。完整回归 625 tests OK（skipped=3）。2026-07-19 最小 QQ live 中普通聊天、`/表情意图状态` 和不执行工具的 Main LLM 请求均完成，结构化表只有三组预期成功事件，0 非法值、0 失败/降级、0 异常退出误报，且没有新增任务、审批或文档交付。Owner Console 与 `/agent 查看故障趋势` 仍属于后续单独范围。
-
-P2.47 结构化故障趋势第二刀：`OWNER_READ_COMMANDS` 增加 `reliability_trend`，严格识别“查看故障趋势/查看最近故障趋势/查看可靠性趋势”，在配置的 Main LLM 之前确定性执行。`agent_reliability_trend_reply` 在线程中通过 SQLite `mode=ro` 读取现有结构化桶，不调用 `ensure_database`，查询前后生产数据库文件大小和修改时间一致。QQ 输出为最近 24 小时故障组详情与 7 天状态摘要；生命周期 `insufficient_evidence` 不再显示成恢复成功。2026-07-19 20:42 主人 QQ live 返回真实聚合：两次强制停止遗留的 `suspected_abnormal_exit / data / degraded` 合并为 2 次、1 个故障组，24 小时与 7 天均为“证据不足”1 组；matcher 正常完成、0 错误，stderr 为空，查询后生产数据库大小与修改时间未变化。完整回归 630 tests OK（skipped=3），第二刀 live 验收通过。
-
-P2.47 结构化可靠性 Owner Console 第三刀：新增 GET-only `/api/v1/owner-console/reliability` 和前端 `/owner-console/reliability`。后端复用 P2.47 聚合与恢复状态，返回 24 小时、7 天、固定五项接入范围和显式零副作用边界；每个故障组仅包含 component/operation/category/code、计数、首末时间和恢复状态，生命周期证据不足继续隐藏最近成功。前端增加六项摘要、时间窗口切换、本地组件/类别/恢复状态筛选、故障组表格、接入范围和只读安全卡片；所有请求仍经单一 GET allowlist。生产服务在 `127.0.0.1:8090` 启动，真实 API 返回 2 次生命周期疑似异常退出和 1 个证据不足故障组，数据库查询前后大小和 mtime 不变。Python 全量 632 tests OK（skipped=3），前端 13 tests、typecheck、GET-only guard、Vite build、pip check 和 `git diff --check` 通过。2026-07-20 主人人工浏览器确认表格状态为“证据不足”、最近成功显示正常、清除筛选可用、5 项范围与只读边界完整，窄窗口无明显重叠。生产数据仅有 `bot_runtime` 一个故障组，未伪造故障扩充下拉项；双组件筛选由前端自动化验证。
-
-P2.47 视觉与语音结构化事件第四刀：新增 `media_reliability.py`，用有限、确定性的组件映射把视觉/TTS 异常归一为现有 `authorization_failed / request_timeout / connection_failed / model_rate_limited / model_not_found / invalid_configuration / invalid_model_response / data_validation_failed / unexpected_runtime_state`，映射前只在内存中使用既有脱敏函数，记录器只接收固定 code/outcome。`vision.describe_images` 对一次逻辑批次只观察一次：全成功为 succeeded、全失败为 failed、部分成功为 degraded；无 URL、功能关闭、图片上限为 0 和诊断测试图片不记录。`voice.request_tts` 从真实服务准备开始包住合成，只有音频存在且非空、时长大于 0 且未超限才 succeeded；前置空段不记录，失败原样抛回既有业务链但 observer fail-open。QQ 发送失败不归因到 TTS。Owner Console 接入范围由历史 5 项更新为 7 项并已加载 `vision/infer`、`tts/synthesize`，生产 API 仍为 GET-only 且查询前后数据库不变。真实 live 已完成：视觉先产生一条安全失败事件，确定性失败补丁加载后又产生一条真实成功事件，原故障形成 recovered；TTS 两次冷启动超时后产生一条合成成功事件，主人确认 QQ 语音送达，趋势同样形成 recovered。整批视觉失败会在 Chat LLM 前返回固定提示，部分成功保持原链；最新全量 650 tests OK（skipped=3）。没有自动停止模型、重试、修复、告警或清理。
+- [owner-console-manual-diagnostics-design.md](owner-console-manual-diagnostics-design.md)：P2.49 固定手动诊断合同、P2.49d/e 实现与 live 边界。
+- [owner-console-cloud-vision-diagnostic-design.md](owner-console-cloud-vision-diagnostic-design.md)：百炼固定线上视觉诊断、独立凭据、固定成本、图片外发、主人质检和分阶段批准合同。
+- [web-owner-console-v0-runbook.md](web-owner-console-v0-runbook.md)：Owner Console 启动、固定开关、人工操作和验收说明。
+- [version-runlog.md](version-runlog.md)：按日期保存实现、测试和 live 历史；历史条目中的“当前/下一步/等待”只对条目日期有效。
+- [main-agent-command-capability-audit.md](main-agent-command-capability-audit.md)：`/agent` 能力面审计，不作为主人当前路线图。
+- Git：实时提交、差异和工作区状态的最终代码证据。

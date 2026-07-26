@@ -19,6 +19,8 @@ import type {
   OwnerConsoleProjectDocRagProbeEnvelope,
   OwnerConsoleRoutesEnvelope,
   OwnerConsoleSettingsEnvelope,
+  OwnerConsoleTtsSynthesisEnvelope,
+  OwnerConsoleCloudVisionEnvelope,
   OwnerConsoleTaskDetailEnvelope,
   OwnerConsoleTaskListEnvelope,
 } from "./ownerConsoleTypes";
@@ -38,6 +40,7 @@ const allowedGetPaths = new Set([
   `${API_BASE}/memory`,
   `${API_BASE}/access-control`,
   `${API_BASE}/settings`,
+  `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/reference-preview`,
   `${API_BASE}/tasks`,
   `${API_BASE}/approvals`,
 ]);
@@ -46,6 +49,12 @@ const allowedPostPaths = new Set([
   `${API_BASE}/manual-diagnostics/project-doc-rag`,
   `${API_BASE}/manual-diagnostics/memory-rag-consistency`,
   `${API_BASE}/manual-diagnostics/main-llm-contract`,
+  `${API_BASE}/manual-diagnostics/tts-synthesis`,
+  `${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/accept`,
+  `${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/reject`,
+  `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description`,
+  `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept`,
+  `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject`,
 ]);
 
 function isAllowedGetPath(routePath: string): boolean {
@@ -63,6 +72,12 @@ function isAllowedGetPath(routePath: string): boolean {
   if (routePath.startsWith(approvalDetailPrefix)) {
     const approvalId = routePath.slice(approvalDetailPrefix.length);
     return /^[1-9]\d*$/.test(approvalId);
+  }
+
+  const ttsPreviewPrefix = `${API_BASE}/manual-diagnostics/tts-synthesis/audio-preview/`;
+  if (routePath.startsWith(ttsPreviewPrefix)) {
+    const runId = routePath.slice(ttsPreviewPrefix.length);
+    return /^[1-9]\d*$/.test(runId);
   }
 
   return false;
@@ -129,7 +144,7 @@ async function getJson<TResponse>(
 
 async function postJson<TResponse>(
   path: string,
-  body: Record<string, string>,
+  body: Record<string, string | number | boolean>,
   headers: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<TResponse> {
@@ -279,6 +294,212 @@ export const ownerConsoleApi = {
       `${API_BASE}/manual-diagnostics/main-llm-contract`,
       { confirmation: "run_registered_main_llm_contract" },
       { "X-Owner-Console-Action": "manual-main-llm-contract-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async runTtsSynthesis(
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTtsSynthesisEnvelope> {
+    const envelope = await postJson<OwnerConsoleTtsSynthesisEnvelope>(
+      `${API_BASE}/manual-diagnostics/tts-synthesis`,
+      { confirmation: "run_registered_tts_synthesis" },
+      { "X-Owner-Console-Action": "manual-tts-synthesis-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getTtsAudioPreview(
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("TTS 临时试听 run_id 无效");
+    }
+    const path = `${API_BASE}/manual-diagnostics/tts-synthesis/audio-preview/${runId}`;
+    if (!isAllowedGetPath(path)) {
+      throw new Error("TTS 临时试听路径不在 allowlist 内");
+    }
+    const response = await fetch(path, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: {
+        Accept: "audio/wav",
+        "X-Owner-Console-Action": "manual-tts-audio-preview-v1",
+      },
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      let message = "TTS 临时试听不可用";
+      try {
+        const payload = (await response.json()) as {
+          error?: { message?: string } | null;
+        };
+        message = payload.error?.message || message;
+      } catch {
+        // The bounded public message remains intentionally generic.
+      }
+      throw new Error(message);
+    }
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0];
+    const blob = await response.blob();
+    if (
+      contentType !== "audio/wav" ||
+      blob.size <= 44 ||
+      blob.size > 50 * 1024 * 1024
+    ) {
+      throw new Error("TTS 临时试听响应合同无效");
+    }
+    return blob;
+  },
+
+  async acceptTtsAudioQuality(
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTtsSynthesisEnvelope> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("TTS 主人听检 run_id 无效");
+    }
+    const envelope = await postJson<OwnerConsoleTtsSynthesisEnvelope>(
+      `${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/accept`,
+      { confirmation: "accept_latest_tts_audio_quality", run_id: runId },
+      { "X-Owner-Console-Action": "manual-tts-audio-quality-accept-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async rejectTtsAudioQuality(
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTtsSynthesisEnvelope> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("TTS 主人听检 run_id 无效");
+    }
+    const envelope = await postJson<OwnerConsoleTtsSynthesisEnvelope>(
+      `${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/reject`,
+      { confirmation: "reject_latest_tts_audio_quality", run_id: runId },
+      { "X-Owner-Console-Action": "manual-tts-audio-quality-reject-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async runCloudVisionFixedDescription(
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleCloudVisionEnvelope> {
+    const envelope = await postJson<OwnerConsoleCloudVisionEnvelope>(
+      `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description`,
+      { confirmation: "run_registered_cloud_vision_fixed_description" },
+      { "X-Owner-Console-Action": "manual-cloud-vision-fixed-description-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async getCloudVisionReferencePreview(
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    const path = (
+      `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/reference-preview`
+    );
+    if (!isAllowedGetPath(path)) {
+      throw new Error("视觉固定参考图路径不在 allowlist 内");
+    }
+    const response = await fetch(path, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: {
+        Accept: "image/png",
+        "X-Owner-Console-Action": "manual-cloud-vision-reference-preview-v1",
+      },
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      let message = "视觉固定参考图不可用";
+      try {
+        const payload = (await response.json()) as {
+          error?: { message?: string } | null;
+        };
+        message = payload.error?.message || message;
+      } catch {
+        // The bounded public message remains intentionally generic.
+      }
+      throw new Error(message);
+    }
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0];
+    const blob = await response.blob();
+    if (contentType !== "image/png" || blob.size !== 162_977) {
+      throw new Error("视觉固定参考图响应合同无效");
+    }
+    return blob;
+  },
+
+  async acceptCloudVisionResponseQuality(
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleCloudVisionEnvelope> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("视觉主人质检 run_id 无效");
+    }
+    const envelope = await postJson<OwnerConsoleCloudVisionEnvelope>(
+      `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept`,
+      {
+        confirmation: "accept_latest_cloud_vision_response_quality",
+        run_id: runId,
+      },
+      {
+        "X-Owner-Console-Action": "manual-cloud-vision-response-quality-accept-v1",
+      },
+      signal,
+    );
+    const contract = checkOwnerConsoleActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async rejectCloudVisionResponseQuality(
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleCloudVisionEnvelope> {
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("视觉主人质检 run_id 无效");
+    }
+    const envelope = await postJson<OwnerConsoleCloudVisionEnvelope>(
+      `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject`,
+      {
+        confirmation: "reject_latest_cloud_vision_response_quality",
+        run_id: runId,
+      },
+      {
+        "X-Owner-Console-Action": "manual-cloud-vision-response-quality-reject-v1",
+      },
       signal,
     );
     const contract = checkOwnerConsoleActionEnvelope(envelope);

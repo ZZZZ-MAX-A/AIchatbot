@@ -15,6 +15,8 @@ import type {
   OwnerConsoleMemoryRagConsistencyRun,
   OwnerConsoleRuntimeBoundary,
   OwnerConsoleTextSnapshotSection,
+  OwnerConsoleTtsSynthesisRun,
+  OwnerConsoleCloudVisionRun,
 } from "../api/ownerConsoleTypes";
 import { ErrorState } from "../components/ErrorState";
 import { StatusBadge } from "../components/StatusBadge";
@@ -52,8 +54,14 @@ const EVIDENCE_LABELS: Record<string, string> = {
   main_agent_use_llm: "MainAgent 模型规划",
   enable_chat_graph_runtime: "聊天图运行时",
   enable_vision: "视觉功能",
+  vision_provider: "视觉提供方",
   vision_model: "视觉模型",
-  vision_num_ctx: "视觉上下文上限",
+  vision_region: "视觉地域",
+  workspace_configured: "百炼 Workspace URL",
+  credentials_configured: "百炼 API Key",
+  thinking_enabled: "思考模式",
+  client_automatic_retry: "客户端自动重试",
+  automatic_local_fallback: "本地模型自动回退",
   vision_max_images: "单次图片上限",
   ollama_probe_executed: "Ollama 探测",
   vision_inference_executed: "视觉推理",
@@ -101,6 +109,11 @@ const BOOLEAN_INTERPRETATIONS: Record<string, BooleanInterpretation> = {
   main_agent_use_llm: { true: "已启用", false: "未启用" },
   enable_chat_graph_runtime: { true: "已启用", false: "未启用" },
   enable_vision: { true: "已启用", false: "未启用" },
+  workspace_configured: { true: "已配置", false: "未配置" },
+  credentials_configured: { true: "已配置", false: "未配置" },
+  thinking_enabled: { true: "已启用", false: "已关闭" },
+  client_automatic_retry: { true: "已启用", false: "已关闭" },
+  automatic_local_fallback: { true: "已启用", false: "已关闭" },
   ollama_probe_executed: {
     true: "已执行",
     false: "未执行（符合只读边界）",
@@ -167,7 +180,7 @@ function diagnosticSections(
     { key: "bot_status", label: "Owner Console", section: diagnostics.bot_status },
     { key: "diagnostics", label: "只读诊断边界", section: diagnostics.diagnostics },
     { key: "config", label: "功能配置", section: diagnostics.config },
-    { key: "vision", label: "视觉配置", section: diagnostics.vision },
+    { key: "vision", label: "云端视觉配置", section: diagnostics.vision },
     { key: "image_cache", label: "图片缓存", section: diagnostics.image_cache },
     { key: "memory", label: "记忆与 RAG 统计", section: diagnostics.memory },
     { key: "tts", label: "语音配置", section: diagnostics.tts },
@@ -658,6 +671,471 @@ function ManualMainLlmContractPanel({
   );
 }
 
+function ManualTtsSynthesisPanel({
+  snapshot,
+  confirming,
+  running,
+  reviewRunning,
+  actionError,
+  previewUrl,
+  previewLoading,
+  previewCompleted,
+  onRequestConfirmation,
+  onCancel,
+  onConfirm,
+  onLoadPreview,
+  onPreviewEnded,
+  onAcceptQuality,
+  onRejectQuality,
+}: {
+  snapshot: OwnerConsoleManualDiagnosticsSnapshot;
+  confirming: boolean;
+  running: boolean;
+  reviewRunning: boolean;
+  actionError: string;
+  previewUrl: string;
+  previewLoading: boolean;
+  previewCompleted: boolean;
+  onRequestConfirmation: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onLoadPreview: (runId: number) => void;
+  onPreviewEnded: () => void;
+  onAcceptQuality: (runId: number) => void;
+  onRejectQuality: (runId: number) => void;
+}) {
+  if (!snapshot.tts_synthesis_enabled) {
+    return null;
+  }
+
+  const latest: OwnerConsoleTtsSynthesisRun | null =
+    snapshot.tts_synthesis_latest_run;
+  const latestRunning = latest?.status === "running";
+  const tone =
+    latest?.outcome === "succeeded"
+      ? "success"
+      : latest?.outcome === "attention" || latest?.outcome === "failed"
+        ? "warning"
+        : "neutral";
+
+  return (
+    <section className="manual-diagnostic-panel" aria-label="TTS 一键生命周期手动检查">
+      <header>
+        <div>
+          <p>主人手动动作</p>
+          <h2>TTS 一键生命周期</h2>
+        </div>
+        <StatusBadge
+          label="最近结果"
+          value={
+            latestRunning || running
+              ? "执行中"
+              : latest?.audio_quality_review_required
+                ? "等待试听"
+              : latest?.outcome === "succeeded"
+                ? "通过"
+                : latest?.outcome === "attention"
+                  ? "需要关注"
+                  : latest?.outcome === "failed"
+                    ? "执行失败"
+                    : "尚未执行"
+          }
+          tone={tone}
+        />
+      </header>
+
+      <p className="manual-diagnostic-panel__description">
+        检查本机 TTS 是否在线；明确离线时临时启动一个受管理进程，执行一次后端固定中文合成，验证并清理本次音频，再只停止诊断自己启动的进程。
+      </p>
+
+      {latest ? (
+        <div className="manual-diagnostic-result">
+          <strong>{latest.code_label}</strong>
+          <div className="manual-diagnostic-result__metrics">
+            <span>总延迟 {latest.elapsed_ms} ms</span>
+            <span>启动 {latest.startup_elapsed_ms} ms</span>
+            <span>健康检查 {latest.health_elapsed_ms} ms</span>
+            <span>合成 {latest.synthesis_elapsed_ms} ms</span>
+            <span>清理 {latest.cleanup_elapsed_ms} ms</span>
+            <span>WAV {latest.output_bytes} bytes</span>
+            <span>WAV 时长 {latest.output_duration_ms} ms</span>
+            <span>调用前模型 {latest.model_loaded_before ? "已加载" : "未加载"}</span>
+            <span>调用前 runtime {latest.runtime_imported_before ? "已导入" : "未导入"}</span>
+            <span>
+              服务来源 {latest.service_preexisting ? "原本在线" : latest.service_started ? "诊断启动" : "未启动"}
+            </span>
+            <span>
+              服务收尾 {latest.service_owned_by_diagnostic ? latest.service_stopped ? "已停止" : "停止不完整" : "不停止已有服务"}
+            </span>
+            <span>最终 WAV {latest.output_retained ? "仍保留" : "已清理"}</span>
+            <span>分段目录 {latest.segment_directory_retained ? "仍保留" : "已清理"}</span>
+            <span>
+              主人听检 {latest.audio_quality_reviewed ? latest.audio_quality_accepted ? "合格" : "不合格" : latest.audio_quality_review_required ? "待确认" : "未进入"}
+            </span>
+          </div>
+          <div className="manual-diagnostic-audio-review">
+            <p>
+              应听到：<strong>{latest.fixed_text}</strong>
+            </p>
+            {latest.audio_quality_review_required && latest.audio_preview_available ? (
+              <>
+                {previewUrl ? (
+                  <audio
+                    aria-label="TTS 固定语音临时试听"
+                    controls
+                    controlsList="nodownload noplaybackrate"
+                    preload="metadata"
+                    src={previewUrl}
+                    onEnded={onPreviewEnded}
+                  />
+                ) : (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={previewLoading || reviewRunning}
+                    onClick={() => onLoadPreview(latest.run_id)}
+                  >
+                    {previewLoading ? "正在加载试听" : "加载临时试听"}
+                  </button>
+                )}
+                <p>
+                  请确认内容完整准确、中文清晰，没有明显截断、重复、卡顿、爆音、杂音或不合理长静音。
+                </p>
+                <div className="manual-diagnostic-audio-review__actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={!previewUrl || reviewRunning}
+                    onClick={() => onRejectQuality(latest.run_id)}
+                  >
+                    {reviewRunning ? "正在提交" : "语音不合格"}
+                  </button>
+                  <button
+                    className="manual-diagnostic-action"
+                    type="button"
+                    disabled={!previewUrl || !previewCompleted || reviewRunning}
+                    onClick={() => onAcceptQuality(latest.run_id)}
+                  >
+                    {reviewRunning ? "正在提交" : previewCompleted ? "语音合格" : "播放结束后确认合格"}
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+          <code>{`workflow=${latest.workflow}`}</code>
+          <code>{`stage=${latest.stage}`}</code>
+          <code>{`code=${latest.code}`}</code>
+          <code>{`technical_outcome=${latest.technical_outcome}`}</code>
+          <code>{`technical_code=${latest.technical_code}`}</code>
+          <code>{`audio_preview_available=${latest.audio_preview_available}`}</code>
+          <code>{`audio_quality_review_required=${latest.audio_quality_review_required}`}</code>
+          <code>{`audio_quality_reviewed=${latest.audio_quality_reviewed}`}</code>
+          <code>{`audio_quality_accepted=${latest.audio_quality_accepted}`}</code>
+          <code>{`audio_preview_persisted=${latest.audio_preview_persisted}`}</code>
+          <code>{`audio_preview_path_exposed=${latest.audio_preview_path_exposed}`}</code>
+          <code>{`audio_review_action_executed=${latest.audio_review_action_executed}`}</code>
+          <code>{`tts_called=${latest.tts_called}`}</code>
+          <code>{`runtime_imported_before=${latest.runtime_imported_before}`}</code>
+          <code>{`service_preexisting=${latest.service_preexisting}`}</code>
+          <code>{`service_start_attempted=${latest.service_start_attempted}`}</code>
+          <code>{`service_started=${latest.service_started}`}</code>
+          <code>{`service_owned_by_diagnostic=${latest.service_owned_by_diagnostic}`}</code>
+          <code>{`service_stop_attempted=${latest.service_stop_attempted}`}</code>
+          <code>{`service_stopped=${latest.service_stopped}`}</code>
+          <code>{`artifact_cleanup_attempted=${latest.artifact_cleanup_attempted}`}</code>
+          <code>{`artifact_cleanup_succeeded=${latest.artifact_cleanup_succeeded}`}</code>
+          <code>{`output_retained=${latest.output_retained}`}</code>
+          <code>{`segment_directory_retained=${latest.segment_directory_retained}`}</code>
+          <code>{`automatic_retry=${latest.automatic_retry}`}</code>
+          <code>{`qq_write_executed=${latest.qq_write_executed}`}</code>
+          <code>{`reliability_event_written=${latest.reliability_event_written}`}</code>
+          <code>{`database_write_allowed=${latest.database_write_allowed}`}</code>
+          <code>{`local_file_write_expected=${latest.local_file_write_expected}`}</code>
+          <code>{`cleanup_executed=${latest.cleanup_executed}`}</code>
+          <code>{`partial_artifact_state=${latest.partial_artifact_state}`}</code>
+          <small>
+            最终通过还要求主人听完固定音频并明确确认质量合格；只代表本次固定文本，不代表任意文本、QQ 语音或长期运行稳定性。
+          </small>
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <p className="manual-diagnostic-panel__error">{actionError}</p>
+      ) : null}
+
+      {confirming ? (
+        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认 TTS 一键生命周期检查">
+          <strong>确认执行一次 TTS 生命周期诊断？</strong>
+          <p>
+            若服务明确离线，诊断会启动一个受管理 TTS 子进程，等待健康后完成一次固定合成；服务原本在线则直接复用且绝不停止。验证后只清理本次 artifact ID 的最终 WAV 与分段目录，并且只停止本次持有句柄的进程。不会扫描或结束其他 Python 进程，不会发送 QQ、写业务数据库或可靠性事件，也不会调用 LLM/RAG 或自动重试合成。
+          </p>
+          <div>
+            <button className="secondary-button" type="button" onClick={onCancel}>
+              取消
+            </button>
+            <button
+              className="manual-diagnostic-action"
+              type="button"
+              onClick={onConfirm}
+              disabled={running}
+            >
+              {running ? "正在检查" : "确认并执行"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="manual-diagnostic-action"
+          type="button"
+          onClick={onRequestConfirmation}
+          disabled={running || latestRunning || Boolean(latest?.audio_quality_review_required)}
+        >
+          {running || latestRunning ? "正在检查" : latest?.audio_quality_review_required ? "等待主人听检" : "检查启动、合成与清理"}
+        </button>
+      )}
+
+      <p className="manual-diagnostic-panel__boundary">
+        固定文本 · 磁盘立即清理 · 临时内存试听 · 主人听检门控 · 自动重试关闭 · QQ 发送关闭
+      </p>
+    </section>
+  );
+}
+
+function ManualCloudVisionPanel({
+  snapshot,
+  confirming,
+  running,
+  reviewRunning,
+  actionError,
+  previewUrl,
+  previewLoading,
+  previewLoaded,
+  onRequestConfirmation,
+  onCancel,
+  onConfirm,
+  onLoadPreview,
+  onPreviewLoaded,
+  onAcceptQuality,
+  onRejectQuality,
+}: {
+  snapshot: OwnerConsoleManualDiagnosticsSnapshot;
+  confirming: boolean;
+  running: boolean;
+  reviewRunning: boolean;
+  actionError: string;
+  previewUrl: string;
+  previewLoading: boolean;
+  previewLoaded: boolean;
+  onRequestConfirmation: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onLoadPreview: () => void;
+  onPreviewLoaded: () => void;
+  onAcceptQuality: (runId: number) => void;
+  onRejectQuality: (runId: number) => void;
+}) {
+  if (!snapshot.cloud_vision_enabled) {
+    return null;
+  }
+
+  const latest: OwnerConsoleCloudVisionRun | null =
+    snapshot.cloud_vision_latest_run;
+  const latestRunning = latest?.status === "running";
+  const tone =
+    latest?.outcome === "succeeded"
+      ? "success"
+      : latest?.outcome === "attention" || latest?.outcome === "failed"
+        ? "warning"
+        : "neutral";
+  const tokenValue = (value: number | null) =>
+    value === null ? "未提供" : String(value);
+
+  return (
+    <section className="manual-diagnostic-panel" aria-label="阿里云百炼固定图片手动检查">
+      <header>
+        <div>
+          <p>主人手动动作</p>
+          <h2>阿里云百炼固定图片识别</h2>
+        </div>
+        <StatusBadge
+          label="最近结果"
+          value={
+            latestRunning || running
+              ? "执行中"
+              : latest?.outcome === "succeeded"
+                ? "通过"
+                : latest?.outcome === "attention"
+                  ? "需要关注"
+                  : latest?.outcome === "failed"
+                    ? "执行失败"
+                    : "尚未执行"
+          }
+          tone={tone}
+        />
+      </header>
+
+      <p className="manual-diagnostic-panel__description">
+        使用正式表情库中固定登记的 500×500 owner_private PNG，向阿里云百炼北京地域 qwen3.7-flash 发送一次内容与感情色彩描述请求；图片会外发，供应商侧处理与留存不受应用控制，清理后的回复与参考图会展示给主人判断准确性。
+      </p>
+
+      {latest ? (
+        <div className="manual-diagnostic-result">
+          <strong>{latest.code_label}</strong>
+          <div className="manual-diagnostic-result__metrics">
+            <span>提供方 阿里云百炼</span>
+            <span>地域 北京</span>
+            <span>配置模型 {latest.configured_model || "未提供"}</span>
+            <span>返回模型 {latest.returned_model || "未提供"}</span>
+            <span>请求耗时 {latest.request_elapsed_ms} ms</span>
+            <span>输入 token {tokenValue(latest.input_tokens)}</span>
+            <span>输出 token {tokenValue(latest.output_tokens)}</span>
+            <span>总 token {tokenValue(latest.total_tokens)}</span>
+            <span>固定 PNG {latest.fixed_image_bytes} bytes</span>
+            <span>固定样例 {latest.reference_sticker_id || "未登记"}</span>
+            <span>图片合同 {latest.fixed_image_contract_valid ? "通过" : "未通过"}</span>
+            <span>基础回复合同 {latest.response_contract_valid ? "通过" : "未通过"}</span>
+            <span>
+              主人质检 {latest.visual_quality_reviewed ? latest.visual_quality_accepted ? "合格" : "不合格" : latest.visual_quality_review_required ? "待确认" : "未进入"}
+            </span>
+            <span>URL {latest.workspace_configured ? "已配置" : "未配置"}</span>
+            <span>API Key {latest.credentials_configured ? "已配置" : "未配置"}</span>
+            <span>回复清理 {latest.response_cleanup_applied ? "已执行" : "无需清理"}</span>
+            <span>图片外发 {latest.external_image_upload_executed ? "已执行" : "未执行"}</span>
+          </div>
+          {latest.response_preview ? (
+            <div className="manual-diagnostic-vision-review">
+              <div>
+                <h3>模型实际中文描述</h3>
+                <p>{latest.response_description || "未提供有效中文描述"}</p>
+              </div>
+              <details>
+                <summary>查看清理后的模型回复</summary>
+                <pre>{latest.response_preview}</pre>
+              </details>
+              {latest.reference_preview_available ? (
+                previewUrl ? (
+                  <img
+                    src={previewUrl}
+                    alt="固定视觉诊断参考表情"
+                    onLoad={onPreviewLoaded}
+                  />
+                ) : (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={previewLoading || reviewRunning}
+                    onClick={onLoadPreview}
+                  >
+                    {previewLoading ? "正在加载参考图" : "加载固定参考图"}
+                  </button>
+                )
+              ) : null}
+              {latest.visual_quality_review_required ? (
+                <div className="manual-diagnostic-vision-review__actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={!previewUrl || reviewRunning}
+                    onClick={() => onRejectQuality(latest.run_id)}
+                  >
+                    {reviewRunning ? "正在提交" : "描述不合格"}
+                  </button>
+                  <button
+                    className="manual-diagnostic-action"
+                    type="button"
+                    disabled={!previewLoaded || reviewRunning}
+                    onClick={() => onAcceptQuality(latest.run_id)}
+                  >
+                    {reviewRunning ? "正在提交" : previewLoaded ? "描述合格" : "参考图加载后确认合格"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <code>{`workflow=${latest.workflow}`}</code>
+          <code>{`stage=${latest.stage}`}</code>
+          <code>{`code=${latest.code}`}</code>
+          <code>{`provider=${latest.provider}`}</code>
+          <code>{`region=${latest.region}`}</code>
+          <code>{`cloud_vision_called=${latest.cloud_vision_called}`}</code>
+          <code>{`request_count=${latest.request_count}`}</code>
+          <code>{`response_contract_valid=${latest.response_contract_valid}`}</code>
+          <code>{`response_mode=${latest.response_mode}`}</code>
+          <code>{`structured_output_requested=${latest.structured_output_requested}`}</code>
+          <code>{`semantic_contract_automatically_validated=${latest.semantic_contract_automatically_validated}`}</code>
+          <code>{`owner_visual_judgment_required=${latest.owner_visual_judgment_required}`}</code>
+          <code>{`reference_sticker_id=${latest.reference_sticker_id}`}</code>
+          <code>{`registered_reference_asset_read=${latest.registered_reference_asset_read}`}</code>
+          <code>{`response_cleanup_applied=${latest.response_cleanup_applied}`}</code>
+          <code>{`external_image_upload_planned=${latest.external_image_upload_planned}`}</code>
+          <code>{`external_image_upload_executed=${latest.external_image_upload_executed}`}</code>
+          <code>{`provider_side_persistence_controlled_by_app=${latest.provider_side_persistence_controlled_by_app}`}</code>
+          <code>{`technical_outcome=${latest.technical_outcome}`}</code>
+          <code>{`technical_code=${latest.technical_code}`}</code>
+          <code>{`visual_quality_review_required=${latest.visual_quality_review_required}`}</code>
+          <code>{`visual_quality_reviewed=${latest.visual_quality_reviewed}`}</code>
+          <code>{`visual_quality_accepted=${latest.visual_quality_accepted}`}</code>
+          <code>{`visual_review_action_executed=${latest.visual_review_action_executed}`}</code>
+          <code>{`response_preview_persisted=${latest.response_preview_persisted}`}</code>
+          <code>{`client_automatic_retry=${latest.client_automatic_retry}`}</code>
+          <code>{`tool_definitions_sent=${latest.tool_definitions_sent}`}</code>
+          <code>{`thinking_enabled=${latest.thinking_enabled}`}</code>
+          <code>{`api_key_exposed=${latest.api_key_exposed}`}</code>
+          <code>{`workspace_id_exposed=${latest.workspace_id_exposed}`}</code>
+          <code>{`image_base64_exposed=${latest.image_base64_exposed}`}</code>
+          <code>{`local_gpu_model_loaded=${latest.local_gpu_model_loaded}`}</code>
+          <code>{`qq_write_executed=${latest.qq_write_executed}`}</code>
+          <code>{`database_write_allowed=${latest.database_write_allowed}`}</code>
+          <code>{`project_artifact_write_expected=${latest.project_artifact_write_expected}`}</code>
+          <code>{`local_vision_called=${latest.local_vision_called}`}</code>
+          <small>
+            只证明本次固定表情通过百炼北京地域 qwen3.7-flash 的单次请求和主人描述质检结果；不代表任意图片质量、长期稳定性、QQ 图片下载或 Main LLM 工具选择能力。
+          </small>
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <p className="manual-diagnostic-panel__error">{actionError}</p>
+      ) : null}
+
+      {confirming ? (
+        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认阿里云百炼固定图片检查">
+          <strong>确认把固定 owner_private 表情发送到阿里云百炼？</strong>
+          <p>
+            本次只读取正式表情库固定登记且哈希锁定的 aike_affection_005.png，并发送到阿里云百炼北京地域，调用 qwen3.7-flash 一次。应用无法控制供应商侧的数据处理与留存；不会读取聊天、QQ 临时图片或图片缓存，不会写业务数据库、发送 QQ、自动重试或切换其他模型。
+          </p>
+          <div>
+            <button className="secondary-button" type="button" onClick={onCancel}>
+              取消
+            </button>
+            <button
+              className="manual-diagnostic-action"
+              type="button"
+              onClick={onConfirm}
+              disabled={running}
+            >
+              {running ? "正在检查" : "确认并执行"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="manual-diagnostic-action"
+          type="button"
+          onClick={onRequestConfirmation}
+          disabled={running || latestRunning || Boolean(latest?.visual_quality_review_required)}
+        >
+          {running || latestRunning ? "正在检查" : latest?.visual_quality_review_required ? "等待主人检查描述" : "检查百炼表情描述与感情色彩"}
+        </button>
+      )}
+
+      <p className="manual-diagnostic-panel__boundary">
+        固定 owner_private PNG 外发 · 北京地域 · qwen3.7-flash · 情感描述 · 主人质检 · 自动重试与 fallback 关闭
+      </p>
+    </section>
+  );
+}
+
 function RuntimeBoundaryPanel({
   boundary,
 }: {
@@ -722,6 +1200,36 @@ export function DiagnosticsPage() {
   const [mainLlmConfirming, setMainLlmConfirming] = useState(false);
   const [mainLlmRunning, setMainLlmRunning] = useState(false);
   const [mainLlmError, setMainLlmError] = useState("");
+  const [ttsConfirming, setTtsConfirming] = useState(false);
+  const [ttsRunning, setTtsRunning] = useState(false);
+  const [ttsError, setTtsError] = useState("");
+  const [ttsPreviewUrl, setTtsPreviewUrl] = useState("");
+  const [ttsPreviewLoading, setTtsPreviewLoading] = useState(false);
+  const [ttsPreviewCompleted, setTtsPreviewCompleted] = useState(false);
+  const [ttsReviewRunning, setTtsReviewRunning] = useState(false);
+  const [visionConfirming, setVisionConfirming] = useState(false);
+  const [visionRunning, setVisionRunning] = useState(false);
+  const [visionError, setVisionError] = useState("");
+  const [visionPreviewUrl, setVisionPreviewUrl] = useState("");
+  const [visionPreviewLoading, setVisionPreviewLoading] = useState(false);
+  const [visionPreviewLoaded, setVisionPreviewLoaded] = useState(false);
+  const [visionReviewRunning, setVisionReviewRunning] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (ttsPreviewUrl) {
+        URL.revokeObjectURL(ttsPreviewUrl);
+      }
+    };
+  }, [ttsPreviewUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (visionPreviewUrl) {
+        URL.revokeObjectURL(visionPreviewUrl);
+      }
+    };
+  }, [visionPreviewUrl]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setState((current) => ({
@@ -869,6 +1377,197 @@ export function DiagnosticsPage() {
     }
   }, []);
 
+  const applyTtsResult = useCallback(
+    (data: OwnerConsoleTtsSynthesisRun, generatedAt: string) => {
+      setState((current) => {
+        if (!current.manualDiagnostics?.data) {
+          return current;
+        }
+        return {
+          ...current,
+          manualDiagnostics: {
+            ...current.manualDiagnostics,
+            generated_at: generatedAt,
+            data: {
+              ...current.manualDiagnostics.data,
+              generated_at: generatedAt,
+              latest_run: data,
+              tts_synthesis_latest_run: data,
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const resetTtsPreview = useCallback(() => {
+    setTtsPreviewUrl("");
+    setTtsPreviewCompleted(false);
+  }, []);
+
+  const runTtsSynthesis = useCallback(async () => {
+    setTtsRunning(true);
+    setTtsError("");
+    resetTtsPreview();
+    try {
+      const result = await ownerConsoleApi.runTtsSynthesis();
+      if (!result.data) {
+        throw new Error("TTS 固定合成结果缺失");
+      }
+      applyTtsResult(result.data, result.generated_at);
+      setTtsConfirming(false);
+    } catch (exc) {
+      setTtsError(
+        apiErrorDescription(
+          exc instanceof Error ? exc : new Error("TTS 固定合成失败"),
+        ),
+      );
+    } finally {
+      setTtsRunning(false);
+    }
+  }, [applyTtsResult, resetTtsPreview]);
+
+  const loadTtsAudioPreview = useCallback(async (runId: number) => {
+    setTtsPreviewLoading(true);
+    setTtsError("");
+    setTtsPreviewCompleted(false);
+    try {
+      const blob = await ownerConsoleApi.getTtsAudioPreview(runId);
+      const url = URL.createObjectURL(blob);
+      setTtsPreviewUrl(url);
+    } catch (exc) {
+      setTtsError(
+        apiErrorDescription(
+          exc instanceof Error ? exc : new Error("TTS 临时试听加载失败"),
+        ),
+      );
+    } finally {
+      setTtsPreviewLoading(false);
+    }
+  }, []);
+
+  const reviewTtsAudioQuality = useCallback(
+    async (runId: number, accepted: boolean) => {
+      setTtsReviewRunning(true);
+      setTtsError("");
+      try {
+        const result = accepted
+          ? await ownerConsoleApi.acceptTtsAudioQuality(runId)
+          : await ownerConsoleApi.rejectTtsAudioQuality(runId);
+        if (!result.data) {
+          throw new Error("TTS 主人听检结果缺失");
+        }
+        applyTtsResult(result.data, result.generated_at);
+        resetTtsPreview();
+      } catch (exc) {
+        setTtsError(
+          apiErrorDescription(
+            exc instanceof Error ? exc : new Error("TTS 主人听检提交失败"),
+          ),
+        );
+      } finally {
+        setTtsReviewRunning(false);
+      }
+    },
+    [applyTtsResult, resetTtsPreview],
+  );
+
+  const applyVisionResult = useCallback(
+    (data: OwnerConsoleCloudVisionRun, generatedAt: string) => {
+      setState((current) => {
+        if (!current.manualDiagnostics?.data) {
+          return current;
+        }
+        return {
+          ...current,
+          manualDiagnostics: {
+            ...current.manualDiagnostics,
+            generated_at: generatedAt,
+            data: {
+              ...current.manualDiagnostics.data,
+              generated_at: generatedAt,
+              latest_run: data,
+              cloud_vision_latest_run: data,
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const resetVisionPreview = useCallback(() => {
+    setVisionPreviewUrl("");
+    setVisionPreviewLoaded(false);
+  }, []);
+
+  const runVisionInference = useCallback(async () => {
+    setVisionRunning(true);
+    setVisionError("");
+    resetVisionPreview();
+    try {
+      const result = await ownerConsoleApi.runCloudVisionFixedDescription();
+      if (!result.data) {
+        throw new Error("视觉固定表情诊断结果缺失");
+      }
+      applyVisionResult(result.data, result.generated_at);
+      setVisionConfirming(false);
+    } catch (exc) {
+      setVisionError(
+        apiErrorDescription(
+          exc instanceof Error ? exc : new Error("视觉固定图片诊断失败"),
+        ),
+      );
+    } finally {
+      setVisionRunning(false);
+    }
+  }, [applyVisionResult, resetVisionPreview]);
+
+  const loadVisionReferencePreview = useCallback(async () => {
+    setVisionPreviewLoading(true);
+    setVisionError("");
+    setVisionPreviewLoaded(false);
+    try {
+      const blob = await ownerConsoleApi.getCloudVisionReferencePreview();
+      const url = URL.createObjectURL(blob);
+      setVisionPreviewUrl(url);
+    } catch (exc) {
+      setVisionError(
+        apiErrorDescription(
+          exc instanceof Error ? exc : new Error("视觉固定参考图加载失败"),
+        ),
+      );
+    } finally {
+      setVisionPreviewLoading(false);
+    }
+  }, []);
+
+  const reviewVisionResponseQuality = useCallback(
+    async (runId: number, accepted: boolean) => {
+      setVisionReviewRunning(true);
+      setVisionError("");
+      try {
+        const result = accepted
+          ? await ownerConsoleApi.acceptCloudVisionResponseQuality(runId)
+          : await ownerConsoleApi.rejectCloudVisionResponseQuality(runId);
+        if (!result.data) {
+          throw new Error("视觉主人质检结果缺失");
+        }
+        applyVisionResult(result.data, result.generated_at);
+      } catch (exc) {
+        setVisionError(
+          apiErrorDescription(
+            exc instanceof Error ? exc : new Error("视觉主人质检提交失败"),
+          ),
+        );
+      } finally {
+        setVisionReviewRunning(false);
+      }
+    },
+    [applyVisionResult],
+  );
+
   return (
     <section className="page diagnostics-page">
       <header className="page-header">
@@ -949,7 +1648,7 @@ export function DiagnosticsPage() {
               <ManualProjectDocRagPanel
                 snapshot={manualDiagnostics}
                 confirming={probeConfirming}
-                running={probeRunning || memoryRunning || mainLlmRunning}
+                running={probeRunning || memoryRunning || mainLlmRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
                 actionError={probeError}
                 onRequestConfirmation={() => {
                   setProbeError("");
@@ -961,7 +1660,7 @@ export function DiagnosticsPage() {
               <ManualMemoryRagConsistencyPanel
                 snapshot={manualDiagnostics}
                 confirming={memoryConfirming}
-                running={memoryRunning || probeRunning || mainLlmRunning}
+                running={memoryRunning || probeRunning || mainLlmRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
                 actionError={memoryError}
                 onRequestConfirmation={() => {
                   setMemoryError("");
@@ -973,7 +1672,7 @@ export function DiagnosticsPage() {
               <ManualMainLlmContractPanel
                 snapshot={manualDiagnostics}
                 confirming={mainLlmConfirming}
-                running={mainLlmRunning || probeRunning || memoryRunning}
+                running={mainLlmRunning || probeRunning || memoryRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
                 actionError={mainLlmError}
                 onRequestConfirmation={() => {
                   setMainLlmError("");
@@ -981,6 +1680,46 @@ export function DiagnosticsPage() {
                 }}
                 onCancel={() => setMainLlmConfirming(false)}
                 onConfirm={() => void runMainLlmContract()}
+              />
+              <ManualTtsSynthesisPanel
+                snapshot={manualDiagnostics}
+                confirming={ttsConfirming}
+                running={ttsRunning || probeRunning || memoryRunning || mainLlmRunning || visionRunning || visionReviewRunning}
+                reviewRunning={ttsReviewRunning}
+                actionError={ttsError}
+                previewUrl={ttsPreviewUrl}
+                previewLoading={ttsPreviewLoading}
+                previewCompleted={ttsPreviewCompleted}
+                onRequestConfirmation={() => {
+                  setTtsError("");
+                  setTtsConfirming(true);
+                }}
+                onCancel={() => setTtsConfirming(false)}
+                onConfirm={() => void runTtsSynthesis()}
+                onLoadPreview={(runId) => void loadTtsAudioPreview(runId)}
+                onPreviewEnded={() => setTtsPreviewCompleted(true)}
+                onAcceptQuality={(runId) => void reviewTtsAudioQuality(runId, true)}
+                onRejectQuality={(runId) => void reviewTtsAudioQuality(runId, false)}
+              />
+              <ManualCloudVisionPanel
+                snapshot={manualDiagnostics}
+                confirming={visionConfirming}
+                running={visionRunning || probeRunning || memoryRunning || mainLlmRunning || ttsRunning || ttsReviewRunning}
+                reviewRunning={visionReviewRunning}
+                actionError={visionError}
+                previewUrl={visionPreviewUrl}
+                previewLoading={visionPreviewLoading}
+                previewLoaded={visionPreviewLoaded}
+                onRequestConfirmation={() => {
+                  setVisionError("");
+                  setVisionConfirming(true);
+                }}
+                onCancel={() => setVisionConfirming(false)}
+                onConfirm={() => void runVisionInference()}
+                onLoadPreview={() => void loadVisionReferencePreview()}
+                onPreviewLoaded={() => setVisionPreviewLoaded(true)}
+                onAcceptQuality={(runId) => void reviewVisionResponseQuality(runId, true)}
+                onRejectQuality={(runId) => void reviewVisionResponseQuality(runId, false)}
               />
             </>
           ) : null}

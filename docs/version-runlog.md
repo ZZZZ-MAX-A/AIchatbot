@@ -2,6 +2,8 @@
 
 本文作为 AIchatbot 的版本运行日志，用于汇总每个版本的实际落地状态、live 验证、补丁和后续边界。
 
+> 历史阅读规则：本文件按日期保留当时事实。每个条目中的“当前”“下一步”“等待主人”“尚未完成”只对该条目的日期与阶段有效，不构成现在的主人授权，也不得据此自行恢复旧 backlog。当前批准方向、优先级和唯一下一步只以 [current-development-status.md](current-development-status.md) 为准，并在执行前用实时 Git/代码/运行态复核。
+
 文档分工：
 
 ```text
@@ -7349,7 +7351,7 @@ P2.49 新合同是“默认快照只读、配置和业务数据写入关闭、�
 ## 2026-07-21 P2.49b MemoryRAG 索引一致性手动诊断
 
 ```text
-主人批准进入下一阶段，但真实私人记忆检索仍需单独审批。P2.49b 因此注册固定 memory_rag_index_consistency，只使用 SQLite mode=ro 核对 MemoryRAG 活动文档、当前 provider/model/content_hash 有效向量、事实/偏好/会话摘要三类缺失向量、来源映射和软删除历史文档向量。SQL 不选择 content 或 summary；provider 对象只提供 provider/model 身份，不调用 embed/embed_once，不执行私人查询，不访问 Ollama，不调用 Main LLM、DevContext 或 CombinedRAG。
+主人当时明确批准进入 P2.49b MemoryRAG 索引一致性检查，但真实私人记忆检索仍需单独审批。P2.49b 因此注册固定 memory_rag_index_consistency，只使用 SQLite mode=ro 核对 MemoryRAG 活动文档、当前 provider/model/content_hash 有效向量、事实/偏好/会话摘要三类缺失向量、来源映射和软删除历史文档向量。SQL 不选择 content 或 summary；provider 对象只提供 provider/model 身份，不调用 embed/embed_once，不执行私人查询，不访问 Ollama，不调用 Main LLM、DevContext 或 CombinedRAG。
 
 普通启动继续关闭所有手动动作。新增独立 -EnableMemoryRagConsistencyProbe，与 -EnableProjectDocRagProbe 分开控制页面和 POST；两个动作共享一个进程内运行锁，不能并发、排队或自动重试。MemoryRAG POST 使用固定路径、固定 confirmation、固定 X-Owner-Console-Action，并复用 loopback 完全同源、HttpOnly SameSite=Strict 进程 Cookie 和严格 application/json 合同。结果只保留在 Owner Console 进程内，不写 Agent task、approval、reliability、聊天或诊断表。
 
@@ -7420,6 +7422,320 @@ P2.49b 的二次确认、真实一致性判断、attention/failed 区分、中�
 只读复核确认 Owner Console access log 中 Main LLM 固定 POST 恰好 1 次，后端 latest 与 main_llm_contract_latest_run 均指向同一 run_id=1。tool_definitions_sent、tool_execution_allowed、client_automatic_retry、chat_history_read/write、agent_task_written、approval_written、reliability_event_written、database_write_allowed、MemoryRAG、ProjectDocRAG、DevContext、CombinedRAG、Tavily、TTS、vision、QQ write、prompt_exposed、response_content_exposed 全为 false。生产数据库仍为 26779648 字节、mtime 2026-07-22T03:54:11.7725970Z，与动作前观测一致；8090 PID 18900 保持监听，stderr 4 行启动 INFO、0 个 ERROR/Traceback/Exception。
 
 P2.49c 因此以“Main LLM 基础运行主人 live 通过，严格 JSON 子合同 attention”收口。没有自动重试、修改结果、伪造 contract_valid、补跑第二次模型请求、执行工具或启动后续工作流；未查询私人记忆或 RAG，未修复 2 条缺失向量，未 commit 或 push。
+```
+
+## 2026-07-22 未获方向批准的 P2.50a 核心运行区本地实验（待处置）
+
+```text
+主人当时只表达“进入下一阶段”，没有批准选择 core 方向。开发代理错误地把旧状态文档中“核心、聊天和 MainAgent 系统诊断区域详情尚未注册”当成路线图，并自行选择 core；该方向后来被主人明确纠正。以下只记录已经发生的本地实验事实，不表示主人批准，不得进入加载、QQ live、提交或后续 scope。
+
+新增 system_diagnostics_report/core 固定详情与 `/agent 执行系统诊断任务：核心`。状态链严格为主人私聊 /agent 入口、正式 system_diagnostics_report work runtime、SQLite mode=ro + SELECT 1；定位层级固定为 entry、runtime、database、none。概览与详情共享 evaluate_core_zone，因此同一 evidence 的区域状态不会漂移。详细回复保留状态链、初步判断、建议范围和未执行事项；Agent task 只持久化区域状态、定位层级和 local/external/deep/repair 安全计数，不保存数据库路径、配置、异常、runtime id 或详细报告。核心探针本身零 schema/业务数据写入；正式任务仍保留既有 agent_tasks/events 审计生命周期，页面不会把两者混写为“整个动作数据库零写入”。
+
+原 _system_database_read_probe 使用普通 connect()，即使只执行 SELECT 1，连接退出仍会 commit，也可能创建数据库目录，不能提供足够强的只读证据。P2.50a 改为 connect_read_only()，SQLite URI 使用 mode=ro，不调用 ensure_database、不初始化 schema、不提交事务。core 分支在 MemoryRAG、语音和视觉 collector 之前返回；源码边界测试确认不调用 _collect_system_memory_rag_evidence、_collect_system_vision_evidence、_collect_system_voice_evidence，不进入 DiagnosticsGraph 全量采集，也不调用聊天、MainAgent、LLM、RAG 或外部服务。
+
+新增 core 入口/运行时/数据库/正常首故障短路、负计数、概览一致性、正式任务脱敏持久化、非零 external/deep/repair 拒绝、严格命令、mode=ro 和 collector 隔离测试。聚焦回归 112 tests OK；相邻诊断/MainAgent/Graph 243 tests OK；完整 Python 682 tests OK（skipped=3）；Python AST 148 files、pip check 和 git diff --check 通过。全部测试使用纯 evidence、源码合同和临时 SQLite，没有访问生产数据库、调用真实模型/RAG/QQ/Ollama/TTS 或重启服务。
+
+本地实验完成过代码、自动化和文档修改；Bot 没有重启，新 core 命令未加载，也没有创建真实 Agent task 或执行主人 QQ live。主人尚未决定完全撤销、只保留 `connect_read_only()` 修正，还是作为低优先级实验保留；在该决定前不得运行、提交或由本文自动恢复。chat 和 main_agent 区域详情继续未注册。
+```
+
+## 2026-07-24 文档治理第二轮与 P2.49d TTS 固定合成设计
+
+```text
+主人确认应先落实文档规范，再进入原定的 Owner Console TTS 手动诊断方向。本轮只修改文档和审计设计；未执行 DevContext、CombinedRAG、QueryDevContext、私人记忆查询、ProjectDocRAG 重建或检索，也未调用 Main LLM、TTS、视觉、QQ，未启动或重启服务。
+
+current-development-status.md 从约 50 KB 的历史堆叠重写为九段权威快照，固定包含元数据、主人批准方向、近期完成、待完成、优先级、授权/禁止、真实风险、唯一下一步和证据入口。快照明确区分 implemented、regression_passed、loaded、live_passed、owner_accepted，并要求每个待办记录批准状态和能否自动开始。
+
+docs/README.md 增加权威快照内容合同，补齐六份此前缺失的根文档导航，修正掘金文章跟踪状态，并登记 reliability-failure-taxonomy-and-inspection.md 为路径兼容例外。version-runlog.md 顶部增加历史阅读规则；main-agent-external-read-security-design.md 修正开头仍称未开放联网的陈旧事实；main-agent-command-capability-audit.md 更新到 0055dcc 基线和 Tavily live 结论。
+
+web-owner-console-v0-runbook.md 不再笼统宣称全站只能 GET，而是明确区分业务 read model GET-only 与 P2.49 三条逐项启用、固定输入、二次确认的 POST 例外，补全启动参数、共享全局锁、结果证据和禁止自由参数。project-rag-document-state-consistency-audit.md 增加第二轮范围、问题、处理和命名合规结果。
+
+未获方向批准的 system_diagnostics_report/core 保持为未提交本地实验：运行时代码未处置、未运行、未加载、未 live、未提交。相关设计和 runlog 已改为明确的未批准实验，从当前 runbook 命令清单移除；主人仍需另行决定完全撤销、只保留 connect_read_only() 修正，还是低优先级保留。
+
+P2.49d 现状审计确认：现有 health/配置入口不能证明真实合成；生产 request_tts() 可能自动启动服务并写可靠性事件，不适合作为固定 executor；tts_service /tts 会写 temp_audio 最终 WAV 和分段目录且没有自动清理合同。设计因此采用独立开关、共享全局锁、服务必须预先在线、一次固定 health + 一次固定 synthesis、零重试、零 QQ、零可靠性事件和零业务数据库写入。成功产物保留；POST 后失败也可能留下无法由 ok=false 响应精确归属的部分文件，不能伪称零文件写入。
+
+P2.49d 当前只完成审计与合同设计。下一步是主人审阅“可能加载 GPU 模型、写入并保留 temp_audio 产物、服务离线不自动启动”的边界；未经明确批准不进入实现、Owner Console 加载或真实 TTS live。
+```
+
+## 2026-07-24 P2.49d fake-only 实现与 core 实验撤销
+
+```text
+主人随后批准按固定合同实现 P2.49d，并明确要求 core 按已说明方案处置。本轮完成代码、页面、fake HTTP、临时 WAV 和回归；没有启动 TTS、Owner Console 或 Bot，没有访问真实 127.0.0.1:7861、加载 IndexTTS2、写生产 temp_audio、发送 QQ、执行 LLM/RAG 或私人记忆查询，也没有 commit/push。
+
+未获方向批准的 system_diagnostics_report/core 命令、scope、payload、report builder、正式 work runtime、sanitizer 支持和专项测试已全部撤销。唯一保留的安全修正是既有 _system_database_read_probe() 从普通 connect() 改用 connect_read_only()；对应源码边界测试确认 SQLite mode=ro，且源码/测试搜索已无 SYSTEM_DIAGNOSTICS_CORE_SCOPE、build_core_diagnostics_report、CoreDiagnosticsReportPayload 或 `/agent 执行系统诊断任务：核心`。这不新增命令，也不证明 Main LLM 工具选择、RAG 索引或 TTS。
+
+P2.49d 新增专属 owner_console_tts_synthesis executor、独立 -EnableTtsSynthesisProbe / OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED、固定 POST /api/v1/owner-console/manual-diagnostics/tts-synthesis、精确 Header/confirmation、HTTP route contract、前端第四个紧凑二次确认面板和四 POST allowlist。普通启动保持默认关闭；构造运行时不创建 httpx.Client 或访问 health。
+
+executor 只允许无凭据、无 query/fragment/自定义 path 的 loopback HTTP URL；使用 trust_env=false、follow_redirects=false、2 秒 health 和 180 秒 synthesis 固定超时。请求文本、language、voice/emotion 来源、20 秒上限和 bypass_cache 均由后端固定，页面/HTTP 不能覆盖。它不调用 request_tts、ensure_tts_service、send_tts_record、reliability observer、QQ、数据库、MainAgent、LLM/RAG 或视觉；服务离线直接失败，不自动启动，不自动重试。
+
+成功响应只接受 temp_audio 边界内 tts_<32 hex>.wav 形式的绝对路径，并校验 resolve 后目录、非 symlink 普通文件、44 字节至 50 MiB、WAV 声道/样本宽度/采样率/帧数、计算时长与服务声明 250 ms 容差及 20 秒上限。DTO 不包含固定文本、service URL、路径、音频、原始响应、内部 error、异常或 server run_id。页面明确显示 database_write_allowed=false 与 local_file_write_expected=true，并保留 partial_artifact_state；POST 后失败不能被误写为确定零文件写入，成功和可能的部分文件均不自动清理。
+
+四个手动工作流共享同一个进程内锁；关闭返回 403，错误 Origin/Cookie/Header/content-type/body fail closed，并发返回 409。页面第一次点击零 POST，第二次确认才发送一个固定 POST；确认文案明确服务离线、可能冷加载 GPU、成功/失败文件残留、无清理、无 QQ、无可靠性/业务数据库写入、无 LLM/RAG 和无重试。
+
+所有 TTS 自动化只使用 fake request 与测试临时目录 WAV。Owner Console 邻域 77 tests OK（其中 Windows 符号链接权限相关单项按平台跳过）；语音 31 tests、可靠性 28 tests、RAG/QQ 边界 13 tests、完整 Python 689 tests OK（skipped=4）。前端 4 files / 24 tests、TypeScript、Vite production build、四固定 POST guard、Python AST 150 files和 pip check 通过。文档最终同步后另行复核链接、围栏和 git diff --check。
+
+当前完成度为 audited/designed/implemented/regression_passed；loaded=false、live_passed=false。真实 TTS 从未调用，Owner Console 未重启，生产 temp_audio 未写入。下一步只等待主人另行批准真实 live；在批准前不启动服务、不加载模型、不启用开关、不访问 7861。
+```
+
+## 2026-07-24 P2.49d 修订为一键受控 TTS 生命周期
+
+```text
+主人指出旧版要求每次先手动启动 TTS、合成后保留文件，实际诊断价值不足且操作繁琐；随后批准改为按钮一次完成“检查、必要时启动、固定合成、验证、精确清理、所有权收尾”。本条修订取代同日旧设计中“服务必须预先在线、产物保留、不自动清理”的当前操作指令；旧条目只保留当时实现历史，不再作为 live 手册。
+
+稳定 workflow 改为 tts_managed_lifecycle，HTTP 路径、action header、confirmation 和独立 -EnableTtsSynthesisProbe 开关保持不变。页面第一次点击仍为零动作，只展开说明；第二次确认才发送一个固定 Owner Console POST。页面现在显示启动/健康/合成/清理耗时、服务原本是否在线、是否尝试/完成启动、是否由诊断持有、是否尝试/完成停止、最终 WAV/分段目录是否仍保留、清理是否成功，并保留英文 workflow/stage/code 和布尔证据。
+
+专属 executor 先对固定 loopback 127.0.0.1/localhost/::1:7861 执行 2 秒 health。有效在线服务标记 service_preexisting=true，只复用、不停止；只有明确 ConnectError/connection refused 才启动一个受管理子进程。启动器保留 Popen 句柄，通过环境变量注入 64 位一次性 owner token；TTS /health 只返回 token 的 SHA-256 fingerprint。诊断最多等待 45 秒并要求 fingerprint 精确匹配，避免把端口上未知服务误认成本次进程。health 超时、畸形响应、进程提前退出、启动超时或 ownership mismatch 均不盲目继续合成。
+
+TTS /tts 新增向后兼容的可选 artifact_id；普通生产请求未传时仍使用随机 UUID，诊断固定传后端生成的 32 位小写十六进制 ID。固定合成仍使用一个后端中文短句、当前配置 voice/emotion、language=zh、20 秒上限、bypass_cache=true 和一次 180 秒 POST，零合成重试。验证器要求最终 tts_<artifact>.wav 与唯一 tts_<artifact>_segments/segment_01.wav 均在固定 temp_audio 边界内，并校验普通文件、symlink、大小、WAV 头、帧数、声明/计算时长和分段字节合同。
+
+收尾只处理本次 artifact ID：删除最终 WAV，删除分段目录中匹配 segment_XX.wav 的文件，目录为空后才移除。遇到未知文件不递归删除并报告 cleanup attention；本次精确 symlink 只解除链接，不跟随目标。不得清空 temp_audio、删除其他 run/QQ 文件、按端口或进程名扫描，也不得结束其他 Python/TTS 进程。若服务由诊断启动，只对本次 Popen 句柄 terminate，固定等待后才可对同一句柄 kill；已有服务绝不停止。清理器自身异常不会跳过句柄收尾。
+
+结果优先级为 artifact cleanup incomplete、owned service stop incomplete、startup latency >30000 ms、synthesis latency >120000 ms、完全通过；成功 code 为 tts_managed_lifecycle_succeeded。启动、所有权、请求、产物和意外失败均有固定 stage/code；DTO 不返回 owner token、fingerprint 原值、artifact ID、路径、固定文本、分段文本、音频、原始响应、内部 error 或异常。仍不调用 request_tts、ensure_tts_service、send_tts_record、QQ、reliability observer、数据库、MainAgent、LLM/RAG、视觉或其他手动工作流。
+
+自动化全部使用 fake HTTP、fake process 和测试临时目录 WAV，未访问真实 7861 或生产 temp_audio。生命周期模块 15 tests（Windows symlink 权限项 skipped=1）、Owner Console 相关 57 tests、RAG/QQ 边界 13 tests通过；完整 Python 693 tests OK（skipped=4）。完整前端 4 files/24 tests、TypeScript、Vite production build、四固定 POST guard通过；Python AST src/tests/scripts 154 files、pip check、四份权威文档链接/围栏和 git diff --check通过。测试收集期间曾误用模块路径导致 5 个 Owner Console 文件找不到 pure_ai_chat_loader，改回仓库既有 unittest discover 方式后全部通过；这是命令用法问题，不是产品失败。
+
+当前严格状态仍为 implemented=true、regression_passed=true、loaded=false、live_passed=false、real_tts_called=false、tts_service_started=false、index_tts_loaded=false、production_temp_audio_written=false。没有启动或重启 Owner Console/Bot/TTS，没有真实 Main LLM/RAG/私人记忆/视觉/QQ 动作，没有修复 2 条 MemoryRAG 缺失向量，也没有 commit/push。下一步只等待主人另行批准真实页面 live；届时无需预先手动启动 TTS。
+```
+
+## 2026-07-24 P2.49e 视觉固定推理与资源收口规划
+
+```text
+主人认可 P2.49d 一键受控 TTS 行为，但明确暂不做 live；主人要求开始视觉模型诊断规划，并说明等 TTS 与视觉都完成后再统一给予足够运行空间进行 live。本轮因此只做 P2.49e 只读代码审计和设计文档，没有实现新路由、按钮、启动器或 executor，也没有访问 11434、启动/停止 Ollama、加载/卸载视觉模型、读取图片或执行真实推理。
+
+审计确认项目历史 `/视觉状态` 并非纯配置状态：它会先 GET Ollama /api/tags，再由 diagnostic_vision_image_base64() 用标准库生成一张 32x32 四色 PNG，并通过 check_vision_inference() 执行一次真实 /api/chat。该诊断不写视觉 reliability event，也不会自动重试，但它属于 QQ/NoneBot DiagnosticsGraph，缺少 Owner Console 独立开关、二次确认、全局锁、结构化脱敏 DTO、服务启动所有权、/api/ps 模型驻留证据和推理后资源收口；当前只验证非空/非重复回答，没有精确颜色位置合同。
+
+生产 describe_images() 会读取用户 URL/本地图片、进入 Ollama 视觉请求并记录结构化可靠性结果，不能作为不读取私人图片、零业务写入的 Owner Console executor。diagnostics.py 还与数据库、错误日志、角色卡和图片缓存等生产诊断依赖耦合，P2.49e 第一版应新建独立模块，不复用整个 DiagnosticsGraph 或生产 vision chain。
+
+现有 scripts/start-ollama-vision.ps1 默认会按进程名结束所有 ollama/ollama app 后再启动；scripts/ensure-ollama.ps1 在服务不可达或模型缺失时会进入该脚本。Ollama 还可能承载 RAG embedding，因此这两个入口均不满足固定诊断所有权边界。规划要求已有服务绝不停止、模型缺失只报告不 pull/不重启；明确离线时才直接 Popen([ollama, serve]) 并持有本次句柄，不经过 PowerShell、不扫描或结束其他进程。由于 Ollama 无法加入 TTS 式 owner fingerprint，所有权只能如实记录为 initial offline + Popen alive + subsequently ready，不得宣称密码学验证。
+
+建议 workflow=vision_managed_lifecycle。固定输入是在内存中生成的 128x128 PNG：红/蓝/绿/白四象限、黑色分隔线、无文字和隐私；实现时固定字节长度和 SHA-256。后端 prompt 要求唯一 JSON：contract_version=vision.fixed.v1、grid=[red,blue,green,white]、status=ok。主人随后明确收紧通过标准：只有精确满足固定 JSON/颜色语义合同、能够清晰证明模型识别了图片内容时才进入 succeeded。非空但合同不匹配、空回答、重复无效符号、超长回答或 Ollama envelope 不合格均进入 failed；任何服务无法启动、模型无法加载或推理未完成也不得识别为通过。页面、HTTP、URL/Header/body 不允许覆盖图片、prompt、model、service URL、num_ctx、keep_alive 或 timeout。
+
+服务生命周期规划为固定 loopback 11434、3 秒 tags、3 秒 ps、30 秒受管理启动、180 秒单次 chat 硬超时，响应有界、trust_env=false、redirect=false、零 retry。模型必须已在 tags 中存在，不执行 pull。推理前后使用 /api/ps：原本已驻留的视觉模型不卸载；原本未驻留时，固定 /api/chat 使用 keep_alive=0，并要求推理后 /api/ps 已无该模型。服务由本次启动时，再只停止本次 Popen 句柄；已有服务和其他模型不停止。固定 num_ctx=4096 用于基础运行和显存控制，明确不代表生产 VISION_NUM_CTX=16384 已被完整验证。
+
+规划的结果区分 succeeded、attention 和 failed。`succeeded` 只用于服务可用、推理完成且固定颜色语义合同精确通过；合同不匹配属于 failed。模型未释放、持有服务未完全停止、usage 缺失或延迟超过关注阈值可进入 attention，但页面不得把 attention 显示为“诊断正常”。DTO 只保留有限计数、耗时和布尔证据，不返回 prompt、PNG/base64、模型回答、URL、模型路径/digest、原始 tags/ps/chat、异常或其他模型名称。动作不是严格 read-only：可能启动 Ollama 和加载 GPU 模型；但配置/业务数据库/项目文件写入关闭，不创建聊天、缓存、Agent task、approval 或 reliability event，不调用 Main LLM/RAG/TTS/QQ。
+
+若后续获准实现，建议独立 -EnableVisionInferenceProbe、固定 POST /api/v1/owner-console/manual-diagnostics/vision-inference、固定 Header manual-vision-inference-v1 和 confirmation=run_registered_vision_inference，并与现有四个工作流共享全局锁。第一阶段只允许 fake HTTP、fake process、内存 PNG、页面与完整回归；不得访问真实 11434 或真实 D:\OllamaModels。P2.49d/e live 当前均由主人明确延后，只有两个实现都完成并再次汇报后，才由主人安排资源并分别批准串行 live。
+```
+
+## 2026-07-24 P2.49e 视觉固定生命周期 fake-only 实现
+
+```text
+主人审阅规划后进一步明确：诊断必须真实证明模型清晰识别图片内容，空回答、重复无效符号、服务无法启动、模型无法加载或其他未完成推理的情况均不得通过；随后批准进入实现，但继续禁止真实 live。本轮据此完成 P2.49e fake-only 代码、页面、固定 HTTP 合同和回归，没有访问 11434、运行 ollama、读取真实图片或加载 GPU 模型。
+
+新增 src/plugins/ai_chat/owner_console_vision_inference.py 和 tests/test_owner_console_vision_inference.py。executor 用 Python 标准库在内存生成 128x128 RGB PNG，红/蓝/绿/白四象限与黑色分隔线固定；自动化锁定 png_bytes=311、SHA-256=3d1f6c2a1b1b220a474cb49dcec96841decedf4c0892bfbd66f082bbd098ffcd、尺寸和五处象限/分隔像素。图片不落盘、不读取主人、QQ、缓存、项目或网络图片，DTO/页面不返回 PNG/base64。
+
+稳定 workflow=vision_managed_lifecycle，固定 num_ctx=4096、temperature=0、stream=false、一次 /api/chat、零 tools、零 retry、180 秒硬超时和 64 KiB envelope 上限。固定 prompt 要求唯一 JSON：contract_version=vision.fixed.v1、grid=[red,blue,green,white]、status=ok。只有解析后的对象字段和值精确匹配才进入 succeeded；自由文本、颜色/位置错误、重复 key、额外字段、空白、重复无效符号、超长、HTTP 非 200、done=false 或畸形 envelope 全部 failed/固定 code，不再把非空合同不匹配降为 attention。
+
+服务仅允许固定 loopback HTTP 11434。初始 /api/tags 有效时标记 service_preexisting=true，绝不停止；只有明确 ConnectError/connection refused 才通过 shutil.which(ollama) 直接 Popen([ollama, serve])，固定 OLLAMA_HOST 和 OLLAMA_MODELS，不经过 PowerShell，不调用 start-ollama-vision.ps1/ensure-ollama.ps1，不扫描或结束其他进程。超时、HTTP 或畸形 JSON 不盲目启动；模型缺失只失败，不 pull、不重启。初始明确离线 + 本次 Popen 存活 + 随后服务就绪是唯一 ownership basis；子进程退出但端口出现服务时返回 vision_service_ownership_ambiguous，且不停止端口服务。
+
+/api/ps 在推理前验证当前视觉模型驻留。原本已驻留时不发送 keep_alive=0、不卸载；原本未驻留时发送 keep_alive=0，并在推理后只读取一次 /api/ps 验证该模型已释放。不执行 ollama stop。服务由本次启动时，在模型收口后只 terminate/必要时 kill 本次 Popen 句柄；已有服务和其他模型绝不停止。识图已严格通过但模型未释放、持有服务未停止、usage 缺失或延迟超阈值可进入 attention，页面显示“需要关注”而非“通过”。
+
+OwnerConsoleManualDiagnosticsRuntime 已加入第五个独立开关、latest_run DTO、run_vision_inference() 和五工作流共享全局锁。FastAPI 增加 OWNER_CONSOLE_VISION_INFERENCE_ENABLED、-EnableVisionInferenceProbe、固定 POST /api/v1/owner-console/manual-diagnostics/vision-inference、Header manual-vision-inference-v1 和 confirmation=run_registered_vision_inference；同源 Origin、动作 Cookie、application/json、精确 body 和并发 409 边界保持不变。前端只在显式启用时显示“视觉固定图片识别”，第一次点击零 POST，第二次确认恰好一个 POST；不提供上传、URL、prompt、模型、工具或参数控件，保留 workflow/stage/code 和服务/模型收口布尔证据。
+
+executor 不导入生产 vision.py、DiagnosticsGraph、QQ、RAG、数据库、reliability、MainAgent 或 TTS。它不创建项目图片/业务 artifact，因此 project_artifact_write_expected=false；同时明确 external_runtime_local_write_possible=true，因为真实 Ollama 外部进程仍可能写自己的日志或缓存，不能把业务零写入夸大成整个外部运行时零本地写入。
+
+fake 自动化覆盖固定图片快照、预驻留/未驻留模型、keep_alive 分支、已有服务不停止、离线启动与句柄收尾、启动超时、进程提前退出、ownership ambiguous、畸形/超时服务不盲目启动、模型缺失、ps 不可用、严格回答成功、空/重复/错色/自由文本/超长/done=false/HTTP 错误失败、cleanup/stop evidence、固定 POST 安全合同、页面二次确认和全局锁。所有 HTTP/process 都是 fake。
+
+回归结果：Python 711 tests OK（skipped=4）；Owner Console 相关 99 tests OK（skipped=1）；RAG/QQ 边界 13 tests OK；前端 4 files/26 tests OK；TypeScript、Vite production build、五固定 POST guard、Python AST src/tests/scripts 156 files、PowerShell parse、pip check 和 git diff --check 通过。
+
+当前严格状态：audited=true、designed=true、implemented=true、regression_passed=true、loaded=false、live=false、real_vision_called=false、ollama_service_started=false、vision_model_loaded=false、real_image_read=false、tts_live_executed=false。P2.49d/e 两个实现均已完成，真实 live 继续由主人延后；下一步只等待主人安排足够 GPU/运行空间并分别批准串行 live，不自动启动、加载或连续执行。
+```
+
+## 2026-07-25 P2.49d 首次主人动作与 ConnectTimeout 最小修复
+
+```text
+主人要求启动 Owner Console 后端并自行做前端测试。启动前只读确认 8090/7861 未监听、11434 已有 Ollama 服务；随后用 -EnableProjectDocRagProbe、-EnableMemoryRagConsistencyProbe、-EnableMainLlmContractProbe、-EnableTtsSynthesisProbe、-EnableVisionInferenceProbe 启动 127.0.0.1:8090。healthz 和 manual-diagnostics GET 确认五个 workflow 全部启用、latest_run=null，启动本身没有自动执行任何动作，也没有触碰已有 Ollama。
+
+主人第一次执行 TTS 后页面返回 outcome=failed、stage=health_check、code=tts_health_contract_invalid、health_elapsed_ms=2014、service_start_attempted=false、service_started=false、tts_called=false、output_file_created=false、partial_artifact_state=none_before_post。netstat 同时确认 7861 无 listener；使用相同 httpx 2 秒、trust_env=false、follow_redirects=false 的 GET /health 只读复现得到 httpx.ConnectTimeout，elapsed≈2110 ms。无法从现有证据归因 Windows 网络层为何没有返回 connection refused，不臆测根因。
+
+因此本次不是“TTS 子进程启动后失败”，而是旧离线分类只接受 ConnectError/ConnectionRefusedError，把连接建立阶段的 ConnectTimeout 保守映射成 health contract invalid，导致 process starter 零调用。没有启动 TTS、加载 IndexTTS2、调用 /tts、生成 WAV/分段目录、清理文件或停止进程；QQ、数据库、reliability、LLM/RAG/视觉副作用均未发生。
+
+主人批准最小修复。owner_console_tts_synthesis._offline() 仅新增 httpx.ConnectTimeout；httpx.ReadTimeout、HTTP/JSON/health contract 异常仍不属于离线，继续 fail closed。即使 ConnectTimeout 进入启动路径，新服务仍必须返回本次 64 位 owner token 的 SHA-256 fingerprint，才能执行一次固定合成；ownership mismatch、进程提前退出或启动超时仍失败，且只收尾本次 Popen。没有加入端口/进程扫描、未知服务停止、自动重试或自动重跑。
+
+新增 fake 端到端测试覆盖 ConnectTimeout -> start once -> fingerprint match -> synthesize once -> exact cleanup -> stop held process；既有 ReadTimeout -> starter zero calls 测试继续通过。回归结果：TTS executor 16 tests OK（skipped=1），Owner Console 手动诊断 17 tests OK，Python 全量 712 tests OK（skipped=4）。随后只重启 Owner Console，新的 server PID=19068；只读确认 8090 正常、五 workflow 启用、latest_run=null、7861 仍未监听、既有 Ollama PID=13412 仍监听 11434。重启本身没有自动执行 TTS 或视觉；仍由主人页面二次确认重试。
+```
+
+## 2026-07-25 P2.49d 第二次主人 live：受管理服务启动超时
+
+```text
+主人在重启后的 Owner Console 再次二次确认执行 TTS。权威页面结果：workflow=tts_managed_lifecycle、run_id=1、attempt_count=1、outcome=failed、stage=service_start、code=tts_service_start_timeout、elapsed_ms=49634、startup_elapsed_ms=47304、health_elapsed_ms=40542、synthesis_elapsed_ms=0、cleanup_elapsed_ms=0。service_start_attempted=true 证明上一轮 ConnectTimeout 离线分类修复已实际生效。
+
+本次 service_started=false、service_owned_by_diagnostic=false、tts_called=false、output_file_created=false、artifact_cleanup_attempted=false、partial_artifact_state=none_before_post；没有进入 /tts、加载合成模型或创建 WAV。超时后 service_stop_attempted=true、service_stopped=true；只读 netstat 确认 7861 无残留 listener，8090 Owner Console 和启动前已存在的 11434 Ollama 均仍在线。没有自动重试、QQ、reliability、数据库、LLM/RAG 或视觉副作用。
+
+该结果不是 connection 分类失败，也不是已确认的 IndexTTS2 模型加载超时。受管理进程在整个 45 秒窗口内没有提前退出，否则 executor 会返回 tts_managed_process_exited_early；但始终没有得到带 owner fingerprint 的有效 /health。源码显示 tts_service.py 在 uvicorn.run() 之前顶层 import torch 和 indextts.infer_v2.IndexTTS2，而 IndexTTS2(...) 实例本身直到 /tts 的 ensure_loaded() 才构造，因此阻断范围位于 HTTP 端口就绪前 bootstrap/import 阶段。
+
+现有 Popen 把 stdout/stderr 定向到 DEVNULL，Owner Console 日志只有 uvicorn 自身正常启动，无法确定具体是 torch/import 初始化过慢还是其他保持进程存活的 bootstrap 异常。没有证据支持臆测根因，也不能只凭本次失败盲目延长 45 秒。
+
+候选最小后续方向是让 /health 不依赖 torch/indextts 顶层导入而先就绪，把重依赖 import 与 IndexTTS2 构造推迟到 /tts 的 180 秒模型加载/合成阶段，并增加有界脱敏 bootstrap stage/code；owner fingerprint、一次执行、精确 artifact 清理、只停止本次句柄和零自动重试保持不变。该候选尚未获主人实现批准，不自动修改或重跑。当前严格状态仍为 live_failed/tts_service_start_timeout，不是 TTS 可用。
+```
+
+## 2026-07-25 P2.49d lazy bootstrap 获批、实现与重载
+
+```text
+主人批准按“轻量 health 先启动，torch/IndexTTS 延迟到 /tts”的最小范围继续，并要求不自动进行 live。tts_service.py 删除顶层 torch 与 indextts.infer_v2.IndexTTS2 导入，增加惰性 load_tts_runtime()；GET /health 在重依赖未导入时即可返回 ok=true、loaded=false、runtime_imported=false、language=zh 和既有 owner fingerprint。首次 /tts 才导入 runtime 并构造 IndexTTS2；runtime 成功后在进程内复用，idle unload 只释放模型，不重复 import。
+
+Owner Console TTS executor 将 health 的 loaded/runtime_imported 解析为有限 TtsHealthEvidence。loaded=true/runtime_imported=false 作为不可能合同 fail closed；旧 health 未提供 runtime_imported 时按 loaded 兼容。运行结果、TypeScript DTO 和诊断页新增 runtime_imported_before 及“调用前 runtime 已导入/未导入”，不暴露路径、命令、token、traceback、stderr 或原始异常。45 秒 service bootstrap timeout、180 秒 /tts timeout、owner fingerprint、一次执行、零重试、精确 artifact 清理和只停止本次 Popen 均未改变。
+
+新增/更新自动化覆盖 health 不触发 runtime import、首次模型请求只导入一次、runtime 复用、idle unload 后不重复 import、runtime import 失败保持 unloaded、旧 health 兼容、不可能 health 状态拒绝，以及 DTO/页面 runtime_imported_before 证据。回归结果：TTS bootstrap 5 tests OK；TTS lifecycle 17 tests OK（skipped=1）；Owner Console manual diagnostics 17 tests OK；Owner Console adjacent 101 tests OK（skipped=1）；Python full 718 tests OK（skipped=4）；frontend 26 tests OK；RAG/QQ boundary 13 tests OK；TypeScript、Vite build、五固定 POST guard、Python AST 153 files、PowerShell parse、pip check、git diff --check 全部通过。
+
+随后仅重启 Owner Console 并显式启用原有五个 workflow。新 8090 PID=19156；只读 manual-diagnostics GET 显示五个 workflow、latest_run=null、tts_synthesis_latest_run=null、vision_inference_latest_run=null；7861 无 listener；既有 11434 仍为 PID=13412。启动本身没有执行 TTS、视觉、Main LLM 或 RAG。严格状态：lazy_bootstrap_implemented=true、regression_passed=true、loaded=true、third_live=false、tts_available_unproven=true。下一步只由主人页面二次确认执行第三次 TTS，不由开发代理自动 POST。
+```
+
+## 2026-07-25 P2.49d 第三次技术 live 与主人听检门控
+
+```text
+主人在 lazy-bootstrap 版本页面二次确认执行第三次 TTS。权威结果为 workflow=tts_managed_lifecycle、outcome=succeeded、stage=result_validation、code=tts_managed_lifecycle_succeeded；elapsed/startup/health/synthesis/cleanup 分别为 70802/1054/3201/67565/1 ms，WAV 为 132140 bytes、2995 ms。调用前 model/runtime 均未加载；服务原本离线，诊断成功启动、持有并停止本次进程；tts_called=true，最终 WAV/分段目录均精确清理，automatic_retry/QQ/reliability/database write 均为 false。
+
+这证明 lazy bootstrap 的真实效果和一次基础技术合成可用：端口不再被重依赖 import 阻断，首次 /tts 完成 runtime 导入与 IndexTTS2 合成，WAV 技术合同和服务/磁盘收尾成立。主人随后指出旧合同没有提供试听，无法确认固定文本“这是一次固定语音合成检查。”是否读对、是否清晰以及有无截断、重复、卡顿、爆音、杂音或异常静音。因此旧 succeeded 只记为 technical_live_passed；output_retained=false 表明该 WAV 已删除，不能恢复或伪称主人已验收音质。
+
+主人批准最小修订：技术通过后磁盘仍立即精确清理，但先把已验证、最大 50 MiB、RIFF/WAVE 的最终字节复制到单一 Owner Console 进程内存槽并绑定 run_id。初始结果统一为 attention/owner_audio_review/tts_audio_quality_review_required，同时保留 technical_outcome/technical_code。受保护 GET 只允许 loopback Host、动作 Cookie、固定 preview Header 和当前正整数 run_id，返回 no-store audio/wav，不暴露路径或文件名。页面用 Blob URL 临时播放，不提供显式下载控件。
+
+主人接受和拒绝分别使用两个固定 same-origin POST、不同固定 Header/confirmation 和当前 run_id。接受只清除内存并恢复 underlying technical result，不能覆盖原有 latency/cleanup/stop attention；拒绝清除内存并返回 failed/owner_audio_review/tts_audio_quality_rejected。重复审核、错误 run、缺 Cookie/Header、额外 body 字段、预览缺失或与其他诊断并发均 fail closed。审核不调用 TTS、不重试、不写文件/数据库/reliability/QQ。页面播放结束后才解锁“语音合格”，但最终质量证据仍是主人明确动作，不伪装成自动语音质量识别。
+
+回归：TTS lifecycle 18 tests OK（skipped=1）；Owner Console adjacent 102 tests OK（skipped=1）；Python full 719 tests OK（skipped=4）；frontend 29 tests OK；RAG/QQ boundary 13 tests OK；TypeScript、Vite build、一个 protected preview GET、七固定 POST guard、Python AST 153 files、PowerShell parse、pip check、git diff --check 全部通过。自动化仅使用 fake HTTP/process 和测试临时 WAV，没有访问真实 7861 或再次合成。
+
+随后仅重载 Owner Console。新 8090 PID=14892；五个 workflow 及 preview/accept/reject 路由启用，latest_run=null、tts_synthesis_latest_run=null；7861 无 listener；既有 11434 仍为 PID=13412。重载未执行任何诊断。当前严格状态：technical_live_passed=true、audio_quality_gate_implemented=true、regression_passed=true、loaded=true、audio_quality_live=false。唯一下一步是主人重新执行一次固定 TTS、加载并听完临时试听，然后明确接受或拒绝；开发代理不自动 POST或代判音质。
+```
+
+## 2026-07-25 P2.49d 主人音质 live 通过
+
+```text
+主人在新听检门控页面重新执行固定 TTS、加载临时 WAV、完成试听并明确报告测试通过。只读读取当前 Owner Console 最近结果：run_id=1、workflow=tts_managed_lifecycle、status=completed、outcome=succeeded、stage=result_validation、code=tts_managed_lifecycle_succeeded、attempt_count=1。
+
+本次 elapsed/startup/health/synthesis/cleanup 分别为 59780/1031/3157/56579/1 ms，WAV 为 140844 bytes、3193 ms。调用前 model/runtime 均未加载；服务原本离线，诊断启动、持有并停止本次服务；tts_called/output_contract_valid/artifact_cleanup_succeeded 均 true，output_retained/segment_directory_retained 均 false，partial_artifact_state=artifacts_removed。
+
+底层 technical_outcome=succeeded、technical_code=tts_managed_lifecycle_succeeded。主人审核后 audio_quality_review_required=false、audio_quality_reviewed=true、audio_quality_accepted=true、audio_review_action_executed=true，audio_reviewed_at=2026-07-25T10:08:34+00:00。audio_preview_available=false、audio_preview_persisted=false、audio_preview_path_exposed=false。automatic_retry、QQ write、reliability event 和 database write 均 false。
+
+随后使用当前动作 Cookie 和固定 preview Header 对 run_id=1 做只读复核，GET 返回 409，证明接受动作后内存预览已经清除；netstat 确认 7861 无 listener，8090 仍为 PID=14892，既有 11434 仍为 PID=13412。没有再次合成或触发其他工作流。P2.49d 最终状态：lazy_bootstrap_live_passed=true、technical_synthesis_live_passed=true、audio_quality_live_passed=true、artifact_cleanup_passed=true、managed_service_cleanup_passed=true、owner_accepted=true。
+```
+
+## 2026-07-25 P2.49e 首次视觉 live 与收口轮询修订
+
+```text
+主人在 Owner Console 页面执行视觉固定图片识别。workflow=vision_managed_lifecycle，模型 qwen2.5vl:3b；总计 34656 ms、服务发现 222 ms、驻留检查 26 ms、图片推理 34392 ms、资源收口 8 ms，输入/输出/总 token 为 1103/32/1135。固定 PNG 311 bytes，fixed_image_contract_valid=true、response_contract_valid=true、vision_called=true，因此红/蓝/绿/白固定图片的基础识别合同已经 live 通过。
+
+调用前模型未驻留，已有 Ollama 服务原本在线；请求使用 keep_alive=0，不停止已有服务。旧实现只在 /api/chat 返回后立即读取一次 /api/ps；该次 8 ms 检查仍见目标模型，故原结果严格保留 outcome=attention、stage=result_validation、code=vision_model_cleanup_incomplete、model_cleanup_verified=false。稍后独立只读 /api/ps 显示 qwen2.5vl:3b 不再驻留，支持异步卸载与即时单次检查之间的短暂竞态，但不能据此倒写原运行当时已验证释放。
+
+主人批准最小验证修订：仅在模型调用前未驻留且本次 keep_alive=0 时，把推理后的单次 /api/ps 改为最多 5 秒、每 250 ms 的有界只读轮询；目标模型消失立即结束，并新增 model_cleanup_poll_count 与覆盖整个窗口的 cleanup_elapsed_ms。超时或持续查询异常仍保持 attention/vision_model_cleanup_incomplete。没有重复 /api/chat、没有 ollama stop、没有停止已有 Ollama、没有卸载其他模型、没有自动串行执行后续工作流。
+
+fake 自动化新增延迟 500 ms 后释放场景，并覆盖立即释放、5 秒仍驻留、调用前已驻留和持有服务句柄收尾；视觉推理调用次数始终为一次。视觉 executor 15 tests、Owner Console 手动诊断 17 tests、Python full 720 tests（skipped=4）、前端 29 tests、TypeScript、Vite build、固定动作 guard 和 git diff --check 通过。本轮修订没有执行真实视觉、没有停止/重启 Ollama、没有重载 Owner Console，也没有 commit/push。当前状态为 vision_live_passed=true、original_cleanup_attention=true、cleanup_revision_implemented=true、regression_passed=true、loaded=false、re_live=false。
+
+主人随后明确批准只重启 Owner Console 以加载收口修订。停止脚本仅匹配 `src.owner_console_fastapi_launcher:app --port 8090`，停止旧 Owner Console 进程后启动五个原有诊断开关；没有停止或重启 Ollama、TTS 或 Bot。新 PID 20276 在 127.0.0.1:8090 监听，既有 Ollama PID 13412 继续监听 11434，7861 未监听；stderr 只有正常的 Uvicorn startup 信息。
+
+只读 manual-diagnostics GET 显示五个 workflow 全部启用，manual actions=true，automatic diagnostics/configuration write/business data write 均 false；latest_run=null、vision_inference_latest_run=null，证明重启没有执行任何诊断。Owner Console 页面返回 HTTP 200、text/html; charset=utf-8。当前状态更新为 cleanup_revision_loaded=true、re_live=false；唯一下一步是主人页面二次确认重新执行一次固定视觉诊断，开发代理不自动 POST。
+```
+
+## 2026-07-25 P2.49e v1 收口通过与 v2 固定表情质检实现
+
+```text
+主人在 5 秒有界收口版本重新执行固定视觉诊断，页面显示通过。只读结果为 run_id=1、workflow=vision_managed_lifecycle、outcome=succeeded、stage=result_validation、code=vision_managed_lifecycle_succeeded、模型 qwen2.5vl:3b；elapsed/inference/cleanup 为 8821/8373/284 ms，输入/输出 token 为 1103/32。调用前模型未驻留，keep_alive=0，model_cleanup_required=true；推理后第 2 次 /api/ps 检查确认释放，model_cleanup_verified=true、model_cleanup_poll_count=2。已有 Ollama 未停止，视觉推理没有自动重试。v1 的接口、固定结构回答和资源收口 live 由此通过。
+
+主人随后要求查看模型回复文本并指出四色图过于简单，希望从此前正式保存的表情包中选择固定参考样例。只读审计还确认 v1 prompt 直接包含预期 grid=[red,blue,green,white]，所以即使结构合同通过，也不能充分证明颜色来自视觉观察。v1 结果继续作为基础传输/结构/生命周期证据，但内容理解终态由 v2 取代。
+
+正式表情库只读审计为 schema 2、revision 18、启用 14、禁用 2；13 个启用资产为动态 GIF，唯一启用静态 PNG 为 aike_affection_005：500×500、162977 bytes、单帧、owner_private、manifest SHA 与文件一致，标签为 affection/happy、show_heart。主人批准将它作为固定参考。原文件没有修改、复制、移动或覆盖。
+
+现有 workflow 和面板原地升级到 contract_version=vision.sticker.v1。executor 每次只读取 data/stickers/library.json 与 approved/aike_affection_005.png，并精确验证启用状态、owner_private、普通文件/非 reparse、approved 边界、文件名、image/png、尺寸、字节数和固定 SHA-256；任何禁用、替换、hash/manifest/path 漂移都在推理前 failed/vision_reference_asset_unavailable，不随机回退其他表情。
+
+新 prompt 只规定字段、输出格式和“根据实际可见内容选择”，不含正确主体、黑白发色、粉红红眼、爱心或亲昵主题。JSON Schema 提供多种主体、颜色、物体、符号和主题候选。后端严格验证 anime_character、subject_count=1、hair_colors black+white（顺序可变）、eye_color_family=pink_red、held_object=heart、floating_symbols=hearts、visual_theme=affection、status=ok，以及 20–180 字、至少 8 个汉字、非重复无效内容的 description_zh。
+
+模型安全原始 JSON（控制/双向字符清理、最多 2048 字符）和 description_zh 进入当前 Owner Console 进程内结果供主人查看，不写文件、数据库、日志、聊天历史或 reliability。失败回答只要存在也保留有限预览，便于观察乱码/重复/错识别；response_preview_persisted=false、response_preview_path_exposed=false。
+
+技术合同通过后统一进入 attention/owner_visual_review/vision_response_quality_review_required，不预先显示最终成功。页面展示中文描述、可展开原始 JSON，并通过固定受保护 GET 加载唯一参考 PNG；该 GET 不接受路径、ID、URL、query 或 run 参数。主人接受/拒绝使用两个不同 fixed POST 并绑定当前 run_id。接受恢复底层 technical outcome/code，不能覆盖 cleanup/stop/usage/latency attention；拒绝为 failed/vision_response_quality_rejected。审核不再次调用视觉、不启动/停止服务、不卸载模型、不写数据库/文件/reliability、不发 QQ。
+
+后端路由合同新增一个 protected vision preview GET 和两个固定 review POST；前端边界现为 protected TTS/vision previews 与九条固定 manual POST。页面不增加第六面板，不提供上传、自由 prompt、路径、URL、sticker 选择、模型或参数控件。旧笼统 image_content_exposed=false 被细分为固定 reference_image_exposed_to_owner，同时聊天/QQ 临时图/缓存/其他表情读取仍为 false。
+
+回归：视觉 executor 15 tests、手动诊断 17、HTTP contract 3、FastAPI app 22、launcher 4 全部通过；Python full 720 tests OK（skipped=4）。前端 4 files/31 tests、TypeScript、Vite production build、九 fixed POST/双 preview guard 通过。实现阶段没有真实调用视觉、停止/重启 Ollama、读取其他图片、发送 QQ、执行 LLM/RAG/TTS、commit 或 push。
+
+主人随后批准只重启 Owner Console。停止脚本只匹配 8090 Owner Console，旧 PID 20276 及同命令行进程条目被停止；新 PID 12960 正常监听 127.0.0.1:8090，stderr 只有 Uvicorn startup。既有 Ollama PID 13412 继续监听 11434，7861 未监听，没有停止/重启 Ollama、TTS 或 Bot。
+
+只读 manual-diagnostics 与 route contract 确认五个 workflow 启用，route_count=24，vision-reference-preview、vision-response-quality-accept/reject 三个新 route 均存在；automatic diagnostics/configuration write/business data write 均 false，页面 HTTP 200 UTF-8。latest_run=null、vision_inference_latest_run=null，证明重启没有自动执行视觉或其他诊断。当前 v2 状态更新为 implemented=true、regression_passed=true、loaded=true、live=false；唯一下一步是主人页面手动执行并完成描述质检。
+```
+
+## 2026-07-25 P2.49e 严格结构化 live 失败与最小自然描述修订
+
+```text
+主人在严格结构化固定表情版本执行一次真实视觉。模型 qwen2.5vl:3b 完成推理，资源收口验证通过；但多个 JSON 字段为 unknown，模型中文描述为“一个戴着黑色帽子和白色披风的卡通角色，眼睛被红色心形遮住。”。对照参考图，这把黑白双色头发误认为帽子/披风，也错误描述眼睛被爱心遮挡。后端正确返回 workflow=vision_managed_lifecycle、outcome=failed、stage=result_validation、code=vision_response_contract_mismatch、vision_called=true、response_contract_valid=false，没有进入主人接受门控。该失败不能因服务有响应或模型已释放而倒写成功。
+
+主人提出严格 prompt/JSON Schema 可能让小型视觉模型过于拘谨，批准关闭结构化约束做单变量实验。固定正式资产、模型、stream=false、num_ctx=4096、temperature=0、一次 /api/chat、keep_alive=0 条件、5 秒模型释放轮询、已有服务不停止、无自动重试及全部写入边界保持不变。请求删除 format JSON Schema、十字段清单、枚举和后端私有视觉事实比对，只保留“请用自然中文客观描述这张图片中实际可见的内容。”；没有人物、颜色、眼睛、爱心或主题答案。
+
+自动合同现在只验证 Ollama envelope/done、assistant role、无 tool_calls、非空、最多 2048 字符、控制/双向字符清理、非重复乱码和至少 8 个汉字。它明确不验证视觉语义，新增 response_mode=natural_text、structured_output_requested=false、semantic_contract_automatically_validated=false、owner_visual_judgment_required=true。即使自然中文描述事实错误，也只会进入主人对照参考图质检，不能自动宣称识图准确。
+
+页面同步为“基础回复合同”“模型原始回复”，解释无 JSON Schema、语义由主人判断。视觉 executor 15 tests、手动诊断 17 tests、Python full 720 tests OK（skipped=4）、前端 4 files/31 tests、TypeScript 与 Vite production build 通过。自动化使用 fake HTTP/process，没有执行真实视觉、停止/重启 Ollama 或 Owner Console、修改固定资产、发送 QQ、调用 LLM/RAG/TTS、commit 或 push。
+
+production 前端 build 更新后，主人明确批准只重启 Owner Console。停止脚本只结束旧 8090 Owner Console PID 12960 及其父进程，没有按名称或端口扫描停止其他服务；随后用五个既有显式 workflow 开关启动。新 PID 27072 监听 127.0.0.1:8090，页面 HTTP 200、text/html; charset=utf-8，route_count=24。只读 manual-diagnostics 显示五个 workflow 启用，automatic diagnostics/configuration write/business data write 均 false；latest_run 与五个专属最近结果全部为 null，证明重启没有执行视觉、TTS、Main LLM 或 RAG。既有 Ollama PID 13412 继续监听 11434，7861 未监听。
+
+当前严格状态：natural_prompt_revision_implemented=true、regression_passed=true、loaded=true、live=false。唯一下一步是主人页面二次确认执行一次自然描述版，对照固定参考图接受或拒绝回复；开发代理不自动 POST、不代判语义质量。
+```
+
+## 2026-07-26 P2.49e 本地自然描述拒绝与百炼线上视觉诊断设计
+
+```text
+主人执行已经加载的最小自然描述版固定表情诊断。workflow=vision_managed_lifecycle、run_id=1；底层 technical_outcome/technical_code 为 succeeded/vision_managed_lifecycle_succeeded，elapsed/inference/cleanup 为 11035/10474/296 ms，input/output/total token 为 1058/66/1124。response_contract_valid=true、response_mode=natural_text、structured_output_requested=false、semantic_contract_automatically_validated=false；调用前模型未驻留，keep_alive=0，收口轮询 2 次确认释放。一次请求、usage、服务和模型生命周期均正常。
+
+自然回复仍把主要黑白双色长发误认为黑帽子与披风，把清晰可见的粉红红色眼睛说成被红色心形遮住，对被大爱心遮挡的嘴部作了无依据描述，并把 RGBA 透明背景说成实体纯黑背景。主人完成对照审核并拒绝，最终严格保留 outcome=failed、stage=owner_visual_review、code=vision_response_quality_rejected、visual_quality_reviewed=true、visual_quality_accepted=false。该结果证明关闭严格 JSON Schema 没有使当前 qwen2.5vl:3b 达到固定复杂表情的描述质量要求；不能把技术响应或模型释放倒写为语义成功，也不能把单一图片外推为所有本地视觉任务不可用。
+
+主人随后要求比较低费用线上视觉方案，并批准先写阿里云百炼固定线上视觉诊断设计与配置说明。本轮新增 docs/owner-console-cloud-vision-diagnostic-design.md，规划独立 workflow=cloud_vision_fixed_description；第一候选固定为 provider=aliyun_bailian、region=cn-beijing、model=qwen3.7-flash、enable_thinking=false。继续使用同一登记的 owner_private PNG 和一句不含答案的自然中文问题，固定一次请求、temperature=0、max_tokens=256、60 秒超时、零 retry、无 tools，基础合同通过后仍进入主人语义质检。
+
+设计只暴露独立 ALIYUN_BAILIAN_WORKSPACE_ID 与 ALIYUN_BAILIAN_API_KEY；模型、地域、endpoint 合同和请求参数固定在代码设计中，不复用 Main LLM 密钥，不提供任意 URL/model/prompt/参数。图片外发确认必须明确说明会把固定 owner_private PNG 发送到阿里云百炼北京地域，且应用无法控制供应商侧数据处理与留存。云端工作流与本地 vision_managed_lifecycle 并列，共享全局运行锁；本地失败不自动触发云端，Flash 失败也不自动改用 qwen3.7-plus。
+
+按 2026-07-25 核对的阿里云官方价格，qwen3.7-flash 低输入档非思考约为输入 0.20 CNY/1M token、输出 0.80 CNY/1M token；以 1270 输入、100 输出粗估约 0.000334 CNY/次。该数字只是设计时估算，实际实现或 live 前必须重新核对官方价格和模型能力。
+
+当前严格状态为 owner_approved_design/designed/not_implemented/not_configured/not_loaded/not_live。当前批准不包含运行代码、读取或配置 API Key、发送图片、调用阿里云模型、重启服务或修改 QQ 生产视觉链。本轮没有执行 DevContext、CombinedRAG、QueryDevContext、私人记忆查询、ProjectDocRAG、Main LLM、RAG、TTS、视觉 live、QQ 写入、commit 或 push。唯一下一步是主人审阅设计并决定是否批准 fake-only 实现。
+```
+
+## 2026-07-26 百炼隔离 live 通过、生产云视觉与 Owner Console 实现
+
+```text
+主人随后提供百炼北京地域 OpenAI-compatible Workspace URL，并在私密 `.env` 中自行填写 URL/Key。配置字段最终固定为 ALIYUN_BAILIAN_BASE_URL 与 ALIYUN_BAILIAN_API_KEY；Key 原值未进入文档、页面、测试输出或 Git 跟踪文件。模型固定为 qwen3.7-flash，不使用 Anthropic URL，也不把模型名交给环境变量或页面覆盖。
+
+在主人逐次明确批准下，隔离脚本对同一固定 owner_private 资产 aike_affection_005 执行三次单请求实验。资产合同保持 500×500 PNG、162977 bytes、SHA-256=1b0db22d21fc7ed998cec9da0568c0987ccf9738eea69bf5c8c436609bfed249；每次均为一次请求、零 tools、零客户端 retry、enable_thinking=false。前两次用于收紧/放宽自然描述长度和观察内容质量；第三次经主人批准允许概括基于可见表情、动作和画面元素的情绪或感情色彩，同时禁止猜测被遮挡或无法确认的细节。
+
+最终固定 prompt 为：“请用80至150字的自然中文，描述这张图片中明确可见的内容，并概括它传达的情绪或感情色彩；可以结合人物表情、动作和画面元素判断，但不要猜测被遮挡或无法确认的细节。”第三次返回耗时 1578 ms，input/output/total token=316/98/414，request_count=1、client_automatic_retry=false、thinking_enabled=false。回复正确覆盖黑白头发、清晰可见的眼睛、下方大爱心和周围漂浮爱心，并概括爱意、兴奋、撒娇，主人接受该内容质量。
+
+供应商回复前导出现孤立 </think>。主人批准的有限清理只处理响应开头的完整 <think>…</think> 块或孤立 </think>；不在正文全局替换标签文本。没有执行第四次请求。
+
+随后主人批准把百炼 qwen3.7-flash 作为主要生产视觉回复模型，并用云视觉面板原位替换 Owner Console 原有本地视觉配置/诊断面板。新增 aliyun_bailian_vision.py 作为可复用生产客户端：固定北京地域 Workspace URL 正则、OpenAI-compatible /chat/completions、HTTPS、trust_env=false、follow_redirects=false、有界超时/响应、PNG/JPEG/GIF/WebP magic 校验、固定模型、无 tools、无 retry、关闭 thinking、严格 model/usage/response 合同和有限 cleanup。鉴权与供应商错误映射为固定安全错误，不透传 Key、原始正文或 endpoint。
+
+生产 vision.py 的 describe_images() 路径改为百炼调用；保留原有输入下载、Base64/大小校验、提示注入/隐私清理、可靠性结果与固定失败标记。旧 _ollama_chat_vision()、本地诊断 executor 和历史测试仍保留，但生产路径不再调用它；云请求失败时不 fallback 到 Ollama 或 Plus。
+
+Owner Console 新增独立 workflow=cloud_vision_fixed_description，固定同一 owner_private 参考图、同一情绪描述 prompt、一次请求和主人语义质检。FastAPI 增加固定执行 POST、受保护参考图 GET、接受 POST、拒绝 POST；全部要求 loopback/same-origin、动作 Cookie、精确 Header/body，并与其他手动诊断共享单一全局锁。接受/拒绝和预览不会再次调用模型。页面没有增加第六块视觉面板，而是原位替换旧视觉面板；显示阿里云百炼、北京地域、qwen3.7-flash、URL/Key 配置布尔值、owner_private 外发说明、固定参考图、清理后回复、response_cleanup_applied、input/output/total token、耗时和主人接受/拒绝。没有图片上传、自由 prompt、模型、URL、Key、fallback 或连续测试控件。
+
+启动脚本将旧 -EnableVisionInferenceProbe 替换为 -EnableCloudVisionProbe；旧本地 HTTP 路由装饰器和 executor 保留为历史兼容，但生产 factory 强制 vision_inference_enabled=false，只有云视觉入口可被新开关启用。诊断只返回 URL/Key 是否配置，不返回原值。
+
+离线回归结果：Python full 734 tests OK（skipped=4）；Owner Console manual diagnostics 19 tests OK；frontend 4 files/31 tests OK；TypeScript typecheck、Vite production build、只读边界 guard、16 个本轮 Python 文件 AST、PowerShell launcher parse、pip check、git diff --check 全部通过。新增 FastAPI fake 端到端测试证明缺 Cookie、非同源、错误 Header、夹带 image/prompt 均在 executor 前失败，预览和主人接受/拒绝不触发模型重跑。所有自动化使用 fake transport/内存数据；没有读取 `.env` 正文、发起第四次云请求、访问本地模型、重启 Bot/Owner Console、写 QQ、执行 RAG 或修复 MemoryRAG。
+
+严格当前状态：isolated_live_passed=true、owner_accepted=true、credentials_configured_privately=true、production_implementation=true、owner_console_replacement_implemented=true、regression_passed=true、bot_restarted=false、owner_console_restarted=false、production_cloud_primary_loaded=false、owner_console_cloud_panel_loaded=false。下一步只能由主人决定是否另行批准重启加载；重启本身不得自动执行云诊断，生产 QQ 图片集成验收也不能由本次固定样本测试替代。
+```
+
+## 2026-07-27 Owner Console 云视觉页面加载
+
+```text
+主人批准先只重启 Owner Console，以查看原位替换后的云视觉界面和诊断入口；本次授权不包含 Bot、Ollama、TTS 重启，也不包含自动执行百炼请求。
+
+启动前只读核对确认 8090 没有 listener，旧 Owner Console 已不在运行。随后使用 start-owner-console.ps1 同时保留 ProjectDocRAG、MemoryRAG consistency、Main LLM contract、TTS synthesis 四个既有开关，并启用新的 -EnableCloudVisionProbe。新进程 PID=15220，监听 127.0.0.1:8090；静态页面、health、manual-diagnostics、routes 和 diagnostics GET 均为 200。
+
+运行快照显示 supported_workflows=project_doc_rag_fixed_retrieval,memory_rag_index_consistency,main_llm_fixed_contract,tts_managed_lifecycle,cloud_vision_fixed_description；route_count=28。云固定执行、参考图预览、接受和拒绝四条路由启用，旧 manual-diagnostics.vision-inference 路由禁用。静态 bundle 包含 cloud-vision-fixed-description、qwen3.7-flash 与阿里云百炼界面文本。
+
+配置只读证据为 vision_provider=aliyun_bailian、vision_model=qwen3.7-flash、vision_region=cn-beijing、workspace_configured=true、credentials_configured=true、automatic_local_fallback=false。没有读取或输出 URL/Key 原值。
+
+启动后的 latest_run=null、cloud_vision_latest_run=null、vision_inference_executed=false，证明页面加载和只读 smoke 没有发送固定图片、调用百炼或执行其他诊断。11434 的现有 listener PID=4388 未被操作，7861 无 listener；Bot 未重启，生产 describe_images() 百炼主链仍未加载。Owner Console stderr 仅有正常 uvicorn startup 与本次 GET 200 记录。
+
+当前严格状态：owner_console_loaded=true、ui_smoke_passed=true、cloud_diagnostic_not_run=true、bot_not_loaded=true、production_live_not_verified=true。下一步由主人打开页面检查视觉面板；只有主人在外发说明后第二次确认，才会产生一次固定百炼请求。
+```
+
+## 2026-07-27 QQ 云视觉 live 通过与启动脚本 Ollama 收口
+
+```text
+主人通过 scripts/start.ps1 启动当前代码。Bot 父/子 PID=24552/15332，8080 正常监听并建立 QQ 生产链；Owner Console PID 15220 与既有 11434 Ollama PID 4388 保持运行，7861 无 listener。
+
+主人连续发送两张 QQ 图片，确认 qwen3.7-flash 均能准确描述图片内容且响应速度很快，回复没有内容问题。只读 reliability_event_buckets 查询仅选择 component/operation/category/code/outcome/count/time/runtime_id，不读取图片、消息、用户或回复正文；当前 runtime_id=21c3714e-32d3-4547-b12c-cea686d2dadb 在 2026-07-26T16:50:24+00:00 至 16:51:07+00:00 聚合 occurrence_count=2 的 vision/infer/operation_succeeded/succeeded，与主人两张图片反馈一致。QQ 生产云视觉状态更新为 loaded/live_passed/owner_accepted。
+
+主人同时指出 scripts/start.ps1 仍会因为 ENABLE_VISION=true 调用 ensure-ollama.ps1 检查 VISION_MODEL=qwen2.5vl:3b。生产视觉已经切到百炼后，这一启动依赖属于陈旧合同。最小修订从 ensure-ollama.ps1 删除 ENABLE_VISION、VISION_OLLAMA_BASE_URL、VISION_MODEL 和 qwen2.5vl:3b 对 needsOllama/requiredModels/BaseUrl 的影响。
+
+scripts/start.ps1 仍调用 ensure-ollama.ps1，以保留真实需要的本地 RAG 依赖：只有 ENABLE_MEMORY_RAG 或 ENABLE_PROJECT_DOC_RAG 开启、且 MEMORY_RAG_EMBEDDING_PROVIDER=ollama 时，才检查 MEMORY_RAG_EMBEDDING_BASE_URL 与 MEMORY_RAG_EMBEDDING_MODEL（默认 bge-m3），必要时沿用受控 Ollama 启动逻辑。视觉开启但 RAG 关闭、或 RAG 使用非 Ollama provider 时，脚本立即报告 “Ollama ensure skipped: Ollama-backed RAG is disabled.”，不访问 /api/tags、不启动 Ollama。
+
+新增 test_ensure_ollama_startup_contract.py：源码合同拒绝视觉 Ollama 变量和 qwen2.5vl；两个真实 PowerShell 子进程场景分别验证 vision-only 与 non-Ollama RAG 均在零网络/零启动前提下退出 0。聚焦 3 tests OK；Python full 737 tests OK（skipped=4）；ensure-ollama.ps1/start.ps1 PowerShell parse、git diff --check 通过。
+
+修订期间没有重启当前 Bot、Owner Console 或 Ollama，没有再次发送图片、调用百炼、写 QQ、执行 RAG 或修复两条 MemoryRAG 缺失向量。脚本变化从下一次 start.ps1 启动开始生效；当前 Bot 无需为此重启。
 ```
 
 从当前阶段开始：

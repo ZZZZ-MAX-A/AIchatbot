@@ -1,8 +1,8 @@
 # MainAgent `/agent` 命令能力审计
 
-本文记录 2026-07-11 当前源码中 `/agent` 的真实能力面。它不是面向 QQ 用户的命令帮助，也不是未来能力规划；它用于回答一条输入实际经过什么路由、命中什么工具和 provider、读取或写入什么、是否调用 LLM/RAG、会产生什么副作用，以及现有测试能证明到什么程度。
+本文记录 `/agent` 的真实能力面。它不是面向 QQ 用户的命令帮助，也不是未来能力规划；它用于回答一条输入实际经过什么路由、命中什么工具和 provider、读取或写入什么、是否调用 LLM/RAG、会产生什么副作用，以及现有测试能证明到什么程度。
 
-审计基线为提交 `a9e7c4b Handle on-demand TTS diagnostics`。使用本文前仍应先检查实时 Git 状态；后续注册表、分类器、provider 或测试变化后，本文必须同步复核。
+最近复核日期为 2026-07-24，已提交基线为 `0055dcc Add Owner Console and Main LLM diagnostic articles`。使用本文前仍应先检查实时 Git 状态；后续注册表、分类器、provider 或测试变化后，本文必须同步复核。曾存在的 `system_diagnostics_report/core` 未获方向批准，现已撤销命令、scope、运行时和测试，不计入本审计的正式能力，也不得从历史记录恢复；只保留既有数据库探针使用 `connect_read_only()` 的安全修正。
 
 ## 1. 与 `/权限帮助`、`/agent 帮助` 和“工具状态”的区别
 
@@ -80,7 +80,7 @@
 | `/agent 执行系统诊断任务：视觉` | 严格 parser -> `system_diagnostics_report/vision` | `read_local`；配置 -> loopback Ollama -> 模型 -> 最近安全观测；写任务/事件安全摘要 | 无 / 无 | 首故障链；不做真实视觉推理 | 专门单测和 live。实用 |
 | `/agent 执行系统诊断任务：语音` | 严格 parser -> `system_diagnostics_report/voice` | `read_local`；配置 -> 启动策略/loopback -> service/health -> loaded/language -> 最近安全观测；写任务/事件安全摘要 | 无 / 无 | 支持按需冷启动待机语义；不生成音频、不发送 QQ | 专门单测、完整任务 sanitizer 和 live。实用 |
 | `/agent 执行系统诊断任务：记忆与RAG` | 严格 parser -> `system_diagnostics_report/memory_rag` | `read_local`；配置、SQLite 索引计数、最近安全观测；写任务/事件安全摘要 | 无 / 不召回正文 | 不执行 embedding、查询或重建 | 专门单测和 live。实用 |
-| `/agent 执行外部只读查询：<问题>` | 严格 parser -> 私聊/主人/`ENABLE_AGENT_WEB`/固定 executor/query policy 门控 -> `external_read_report` | `read_external`；只有显式注入 provider executor 后才允许创建任务；query 原文不持久化 | 无 / 无 | 当前生产默认关闭且未配置 provider，因此只返回关闭或未配置提示；不进入 Main LLM/dev_context，不接受 URL，不创建 pending intent | parser、门控顺序、fake executor、持久化 sanitizer 和 QQ 源码边界有测试；真实联网尚未开放 |
+| `/agent 执行外部只读查询：<问题>` | 严格 parser -> 私聊/主人/`ENABLE_AGENT_WEB`/固定 Tavily executor/query policy 门控 -> `external_read_report` | `read_external`；只有开关、Key、超时、依赖和固定 executor 全部有效才创建任务；query 原文不持久化 | 无 / 无 | 本地开关已由主人批准开启；只接受固定问题、不接受 URL、不进入 Main LLM/dev_context、不创建 pending intent | parser、门控、transport、sanitizer、持久化有测试；认证 executor live 与主人 QQ strict-command live 已通过 |
 | 未注册/未知系统诊断 scope | 严格 parser 在创建任务前拒绝 | 无读写 | 无 / 无 | 列出现有四个 scope；不创建任务 | parser 与无任务测试覆盖。安全且明确 |
 | `/agent-debug <问题>` | 独立 debug 入口，`raw_output=true` -> 显式 `dev_context` | `read_local`；读取 MRAG+PRAG，不持久化原始结果 | 不做 S-LLM；MRAG+PRAG | 返回原始 dev_context 输出；无额外 QQ | RAG 边界与入口注册有测试。仅供主人调试，不应作为运行诊断入口 |
 

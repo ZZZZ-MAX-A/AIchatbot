@@ -198,6 +198,10 @@ class AiChatConfig:
     tts_auto_start: bool
     tts_startup_wait_seconds: int
     user_blacklist: frozenset[str]
+    vision_provider: str = "aliyun_bailian"
+    vision_cloud_model: str = "qwen3.7-flash"
+    aliyun_bailian_base_url: str = field(default="", repr=False)
+    aliyun_bailian_api_key: str = field(default="", repr=False)
 
 
 def load_config() -> AiChatConfig:
@@ -405,4 +409,14 @@ def load_config() -> AiChatConfig:
         tts_auto_start=_bool_env("TTS_AUTO_START", True),
         tts_startup_wait_seconds=_int_env("TTS_STARTUP_WAIT_SECONDS", 45),
         user_blacklist=_csv_env("USER_BLACKLIST"),
+        vision_provider="aliyun_bailian",
+        vision_cloud_model="qwen3.7-flash",
+        aliyun_bailian_base_url=os.getenv(
+            "ALIYUN_BAILIAN_BASE_URL",
+            "",
+        ).strip(),
+        aliyun_bailian_api_key=os.getenv(
+            "ALIYUN_BAILIAN_API_KEY",
+            "",
+        ).strip(),
     )

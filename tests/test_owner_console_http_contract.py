@@ -103,6 +103,78 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
                 "manual_diagnostics",
             ),
+            (
+                "manual-diagnostics.tts-synthesis",
+                "manual-diagnostics/tts-synthesis",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.tts-audio-preview",
+                "manual-diagnostics/tts-synthesis/audio-preview",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-preview/{run_id}",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.tts-audio-quality-accept",
+                "manual-diagnostics/tts-synthesis/audio-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/accept",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.tts-audio-quality-reject",
+                "manual-diagnostics/tts-synthesis/audio-quality/reject",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/reject",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.vision-inference",
+                "manual-diagnostics/vision-inference",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.vision-reference-preview",
+                "manual-diagnostics/vision-inference/reference-preview",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/reference-preview",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.vision-response-quality-accept",
+                "manual-diagnostics/vision-inference/response-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/response-quality/accept",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.vision-response-quality-reject",
+                "manual-diagnostics/vision-inference/response-quality/reject",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference/response-quality/reject",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.cloud-vision-fixed-description",
+                "manual-diagnostics/cloud-vision-fixed-description",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.cloud-vision-reference-preview",
+                "manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.cloud-vision-response-quality-accept",
+                "manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+                "manual_diagnostics",
+            ),
+            (
+                "manual-diagnostics.cloud-vision-response-quality-reject",
+                "manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
+                "manual_diagnostics",
+            ),
         ]
         self.assertEqual(
             [(row.name, row.resource, row.path, row.read_page) for row in snapshot.rows],
@@ -121,12 +193,26 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "manual-diagnostics.project-doc-rag",
                 "manual-diagnostics.memory-rag-consistency",
                 "manual-diagnostics.main-llm-contract",
+                "manual-diagnostics.tts-synthesis",
+                "manual-diagnostics.tts-audio-quality-accept",
+                "manual-diagnostics.tts-audio-quality-reject",
+                "manual-diagnostics.vision-inference",
+                "manual-diagnostics.vision-response-quality-accept",
+                "manual-diagnostics.vision-response-quality-reject",
+                "manual-diagnostics.cloud-vision-fixed-description",
+                "manual-diagnostics.cloud-vision-response-quality-accept",
+                "manual-diagnostics.cloud-vision-response-quality-reject",
             }:
                 self.assertEqual(row.method, "POST")
                 self.assertFalse(row.read_only)
                 self.assertTrue(row.write_side_effect_allowed)
                 self.assertTrue(row.manual_runtime_action_allowed)
-            elif row.name == "manual-diagnostics":
+            elif row.name in {
+                "manual-diagnostics",
+                "manual-diagnostics.tts-audio-preview",
+                "manual-diagnostics.vision-reference-preview",
+                "manual-diagnostics.cloud-vision-reference-preview",
+            }:
                 self.assertEqual(row.method, "GET")
                 self.assertTrue(row.read_only)
                 self.assertFalse(row.write_side_effect_allowed)
@@ -185,6 +271,48 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         self.assertEqual(
             rows["manual-diagnostics.main-llm-contract"].runtime_method,
             "run_main_llm_contract",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-synthesis"].runtime_method,
+            "run_tts_synthesis",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-synthesis"].read_model,
+            "OwnerConsoleTtsSynthesisRun",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-audio-preview"].runtime_method,
+            "read_tts_audio_preview",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-audio-preview"].path_params,
+            ["run_id"],
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.tts-audio-preview"].read_model,
+            "audio/wav",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.vision-inference"].runtime_method,
+            "run_vision_inference",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.vision-inference"].read_model,
+            "OwnerConsoleVisionInferenceRun",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.vision-reference-preview"].runtime_method,
+            "read_vision_reference_preview",
+        )
+        self.assertEqual(
+            rows["manual-diagnostics.vision-reference-preview"].read_model,
+            "image/png",
+        )
+        self.assertEqual(
+            rows[
+                "manual-diagnostics.vision-response-quality-accept"
+            ].runtime_method,
+            "review_vision_response_quality",
         )
 
     def test_http_response_and_error_envelopes_are_stable_and_json_safe(self):

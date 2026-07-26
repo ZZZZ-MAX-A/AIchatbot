@@ -47,7 +47,7 @@ from .chat_graph_bridge import (
 )
 from .compressor import CompressionResult, compress_session
 from .config import load_config
-from .database import DATABASE_PATH, connect, ensure_database
+from .database import DATABASE_PATH, connect, connect_read_only, ensure_database
 from .diagnostics import (
     check_ollama,
     clear_error_log,
@@ -5591,7 +5591,7 @@ async def run_development_context_report_for_event(
 
 def _system_database_read_probe() -> bool:
     try:
-        with connect() as connection:
+        with connect_read_only() as connection:
             connection.execute("SELECT 1").fetchone()
         return True
     except Exception:

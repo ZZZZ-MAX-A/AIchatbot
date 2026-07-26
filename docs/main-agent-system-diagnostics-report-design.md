@@ -1,6 +1,8 @@
 # MainAgent 分区分层系统诊断报告设计
 
-状态：P2.46a 设计、P2.46b 系统概览、P2.46c 视觉区详情和 P2.46d 主人 QQ live 已完成。后续增加 `voice` 与 `memory_rag` 两个严格只读区域详情。主人进一步明确 TTS 采用真实语音请求时按需冷启动；正式任务 #40 暴露 `startup` 新层未进入 work runtime sanitizer 映射并触发 `KeyError`。映射与正式任务链测试补齐、407 项本地回归通过后，主人已重新验证快速语音状态、正式语音详情和系统概览，反馈均没有问题；未提供新的任务 ID。
+状态：P2.46a 设计、P2.46b 系统概览、P2.46c 视觉区详情、P2.46d 主人 QQ live，以及后续 `voice`、`memory_rag` 两个严格只读区域详情均已完成。未获方向批准的 P2.50a `core` 本地实验已于 2026-07-24 按主人决定撤销命令、scope、运行时和测试，只保留既有 `_system_database_read_probe()` 改用 `connect_read_only()` 的独立安全修正。`chat`、`main_agent`、`core` 和所有深度 scope 均未注册。
+
+> 授权边界：本文中的候选区域、未完成 scope 和 P2.50a 历史实验都不构成主人批准。正式已提交并 live 的区域详情只有 `vision`、`voice`、`memory_rag`；已撤销的 `core` 不得从历史段落恢复，当前方向只以 [current-development-status.md](current-development-status.md) 为准。
 
 本文定义并记录第二个正式只读工作类型 `system_diagnostics_report`。它的首要职责不是复制现有 `/诊断`、`/视觉状态`、`ops_health` 和多步排查输出，而是先把系统状态归并为少量诊断大区，进行短输出分诊；只有发现某个大区需要关注时，才建议主人显式进入该区域的详情排查或更深探针。
 
@@ -14,7 +16,7 @@
   -> 针对性深度探针
 ```
 
-默认概览必须短，正常和按设计关闭的大区分别合并为一行，只单独展开异常、降级、需要关注或影响判断的未知大区。报告最多推荐一个优先排查区域；只有对应区域 scope 已注册时才给出可执行严格命令，不自动创建下一级任务，不自动连续排查，不自动修复。当前已注册 `vision`、`voice` 和 `memory_rag` 区域详情；其他区域详情和所有深度 scope 仍保持未注册。
+默认概览必须短，正常和按设计关闭的大区分别合并为一行，只单独展开异常、降级、需要关注或影响判断的未知大区。报告最多推荐一个优先排查区域；只有对应区域 scope 已注册时才给出可执行严格命令，不自动创建下一级任务，不自动连续排查，不自动修复。正式已提交并 live 的区域详情为 `vision`、`voice` 和 `memory_rag`；`core` 实验已撤销，其他区域详情和所有深度 scope 仍保持未注册。
 
 系统状态由确定性代码和结构化证据判断，不由主模型凭自然语言猜测。第一版不调用 MainAgent LLM，不向外部聊天 API 发测试请求，不执行视觉推理、embedding 生成、RAG 召回或 ProjectDocRAG 正文读取。
 
@@ -125,7 +127,7 @@ main_agent_work_runtime
 
 自由文本不会扩大 scope。诸如“顺便重启服务”“自动修好”“清空缓存后重试”等内容不进入当前只读任务。第一版只允许主人私聊显式入口；普通聊天、群聊、非主人私聊、普通语义 fallback、Web Owner Console 和 `/agent-debug` 都不能触发正式系统诊断工作任务。
 
-当前只有 `overview`、`vision`、`voice` 和 `memory_rag` 会创建并执行正式任务。其他已知区域名称会被严格解析，但在区域 executor 注册前只返回“区域详情尚未注册”，不创建 `agent_tasks`，也不执行任何区域探针。未知 scope 同样在任务创建前拒绝。
+已提交并 live 的正式范围中，只有 `overview`、`vision`、`voice` 和 `memory_rag` 会创建并执行正式任务。历史工作区实验曾短暂注册 `core`，但已完整撤销，当前不是可用命令。其他已知区域名称会被严格解析，但在区域 executor 注册前只返回“区域详情尚未注册”，不创建 `agent_tasks`，也不执行任何区域探针。未知 scope 同样在任务创建前拒绝。
 
 ## 5. 三级诊断模型
 
@@ -180,6 +182,16 @@ main_agent_work_runtime
 ```
 
 数据库检查只能执行只读查询；不得通过诊断任务创建业务记录、清理数据或修复 schema。任务自身既有的创建、领取、完成事件仍属于注册工作任务的审计生命周期，不算诊断探针写操作。
+
+未获方向批准的 P2.50a 本地实验曾按以下第一故障链实现 `scope=core`：
+
+```text
+主人私聊 /agent 严格入口
+  -> system_diagnostics_report 正式工作运行时
+  -> SQLite mode=ro + SELECT 1
+```
+
+该详情不运行 DiagnosticsGraph 全量 view，也不采集聊天、MainAgent、MemoryRAG、视觉或语音区域证据。数据库探针使用 `connect_read_only()`，不调用 `ensure_database()`、不初始化 schema、不提交事务。严格入口或正式工作运行时未通过时停止在上游；数据库无法打开、不是只读连接或 `SELECT 1` 失败时定位数据库只读层。本次只返回确定性状态链，任务记录仅保存状态、定位层级和安全计数。
 
 ### 6.2 聊天区
 
@@ -691,12 +703,13 @@ QQ 详细状态链仅在当次主人私聊返回；任务记录只保存状态�
 没有额外 QQ、外部请求、深度探针或修复动作
 ```
 
-本轮随后批准并实现了 `voice` 与 `memory_rag` 两个只读区域详情，但没有批准任何深度探针。其他区域详情和深度探针仍须根据真实使用结果另行批准，不因当前 live 通过而自动进入。
+本轮随后批准并实现了 `voice` 与 `memory_rag` 两个只读区域详情，但没有批准任何深度探针。P2.50a 曾在未获方向批准的工作区实验中单独注册 `core`，随后已按主人决定撤销；它与 `chat`、`main_agent`、Owner Console 区域详情和深度探针一样，都不能因旧文档存在或既有 live 通过而自动进入。
 
-### 当前扩展：语音、记忆与RAG和路由收口（不另设阶段编号）
+### 已提交扩展与已撤销实验：语音、记忆与RAG、路由和 core
 
 ```text
-严格 scope：overview、vision、voice、memory_rag。
+已提交正式 scope：overview、vision、voice、memory_rag。
+已撤销 core 实验：历史 core-only 曾只执行 SQLite mode=ro + SELECT 1；命令、scope、运行时和测试现已不存在。
 voice-only 不运行数据库、MemoryRAG、视觉或通用概览探针。
 memory_rag-only 不运行 voice、vision 或通用数据库健康探针，也不做 embedding/召回/重建。
 未知且无 Main LLM 的 /agent 表达进入 ask_owner，不再默认执行 dev_context/RAG。
@@ -704,12 +717,27 @@ memory_rag-only 不运行 voice、vision 或通用数据库健康探针，也不
 Main LLM 对对象、范围或运行/研发含义不清的请求优先 ask_owner；运行状态不得用 dev_context 猜测。
 ask_owner 只给出澄清和真实已注册命令，不保存 pending intent，也不接受裸“可以”作为授权。
 MainAgent 工具总结保持中性；RAG 内容是证据而非身份设定，不采用角色自称或动作旁白。
-任务 sanitizer 支持 overview、vision、voice、memory_rag，并拒绝任何非零 external/deep/repair 计数。
-聚焦回归 59 tests OK；全量回归 407 tests OK；101 个 Python 文件 AST 和 git diff --check 通过。
+历史工作区实验的任务 sanitizer 曾支持 overview、core、vision、voice、memory_rag，并拒绝任何非零 external/deep/repair 计数；当前 sanitizer 已恢复为不支持 core。
+该扩展阶段当时的聚焦回归 59 tests OK；全量回归 407 tests OK；101 个 Python 文件 AST 和 git diff --check 通过。这些历史测试事实不表示 core 当前存在。
 交叉合同覆盖视觉 8 种、语音 7 种、记忆与RAG 8 种证据状态，确认概览与详情使用同一 evidence 时区域状态一致；语音额外覆盖服务尚未冷启动、服务在线但模型等待首次生成加载，以及不自动启动时服务不可达的真实降级。
 ```
 
 按需冷启动语义的本地实现、回归和主人 QQ live 已完成。快速语音状态显示“按需待机”，正式语音详情和系统概览在 #40 sanitizer 修复后均由主人确认没有问题；本次仍未触发真实冷启动、模型加载、音频生成或 QQ 发送。
+
+### P2.50a：核心运行区详情（未获方向批准、现已撤销的历史实验）
+
+```text
+严格命令：/agent 执行系统诊断任务：核心
+scope=core
+定位层级：entry / runtime / database / none
+数据库探针：connect_read_only() + SELECT 1
+本地检查上限：1
+external_request_count=0
+deep_probe_count=0
+repair_action_count=0
+```
+
+概览与详情曾复用同一个 `evaluate_core_zone`，覆盖严格入口失败、正式工作运行时未注册、连接未保持只读、数据库未知/失败和正常状态。core 分支曾在任何 MemoryRAG、视觉或语音 collector 之前返回，不调用 LLM、RAG、聊天、外部服务、schema 初始化、自动重试或修复。该实验从未加载或 live；主人随后决定完全撤销正式能力，只保留 `_system_database_read_probe()` 使用 `connect_read_only()` 的安全修正。当前源码和测试中不再存在 core 命令、常量、payload、report builder、runtime 或 sanitizer 支持。
 
 ## 15. 验收标准
 

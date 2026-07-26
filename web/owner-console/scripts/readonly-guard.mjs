@@ -16,6 +16,7 @@ const expectedStaticPaths = [
   "`${API_BASE}/overview`",
   "`${API_BASE}/diagnostics`",
   "`${API_BASE}/manual-diagnostics`",
+  "`${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/reference-preview`",
   "`${API_BASE}/reliability`",
   "`${API_BASE}/memory`",
   "`${API_BASE}/access-control`",
@@ -32,6 +33,15 @@ const expectedApiMethods = [
   "getManualDiagnostics",
   "runProjectDocRagProbe",
   "runMemoryRagConsistency",
+  "runMainLlmContract",
+  "runTtsSynthesis",
+  "getTtsAudioPreview",
+  "acceptTtsAudioQuality",
+  "rejectTtsAudioQuality",
+  "runCloudVisionFixedDescription",
+  "getCloudVisionReferencePreview",
+  "acceptCloudVisionResponseQuality",
+  "rejectCloudVisionResponseQuality",
   "getReliability",
   "getMemory",
   "getAccessControl",
@@ -196,14 +206,38 @@ if (!apiText.includes("`${API_BASE}/manual-diagnostics/memory-rag-consistency`")
 if (!apiText.includes("`${API_BASE}/manual-diagnostics/main-llm-contract`")) {
   fail("ownerConsoleApi.ts is missing the Main LLM contract action path.");
 }
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/tts-synthesis`")) {
+  fail("ownerConsoleApi.ts is missing the TTS synthesis action path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/accept`")) {
+  fail("ownerConsoleApi.ts is missing the TTS audio quality accept path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/tts-synthesis/audio-quality/reject`")) {
+  fail("ownerConsoleApi.ts is missing the TTS audio quality reject path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/tts-synthesis/audio-preview/`")) {
+  fail("ownerConsoleApi.ts is missing the bounded TTS audio preview path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/cloud-vision-fixed-description`")) {
+  fail("ownerConsoleApi.ts is missing the cloud vision action path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/reference-preview`")) {
+  fail("ownerConsoleApi.ts is missing the protected cloud vision reference preview path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept`")) {
+  fail("ownerConsoleApi.ts is missing the cloud vision response quality accept path.");
+}
+if (!apiText.includes("`${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject`")) {
+  fail("ownerConsoleApi.ts is missing the cloud vision response quality reject path.");
+}
 const allowedPostBlock = apiText.match(
   /const allowedPostPaths = new Set\(\[([\s\S]*?)\]\);/,
 )?.[1] ?? "";
 const registeredPostPathCount = [
   ...allowedPostBlock.matchAll(/`\$\{API_BASE\}\/manual-diagnostics\//g),
 ].length;
-if (registeredPostPathCount !== 3) {
-  fail(`ownerConsoleApi.ts must register exactly three manual-action POST paths; found ${registeredPostPathCount}.`);
+if (registeredPostPathCount !== 9) {
+  fail(`ownerConsoleApi.ts must register exactly nine manual-action POST paths; found ${registeredPostPathCount}.`);
 }
 const postMethodCount = [...apiText.matchAll(/method:\s*"POST"/g)].length;
 if (postMethodCount !== 1) {
@@ -216,6 +250,20 @@ for (const requiredToken of [
   'confirmation: "run_registered_memory_rag_consistency"',
   '"X-Owner-Console-Action": "manual-main-llm-contract-v1"',
   'confirmation: "run_registered_main_llm_contract"',
+  '"X-Owner-Console-Action": "manual-tts-synthesis-v1"',
+  'confirmation: "run_registered_tts_synthesis"',
+  '"X-Owner-Console-Action": "manual-tts-audio-preview-v1"',
+  '"X-Owner-Console-Action": "manual-tts-audio-quality-accept-v1"',
+  'confirmation: "accept_latest_tts_audio_quality"',
+  '"X-Owner-Console-Action": "manual-tts-audio-quality-reject-v1"',
+  'confirmation: "reject_latest_tts_audio_quality"',
+  '"X-Owner-Console-Action": "manual-cloud-vision-fixed-description-v1"',
+  'confirmation: "run_registered_cloud_vision_fixed_description"',
+  '"X-Owner-Console-Action": "manual-cloud-vision-reference-preview-v1"',
+  '"X-Owner-Console-Action": "manual-cloud-vision-response-quality-accept-v1"',
+  'confirmation: "accept_latest_cloud_vision_response_quality"',
+  '"X-Owner-Console-Action": "manual-cloud-vision-response-quality-reject-v1"',
+  'confirmation: "reject_latest_cloud_vision_response_quality"',
   '"Content-Type": "application/json"',
 ]) {
   if (!apiText.includes(requiredToken)) {
@@ -282,4 +330,4 @@ if (failures.length > 0) {
 
 console.log("Owner Console frontend boundary guard passed.");
 console.log(`Checked ${sourceFiles.length} TypeScript source files.`);
-console.log("Verified read-only GET paths, three fixed manual POST actions, controlled timers, page routes, and absence of generic write APIs.");
+console.log("Verified read-only GET paths, protected TTS/cloud-vision previews, nine fixed manual POST actions, controlled timers, page routes, and absence of generic write APIs.");
