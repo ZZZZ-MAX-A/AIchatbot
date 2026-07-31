@@ -25,13 +25,14 @@ logs/*
 data/*
 !data/.gitkeep
 
-# Persona cards
-prompts/persona-cards/*.md
-prompts/persona-cards/*.json
-prompts/persona-cards/private/*
+# Persona cards: deny everything by default. Only documentation, explicitly
+# desensitized example templates, and the private-directory placeholder may be tracked.
+prompts/persona-cards/**
 !prompts/persona-cards/README.md
 !prompts/persona-cards/public/
-!prompts/persona-cards/public/**
+!prompts/persona-cards/public/*.example.md
+!prompts/persona-cards/public/*.example.auto-reply.json
+!prompts/persona-cards/private/
 !prompts/persona-cards/private/.gitkeep
 
 # Local tools
