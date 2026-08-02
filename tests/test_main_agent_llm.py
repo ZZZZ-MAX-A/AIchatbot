@@ -111,6 +111,49 @@ class MainAgentLLMAdapterTests(unittest.TestCase):
         self.assertNotIn('"path": "..."', contract)
         self.assertIn("fixed ignored workspace", contract)
 
+    def test_explicit_main_agent_external_read_contract_exposes_web_boundary(self):
+        registry = self.modules[
+            "main_agent_bridge"
+        ].create_read_only_main_agent_tool_registry(
+            lambda _query, _is_owner: "unused",
+            execute_external_read=lambda _query, _context: "unused",
+        )
+
+        messages = self.main_agent_llm.build_main_agent_action_messages(
+            "帮我查一下今天的模型发布",
+            tool_registry=registry,
+            trusted_current_date="2026-07-30",
+        )
+        system_prompt = messages[0]["content"]
+
+        self.assertIn('tool_name "external_read"', system_prompt)
+        self.assertIn('"query": "..."', system_prompt)
+        self.assertIn('"source_scope": "..."', system_prompt)
+        self.assertIn('"time_range": "..."', system_prompt)
+        self.assertIn('"evidence_role": "..."', system_prompt)
+        self.assertIn('"secondary_time_range": "..."', system_prompt)
+        self.assertIn('"secondary_evidence_role": "..."', system_prompt)
+        self.assertIn("at most 50 characters", system_prompt)
+        self.assertIn("local food, travel, reputation", system_prompt)
+        self.assertIn("General scope may still return first-party pages", system_prompt)
+        self.assertIn("Do not require an official-only domain stage", system_prompt)
+        self.assertIn('for "原神下一个版本的角色是谁"', system_prompt)
+        self.assertIn('query="原神最新版本角色预告"', system_prompt)
+        self.assertIn("secondary_time_range=month", system_prompt)
+        self.assertIn("Trusted current date for relative-time planning: 2026-07-30", system_prompt)
+        self.assertIn("current public web evidence", system_prompt)
+        self.assertIn("Never include a URL, credential, local path", system_prompt)
+        self.assertIn('vague recency words such as "最近"', system_prompt)
+        self.assertIn("rolling last month", system_prompt)
+        self.assertIn(
+            "secondary if_no_results query with time_range=six_months",
+            system_prompt,
+        )
+        self.assertIn("rolling six-month window", system_prompt)
+        self.assertIn("preserve official scope", system_prompt)
+        self.assertIn("official-only", system_prompt)
+        self.assertIn("Do not repeat stale source", system_prompt)
+
 
     def test_document_delivery_tool_contract_exposes_bounded_send_commands(self):
         async def retrieve_dev_context(_query, _is_owner):

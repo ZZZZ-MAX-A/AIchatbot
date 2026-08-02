@@ -59,6 +59,7 @@ from .main_agent import (
 )
 from .main_agent_bridge import (
     ApprovalRequestHandler,
+    EXTERNAL_READ_TOOL_NAME,
     ReadOnlyDevContextTool,
     ToolRiskResolver,
     build_read_only_agent_context,
@@ -319,6 +320,7 @@ __all__ = [
     "create_tool_policy_checker",
     "create_tool_registry_executor",
     "create_tool_summary_renderer",
+    "EXTERNAL_READ_TOOL_NAME",
     "document_request_references_missing_prior_content",
     "evaluate_hard_policy",
     "extract_main_llm_text",

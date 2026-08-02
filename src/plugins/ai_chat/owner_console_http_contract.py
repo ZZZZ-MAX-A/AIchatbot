@@ -35,6 +35,9 @@ class OwnerConsoleHttpRouteSpec:
     read_only: bool = True
     write_side_effect_allowed: bool = False
     manual_runtime_action_allowed: bool = False
+    approval_action_allowed: bool = False
+    task_action_allowed: bool = False
+    access_action_allowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,72 @@ OWNER_CONSOLE_HTTP_ROUTE_SPECS = tuple(
         runtime_method="build_snapshot",
         read_model="OwnerConsoleManualDiagnosticsSnapshot",
         requires_context=False,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="tasks.cancel",
+        resource="tasks/cancel",
+        method="POST",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks/{{task_id}}/cancel",
+        read_page="task_detail",
+        runtime_method="cancel",
+        read_model="OwnerConsoleTaskActionResult",
+        requires_context=True,
+        path_params=("task_id",),
+        read_only=False,
+        write_side_effect_allowed=True,
+        task_action_allowed=True,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="approvals.approve",
+        resource="approvals/approve",
+        method="POST",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/approve",
+        read_page="approval_detail",
+        runtime_method="decide",
+        read_model="OwnerConsoleApprovalActionResult",
+        requires_context=True,
+        path_params=("approval_id",),
+        read_only=False,
+        write_side_effect_allowed=True,
+        approval_action_allowed=True,
+    ),
+    OwnerConsoleHttpRouteSpec(
+        name="approvals.reject",
+        resource="approvals/reject",
+        method="POST",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/reject",
+        read_page="approval_detail",
+        runtime_method="decide",
+        read_model="OwnerConsoleApprovalActionResult",
+        requires_context=True,
+        path_params=("approval_id",),
+        read_only=False,
+        write_side_effect_allowed=True,
+        approval_action_allowed=True,
+    ),
+    *tuple(
+        OwnerConsoleHttpRouteSpec(
+            name=f"access-control.{route_name}.{operation}",
+            resource=f"access-control/{route_name}/{operation}",
+            method="POST",
+            path=(
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/"
+                f"{route_name}/{operation}"
+            ),
+            read_page="access_control",
+            runtime_method="mutate",
+            read_model="OwnerConsoleAccessActionResult",
+            requires_context=False,
+            read_only=False,
+            write_side_effect_allowed=True,
+            access_action_allowed=True,
+        )
+        for route_name in (
+            "private-whitelist",
+            "group-whitelist",
+            "user-blacklist",
+        )
+        for operation in ("add", "remove")
     ),
     OwnerConsoleHttpRouteSpec(
         name="manual-diagnostics.project-doc-rag",
@@ -471,10 +540,20 @@ def build_owner_console_http_route_contract_snapshot(
             query_params=list(spec.query_params),
             read_only=spec.read_only,
             http_api_enabled=spec.name in enabled_routes,
-            web_write_enabled=False,
+            web_write_enabled=(
+                (
+                    spec.approval_action_allowed
+                    or spec.task_action_allowed
+                    or spec.access_action_allowed
+                )
+                and spec.name in enabled_routes
+            ),
             direct_qq_dependency_allowed=False,
             write_side_effect_allowed=spec.write_side_effect_allowed,
             manual_runtime_action_allowed=spec.manual_runtime_action_allowed,
+            approval_action_allowed=spec.approval_action_allowed,
+            task_action_allowed=spec.task_action_allowed,
+            access_action_allowed=spec.access_action_allowed,
         )
         for spec in OWNER_CONSOLE_HTTP_ROUTE_SPECS
     ]
@@ -488,9 +567,29 @@ def build_owner_console_http_route_contract_snapshot(
         rows=rows,
         context_strategy="owner_private_session_from_config",
         context_override_allowed=False,
-        write_routes_enabled=False,
+        write_routes_enabled=any(
+            row.http_api_enabled
+            and (
+                row.approval_action_allowed
+                or row.task_action_allowed
+                or row.access_action_allowed
+            )
+            for row in rows
+        ),
         manual_runtime_action_routes_enabled=any(
             row.http_api_enabled and row.manual_runtime_action_allowed
+            for row in rows
+        ),
+        approval_action_routes_enabled=any(
+            row.http_api_enabled and row.approval_action_allowed
+            for row in rows
+        ),
+        task_action_routes_enabled=any(
+            row.http_api_enabled and row.task_action_allowed
+            for row in rows
+        ),
+        access_action_routes_enabled=any(
+            row.http_api_enabled and row.access_action_allowed
             for row in rows
         ),
         boundary=OwnerConsoleRuntimeBoundary(),

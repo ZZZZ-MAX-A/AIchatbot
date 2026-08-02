@@ -2,18 +2,21 @@
 
 from .main_agent import (
     MainAgentLLMInvocationError,
+    create_external_research_llm_call,
     create_main_agent_lc_call_handler,
     create_main_agent_tool_summary_lc_handler,
     create_main_llm_call,
     invoke_main_llm,
 )
-from .models import build_chat_llm, build_main_llm
+from .models import build_chat_llm, build_external_research_llm, build_main_llm
 
 __all__ = [
     "MainAgentLLMInvocationError",
     "build_chat_llm",
+    "build_external_research_llm",
     "build_main_llm",
     "create_main_agent_lc_call_handler",
+    "create_external_research_llm_call",
     "create_main_agent_tool_summary_lc_handler",
     "create_main_llm_call",
     "invoke_main_llm",

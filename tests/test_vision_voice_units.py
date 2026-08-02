@@ -78,7 +78,7 @@ class VisionPureUnitTests(unittest.TestCase):
 
         refs = self.vision.image_refs_from_event(event)
 
-        self.assertEqual(refs, ["D:\\NapCat\\cache\\image.jpg", "napcat-file-id"])
+        self.assertEqual(refs, ["napcat-file-id", "D:\\NapCat\\cache\\image.jpg"])
         self.assertEqual(self.vision.image_urls_from_event(event), [])
 
     def test_image_urls_from_event_ignores_non_image_and_empty_data(self):
@@ -182,7 +182,8 @@ class VisionPureUnitTests(unittest.TestCase):
         self.assertIn("Ollama", result.detail)
 
     def test_download_image_base64_accepts_data_urls_without_network(self):
-        payload = base64.b64encode(b"image-bytes").decode("ascii")
+        image_bytes = b"\x89PNG\r\n\x1a\nimage-bytes"
+        payload = base64.b64encode(image_bytes).decode("ascii")
 
         result = self.vision._download_image_base64(
             f"data:image/png;base64,{payload}",
@@ -202,14 +203,226 @@ class VisionPureUnitTests(unittest.TestCase):
     def test_download_image_base64_accepts_local_paths_and_file_urls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "image.png"
-            path.write_bytes(b"image-bytes")
-            expected = base64.b64encode(b"image-bytes").decode("ascii")
+            image_bytes = b"\x89PNG\r\n\x1a\nimage-bytes"
+            path.write_bytes(image_bytes)
+            expected = base64.b64encode(image_bytes).decode("ascii")
 
-            local_result = self.vision._download_image_base64(str(path), 1, 100)
-            file_url_result = self.vision._download_image_base64(path.as_uri(), 1, 100)
+            trusted_roots = (Path(temp_dir),)
+            local_result = self.vision._download_image_base64(
+                str(path),
+                1,
+                100,
+                trusted_roots,
+            )
+            file_url_result = self.vision._download_image_base64(
+                path.as_uri(),
+                1,
+                100,
+                trusted_roots,
+            )
 
         self.assertEqual(local_result, expected)
         self.assertEqual(file_url_result, expected)
+
+    def test_download_image_base64_rejects_local_file_outside_trusted_roots(self):
+        with tempfile.TemporaryDirectory() as allowed_dir, tempfile.TemporaryDirectory() as outside_dir:
+            outside_path = Path(outside_dir) / "private.png"
+            outside_path.write_bytes(b"\x89PNG\r\n\x1a\nprivate-image")
+
+            with self.assertRaisesRegex(self.vision.VisionError, "可信缓存目录"):
+                self.vision._download_image_base64(
+                    str(outside_path),
+                    1,
+                    100,
+                    (Path(allowed_dir),),
+                )
+
+    def test_download_image_base64_rejects_local_files_when_allowlist_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "private.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\nprivate-image")
+
+            with self.assertRaisesRegex(self.vision.VisionError, "可信缓存目录"):
+                self.vision._download_image_base64(str(path), 1, 100)
+
+    def test_public_ip_validation_rejects_local_private_and_metadata_addresses(self):
+        blocked = (
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "::1",
+            "fe80::1",
+        )
+
+        for address in blocked:
+            with self.subTest(address=address):
+                with self.assertRaisesRegex(self.vision.VisionError, "非公网网络"):
+                    self.vision._public_ip_addresses(address, 80)
+
+    def test_public_ip_validation_rejects_dns_with_any_private_answer(self):
+        answers = [
+            (
+                self.vision.socket.AF_INET,
+                self.vision.socket.SOCK_STREAM,
+                self.vision.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            ),
+            (
+                self.vision.socket.AF_INET,
+                self.vision.socket.SOCK_STREAM,
+                self.vision.socket.IPPROTO_TCP,
+                "",
+                ("10.0.0.8", 443),
+            ),
+        ]
+
+        with patch.object(self.vision.socket, "getaddrinfo", return_value=answers):
+            with self.assertRaisesRegex(self.vision.VisionError, "非公网网络"):
+                self.vision._public_ip_addresses("mixed.example.test", 443)
+
+    def test_http_image_redirect_revalidates_and_rejects_private_target(self):
+        class Connection:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class RedirectResponse:
+            status = 302
+
+            def getheader(self, name):
+                return "http://127.0.0.1/private.png" if name == "Location" else None
+
+        public_answer = [
+            (
+                self.vision.socket.AF_INET,
+                self.vision.socket.SOCK_STREAM,
+                self.vision.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        connection = Connection()
+        with (
+            patch.object(self.vision.socket, "getaddrinfo", return_value=public_answer),
+            patch.object(
+                self.vision,
+                "_open_pinned_image_connection",
+                return_value=(connection, RedirectResponse()),
+            ) as opener,
+        ):
+            with self.assertRaisesRegex(self.vision.VisionError, "非公网网络"):
+                self.vision._download_public_http_image(
+                    "https://images.example.test/start",
+                    1,
+                    100,
+                )
+
+        self.assertEqual(opener.call_count, 1)
+        self.assertTrue(connection.closed)
+
+    def test_http_image_download_uses_validated_public_address_and_image_magic(self):
+        image_bytes = b"\x89PNG\r\n\x1a\npublic-image"
+
+        class Connection:
+            def close(self):
+                pass
+
+        class ImageResponse:
+            status = 200
+
+            def __init__(self):
+                self.remaining = image_bytes
+
+            def getheader(self, name):
+                return str(len(image_bytes)) if name == "Content-Length" else None
+
+            def read(self, _size):
+                chunk, self.remaining = self.remaining, b""
+                return chunk
+
+        public_answer = [
+            (
+                self.vision.socket.AF_INET,
+                self.vision.socket.SOCK_STREAM,
+                self.vision.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        with (
+            patch.object(self.vision.socket, "getaddrinfo", return_value=public_answer),
+            patch.object(
+                self.vision,
+                "_open_pinned_image_connection",
+                return_value=(Connection(), ImageResponse()),
+            ) as opener,
+        ):
+            result = self.vision._download_public_http_image(
+                "https://images.example.test/photo.png",
+                1,
+                100,
+            )
+
+        self.assertEqual(base64.b64decode(result), image_bytes)
+        _, _, _, addresses, _ = opener.call_args.args
+        self.assertEqual(addresses, ("93.184.216.34",))
+
+    def test_pinned_http_connection_connects_to_validated_ip_not_hostname(self):
+        calls = {}
+
+        class Socket:
+            def close(self):
+                pass
+
+        class Response:
+            status = 200
+
+        class Connection:
+            def __init__(self, host, port, timeout):
+                calls["connection_target"] = (host, port, timeout)
+                self.sock = None
+
+            def putrequest(self, method, target, **kwargs):
+                calls["request"] = (method, target, kwargs)
+
+            def putheader(self, name, value):
+                calls.setdefault("headers", {})[name] = value
+
+            def endheaders(self):
+                calls["ended"] = True
+
+            def getresponse(self):
+                return Response()
+
+            def close(self):
+                pass
+
+        def create_connection(target, timeout):
+            calls["socket_target"] = (target, timeout)
+            return Socket()
+
+        parsed = self.vision.urlparse("http://cdn.example.test/photo.png")
+        with (
+            patch.object(self.vision.socket, "create_connection", create_connection),
+            patch.object(self.vision.http.client, "HTTPConnection", Connection),
+        ):
+            connection, response = self.vision._open_pinned_image_connection(
+                parsed,
+                "cdn.example.test",
+                80,
+                ("93.184.216.34",),
+                2,
+            )
+
+        self.assertIsInstance(connection, Connection)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls["socket_target"], (("93.184.216.34", 80), 2))
+        self.assertEqual(calls["connection_target"], ("cdn.example.test", 80, 2))
+        self.assertEqual(calls["headers"]["Host"], "cdn.example.test")
 
     def test_download_image_base64_rejects_invalid_local_inputs_without_network(self):
         with self.assertRaises(self.vision.VisionError):
@@ -504,6 +717,49 @@ class VoicePureUnitTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.modules = load_legacy_media_modules()
         cls.voice = cls.modules["voice"]
+
+    def test_parse_voice_intent_recognizes_previous_reply_references(self):
+        requests = (
+            "上面那句话用语音说一下",
+            "用语音生成上面那句话",
+            "用语音说上面这句话",
+            "把上面的回复念给我听",
+            "刚才的回答转成语音",
+            "朗读前面那句",
+            "复述上文的回复",
+        )
+
+        for request in requests:
+            with self.subTest(request=request):
+                intent = self.voice.parse_voice_intent(request)
+
+                self.assertIsNotNone(intent)
+                self.assertEqual(intent.type, self.voice.VoiceIntentType.LAST_REPLY)
+
+    def test_parse_voice_intent_keeps_semantic_goodnight_request(self):
+        intent = self.voice.parse_voice_intent("用语音给我说晚安")
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.type, self.voice.VoiceIntentType.SEMANTIC_REPLY)
+        self.assertEqual(intent.semantic_goal, "说晚安")
+
+    def test_parse_voice_intent_keeps_explicit_direct_text(self):
+        intent = self.voice.parse_voice_intent("用语音说：上面那句话")
+
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.type, self.voice.VoiceIntentType.DIRECT_TEXT)
+        self.assertEqual(intent.text, "上面那句话")
+
+    def test_parse_voice_intent_does_not_treat_voice_discussion_as_replay(self):
+        requests = (
+            "你刚才的回复是在讨论语音功能吗",
+            "上面的回答是怎么生成的",
+            "为什么前面的回答重复了",
+        )
+
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertIsNone(self.voice.parse_voice_intent(request))
 
     def test_adapt_speech_text_removes_ascii_action_wrappers(self):
         adapted = self.voice.adapt_speech_text(" hello (aside)\n[stage]\nworld *smile* ")

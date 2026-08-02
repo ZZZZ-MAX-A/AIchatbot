@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator
@@ -8,16 +9,41 @@ from typing import Iterator
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_PATH = PROJECT_ROOT / "data" / "chatbot.db"
 SCHEMA_VERSION = "7"
+_DATABASE_PATH_OVERRIDE: ContextVar[Path | None] = ContextVar(
+    "ai_chat_database_path_override",
+    default=None,
+)
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def current_database_path() -> Path:
+    return _DATABASE_PATH_OVERRIDE.get() or DATABASE_PATH
+
+
+@contextmanager
+def database_path_scope(path: Path) -> Iterator[None]:
+    """Temporarily route existing persistence functions to another DB file.
+
+    Context variables are task-local and are copied into ``asyncio`` child
+    tasks and ``to_thread`` calls, so concurrent persona chats cannot switch
+    one another's database path.
+    """
+
+    token = _DATABASE_PATH_OVERRIDE.set(Path(path))
+    try:
+        yield
+    finally:
+        _DATABASE_PATH_OVERRIDE.reset(token)
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    path = current_database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 5000")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -30,7 +56,7 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 @contextmanager
 def connect_read_only() -> Iterator[sqlite3.Connection]:
-    database_uri = DATABASE_PATH.resolve().as_uri() + "?mode=ro"
+    database_uri = current_database_path().resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(database_uri, uri=True, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 5000")

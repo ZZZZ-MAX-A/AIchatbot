@@ -55,6 +55,9 @@ output/reliability-inspections/
 *.swp
 *.tmp
 
+# Local Codex work-continuity checkpoints (never commit)
+.codex/work-progress/
+
 # OS files
 Thumbs.db
 .DS_Store

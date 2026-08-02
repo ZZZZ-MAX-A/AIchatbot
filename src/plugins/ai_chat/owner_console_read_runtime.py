@@ -39,6 +39,7 @@ from .owner_console_read_models import (
     OWNER_CONSOLE_SCHEMA_VERSION,
     OwnerConsoleAccessControlSnapshot,
     OwnerConsoleAccessList,
+    OwnerConsoleAccessListItem,
     OwnerConsoleApprovalActionability,
     OwnerConsoleApprovalDetail,
     OwnerConsoleApprovalList,
@@ -72,6 +73,7 @@ from .owner_console_read_models import (
     OwnerConsoleRuntimeBoundary,
     OwnerConsoleSettingsSnapshot,
     OwnerConsoleTaskDetail,
+    OwnerConsoleTaskActionability,
     OwnerConsoleTaskEventRow,
     OwnerConsoleTaskList,
     OwnerConsoleTaskRow,
@@ -115,7 +117,14 @@ OWNER_CONSOLE_READ_ROUTE_SPECS = (
         runtime_method="build_task_list",
         read_model="OwnerConsoleTaskList",
         requires_context=True,
-        optional_params=("status", "work_type", "limit"),
+        optional_params=(
+            "status",
+            "work_type",
+            "category",
+            "page",
+            "page_size",
+            "limit",
+        ),
     ),
     OwnerConsoleReadRouteSpec(
         page="task_detail",
@@ -238,6 +247,28 @@ SENSITIVE_KEY_FRAGMENTS = (
     "cookie",
 )
 DEFAULT_PREVIEW_LIMIT = 240
+OWNER_CONSOLE_STALE_PENDING_SECONDS = 24 * 60 * 60
+OWNER_CONSOLE_TASK_PAGE_SIZE_DEFAULT = 20
+OWNER_CONSOLE_TASK_PAGE_SIZE_MAX = 100
+OWNER_CONSOLE_TASK_SCAN_BATCH_SIZE = 200
+OWNER_CONSOLE_TASK_CATEGORIES = frozenset(
+    {
+        "awaiting_approval",
+        "ordinary_pending",
+        "stale_residual",
+        "running",
+        "failed",
+        "closed",
+    }
+)
+_SETTLED_PENDING_EVENT_KINDS = frozenset(
+    {
+        "approval_rejected",
+        "approval_approved",
+        "tool_resume_finished",
+        "tool_resume_failed",
+    }
+)
 OWNER_CONSOLE_WORK_TYPES = frozenset(
     {
         "development_context_report",
@@ -487,6 +518,12 @@ class OwnerConsoleReadRuntime:
     gap_scene_stats_provider: StatsProvider = _empty_stats_provider
     rag_document_stats_provider: StatsProvider = _empty_stats_provider
     reliability_trend_provider: ReliabilityTrendProvider = read_reliability_trend
+    approval_actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None
+    task_actions_enabled: bool = False
+    access_actions_enabled: bool = False
+    dynamic_access_provider: AccessProvider | None = None
 
     def build_route_contract_snapshot(self) -> OwnerConsoleReadRouteContractSnapshot:
         return build_owner_console_route_contract_snapshot()
@@ -502,6 +539,8 @@ class OwnerConsoleReadRuntime:
             context,
             task_limit=task_limit,
             approval_limit=approval_limit,
+            actionability_provider=self.approval_actionability_provider,
+            task_actions_enabled=self.task_actions_enabled,
         )
 
     def build_task_list(
@@ -510,13 +549,20 @@ class OwnerConsoleReadRuntime:
         *,
         status: str | None = None,
         work_type: str | None = None,
+        category: str | None = None,
         limit: int = 20,
+        page: int = 1,
+        page_size: int | None = None,
     ) -> OwnerConsoleTaskList:
         return build_owner_console_task_list(
             context,
             status=status,
             work_type=work_type,
+            category=category,
             limit=limit,
+            page=page,
+            page_size=page_size,
+            task_actions_enabled=self.task_actions_enabled,
         )
 
     def build_task_detail(
@@ -532,6 +578,8 @@ class OwnerConsoleReadRuntime:
             task_id,
             event_limit=event_limit,
             preview_limit=preview_limit,
+            actionability_provider=self.approval_actionability_provider,
+            task_actions_enabled=self.task_actions_enabled,
         )
 
     def build_approval_list(
@@ -545,6 +593,7 @@ class OwnerConsoleReadRuntime:
             context,
             status=status,
             limit=limit,
+            actionability_provider=self.approval_actionability_provider,
         )
 
     def build_approval_detail(
@@ -560,6 +609,7 @@ class OwnerConsoleReadRuntime:
             approval_id,
             event_limit=event_limit,
             preview_limit=preview_limit,
+            actionability_provider=self.approval_actionability_provider,
         )
 
     def build_access_control_snapshot(
@@ -567,10 +617,24 @@ class OwnerConsoleReadRuntime:
         *,
         item_limit: int = 50,
     ) -> OwnerConsoleAccessControlSnapshot:
+        config = self.config_provider()
+        access = self.access_provider()
+        dynamic_access = (
+            self.dynamic_access_provider()
+            if self.dynamic_access_provider is not None
+            else AccessStore(
+                private_whitelist=access.private_whitelist - config.private_whitelist,
+                group_whitelist=access.group_whitelist - config.group_whitelist,
+                user_blacklist=access.user_blacklist - config.user_blacklist,
+                revision=access.revision,
+            )
+        )
         return build_owner_console_access_control_snapshot(
-            self.config_provider(),
-            self.access_provider(),
+            config,
+            access,
+            dynamic_access=dynamic_access,
             item_limit=item_limit,
+            access_actions_enabled=self.access_actions_enabled,
         )
 
     def build_settings_snapshot(self) -> OwnerConsoleSettingsSnapshot:
@@ -808,25 +872,60 @@ def build_owner_console_external_read_snapshot(
             result_count=task.result_count,
             source_host_count=task.source_host_count,
             dropped_result_count=task.dropped_result_count,
+            provider_candidate_count=task.provider_candidate_count,
+            official_content_strong_count=task.official_content_strong_count,
+            failed_search_stage=task.failed_search_stage,
+            search_stage_count=task.search_stage_count,
+            official_stage_candidate_count=task.official_stage_candidate_count,
+            official_stage_result_count=task.official_stage_result_count,
+            media_stage_candidate_count=task.media_stage_candidate_count,
+            media_stage_result_count=task.media_stage_result_count,
+            planning_mode=task.planning_mode,
+            scene=task.scene,
+            primary_source_scope=task.primary_source_scope,
+            secondary_source_scope=task.secondary_source_scope,
+            secondary_mode=task.secondary_mode,
+            dropped_missing_date_count=task.dropped_missing_date_count,
+            dropped_outside_window_count=task.dropped_outside_window_count,
+            dropped_weak_only_count=task.dropped_weak_only_count,
+            dropped_conflicting_date_count=task.dropped_conflicting_date_count,
+            dropped_injection_count=task.dropped_injection_count,
+            dropped_sanitization_count=task.dropped_sanitization_count,
+            dropped_source_policy_count=task.dropped_source_policy_count,
             external_request_count=task.external_request_count,
+            provider_request_count=task.provider_request_count,
+            synthesis_request_count=task.synthesis_request_count,
+            synthesis_status=task.synthesis_status,
+            synthesis_error_category=task.synthesis_error_category,
+            owner_quality_status=task.owner_quality_status,
             status_category=task.status_category,
             error_category=task.error_category,
             updated_at=task.updated_at,
         )
     )
     credential_configured = bool(config.tavily_api_key)
+    executor_configured = (
+        config.enable_agent_web
+        and credential_configured
+        and dependencies_compatible
+    )
+    synthesis_configured = (
+        config.main_agent_use_llm and bool(config.main_llm_api_key)
+    )
+    explicit_agent_trigger_enabled = (
+        executor_configured
+        and synthesis_configured
+        and config.enable_main_agent
+    )
     return OwnerConsoleExternalReadSnapshot(
         generated_at=utc_now(),
         enabled=config.enable_agent_web,
         credential_configured=credential_configured,
-        executor_configured=(
-            config.enable_agent_web
-            and credential_configured
-            and dependencies_compatible
-        ),
+        executor_configured=executor_configured,
+        synthesis_configured=synthesis_configured,
         provider_name="tavily",
-        search_depth="basic",
-        max_results=3,
+        search_depth="planned_basic_or_advanced",
+        max_results=10,
         timeout_seconds=config.tavily_timeout_seconds,
         endpoint_host="api.tavily.com",
         dependencies=OwnerConsoleExternalReadDependencySnapshot(
@@ -835,7 +934,11 @@ def build_owner_console_external_read_snapshot(
             compatible=dependencies_compatible,
         ),
         recent_task=recent_task,
-        boundary=OwnerConsoleExternalReadBoundary(),
+        boundary=OwnerConsoleExternalReadBoundary(
+            owner_private_strict_command_only=True,
+            main_llm_can_trigger=explicit_agent_trigger_enabled,
+            ordinary_chat_can_trigger=False,
+        ),
     )
 
 
@@ -847,16 +950,33 @@ def _visible_items(items: frozenset[str], *, limit: int) -> tuple[list[str], boo
 
 def _access_list(
     label: str,
-    items: frozenset[str],
+    effective_items: frozenset[str],
+    environment_items: frozenset[str],
+    dynamic_items: frozenset[str],
     *,
     limit: int,
 ) -> OwnerConsoleAccessList:
-    visible, truncated = _visible_items(items, limit=limit)
+    visible, truncated = _visible_items(effective_items, limit=limit)
     return OwnerConsoleAccessList(
         label=label,
-        count=len(items),
-        items=visible,
+        count=len(effective_items),
+        items=[
+            OwnerConsoleAccessListItem(
+                value=item,
+                source=(
+                    "environment_and_dynamic"
+                    if item in environment_items and item in dynamic_items
+                    else "environment"
+                    if item in environment_items
+                    else "dynamic"
+                ),
+                editable=item in dynamic_items,
+            )
+            for item in visible
+        ],
         truncated=truncated,
+        environment_count=len(environment_items),
+        dynamic_count=len(dynamic_items),
     )
 
 
@@ -990,10 +1110,20 @@ def build_owner_console_access_control_snapshot(
     config: AiChatConfig,
     access: AccessStore,
     *,
+    dynamic_access: AccessStore | None = None,
     item_limit: int = 50,
+    access_actions_enabled: bool = False,
 ) -> OwnerConsoleAccessControlSnapshot:
+    dynamic = dynamic_access or AccessStore(
+        private_whitelist=access.private_whitelist - config.private_whitelist,
+        group_whitelist=access.group_whitelist - config.group_whitelist,
+        user_blacklist=access.user_blacklist - config.user_blacklist,
+        revision=access.revision,
+    )
     return OwnerConsoleAccessControlSnapshot(
         generated_at=utc_now(),
+        revision=dynamic.revision,
+        access_actions_enabled=access_actions_enabled,
         owner_configured=bool(config.bot_owner_qq),
         private_chat_enabled=config.enable_private_chat,
         group_chat_enabled=config.enable_group_chat,
@@ -1003,16 +1133,22 @@ def build_owner_console_access_control_snapshot(
         private_whitelist=_access_list(
             "private_whitelist",
             access.private_whitelist,
+            config.private_whitelist,
+            dynamic.private_whitelist,
             limit=item_limit,
         ),
         group_whitelist=_access_list(
             "group_whitelist",
             access.group_whitelist,
+            config.group_whitelist,
+            dynamic.group_whitelist,
             limit=item_limit,
         ),
         user_blacklist=_access_list(
             "user_blacklist",
             access.user_blacklist,
+            config.user_blacklist,
+            dynamic.user_blacklist,
             limit=item_limit,
         ),
         boundary=OwnerConsoleRuntimeBoundary(),
@@ -1237,6 +1373,95 @@ def _next_action_for_task(task: AgentTask, approvals: list[AgentApproval]) -> st
     return "review_status"
 
 
+def _task_is_stale(task: AgentTask, *, now: datetime | None = None) -> bool:
+    try:
+        updated_at = datetime.fromisoformat(task.updated_at)
+    except (TypeError, ValueError):
+        return True
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    return (current - updated_at.astimezone(UTC)).total_seconds() >= (
+        OWNER_CONSOLE_STALE_PENDING_SECONDS
+    )
+
+
+def _task_processing(
+    task: AgentTask,
+    approvals: list[AgentApproval],
+    *,
+    latest_event_kind: str,
+) -> tuple[str, str, str]:
+    pending_ids = [
+        approval.id
+        for approval in approvals
+        if approval.status == AGENT_APPROVAL_PENDING
+    ]
+    if pending_ids:
+        rendered = "、".join(f"#{approval_id}" for approval_id in pending_ids)
+        return (
+            "awaiting_approval",
+            "等待审批",
+            f"请先处理关联审批 {rendered}；审批未决定前不取消任务。",
+        )
+    if task.status == AGENT_TASK_PENDING:
+        if latest_event_kind in _SETTLED_PENDING_EVENT_KINDS:
+            if latest_event_kind == "approval_rejected":
+                detail = "审批已经拒绝，但旧任务状态没有同步收口；建议取消任务。"
+            elif latest_event_kind == "approval_approved":
+                detail = "旧版审批已经批准，但没有工具恢复结果；不能重试，建议取消后按需重新创建。"
+            else:
+                detail = "工具恢复已有结束事件，但旧任务仍为待处理；建议取消并收口。"
+            return "stale_residual", "旧任务残留", detail
+        if _task_is_stale(task):
+            return (
+                "stale_residual",
+                "旧任务残留",
+                "任务长期没有进入审批或执行；建议取消，仍需要时重新创建明确任务。",
+            )
+        return (
+            "ordinary_pending",
+            "普通待处理",
+            "任务尚未进入审批或执行；请核对目标，确定是否继续或取消。",
+        )
+    if task.status == AGENT_TASK_RUNNING:
+        return "running", "执行中", "任务正在执行，不支持网页取消或自动重试。"
+    if task.status == AGENT_TASK_FAILED:
+        return "failed", "执行失败", "请查看失败事件；网页不会自动重试。"
+    return "closed", "已收口", "任务已经完成或取消，仅供复盘。"
+
+
+def _task_actionability(
+    task: AgentTask,
+    approvals: list[AgentApproval],
+    *,
+    task_actions_enabled: bool,
+) -> OwnerConsoleTaskActionability:
+    if task.status != AGENT_TASK_PENDING:
+        return OwnerConsoleTaskActionability(
+            can_cancel=False,
+            task_actions_enabled=task_actions_enabled,
+            blocked_reason="only a pending task can be cancelled",
+        )
+    if any(approval.status == AGENT_APPROVAL_PENDING for approval in approvals):
+        return OwnerConsoleTaskActionability(
+            can_cancel=False,
+            task_actions_enabled=task_actions_enabled,
+            blocked_reason="decide the pending approval before cancelling the task",
+        )
+    if not task_actions_enabled:
+        return OwnerConsoleTaskActionability(
+            can_cancel=False,
+            task_actions_enabled=False,
+            blocked_reason="web task actions are disabled",
+        )
+    return OwnerConsoleTaskActionability(
+        can_cancel=True,
+        task_actions_enabled=True,
+        blocked_reason="",
+    )
+
+
 def _task_event_row(
     event: AgentTaskEvent,
     *,
@@ -1267,6 +1492,9 @@ def _approval_row(
     approval: AgentApproval,
     *,
     reason_limit: int = DEFAULT_PREVIEW_LIMIT,
+    actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None,
 ) -> OwnerConsoleApprovalRow:
     reason_preview, _ = _preview_text(approval.reason, limit=reason_limit)
     return OwnerConsoleApprovalRow(
@@ -1281,7 +1509,7 @@ def _approval_row(
         created_at=approval.created_at,
         expires_at=approval.expires_at,
         decided_at=approval.decided_at,
-        actionability=_actionability_for_approval(approval),
+        actionability=(actionability_provider or _actionability_for_approval)(approval),
     )
 
 
@@ -1290,6 +1518,7 @@ def _task_row(
     *,
     approvals: list[AgentApproval] | None = None,
     preview_limit: int = DEFAULT_PREVIEW_LIMIT,
+    task_actions_enabled: bool = False,
 ) -> OwnerConsoleTaskRow:
     related_approvals = approvals or []
     pending_approval_ids = [
@@ -1298,6 +1527,12 @@ def _task_row(
         if approval.status == AGENT_APPROVAL_PENDING
     ]
     event_kind, event_summary = _event_summary(latest_agent_task_event(task.id))
+    processing_category, processing_label, processing_detail = _task_processing(
+        task,
+        related_approvals,
+        latest_event_kind=event_kind,
+    )
+    next_action_code = _next_action_for_task(task, related_approvals)
     goal_preview, _ = _preview_text(task.goal, limit=preview_limit)
     result_preview, _ = _preview_text(task.result, limit=preview_limit)
     candidate_work_type = agent_task_work_type(task.id)
@@ -1318,8 +1553,17 @@ def _task_row(
         latest_event_kind=event_kind,
         latest_event_summary=event_summary,
         pending_approval_ids=pending_approval_ids,
-        next_action=_next_action_for_task(task, related_approvals),
+        next_action=next_action_code,
+        next_action_code=next_action_code,
         work_type=safe_work_type,
+        processing_category=processing_category,
+        processing_label=processing_label,
+        processing_detail=processing_detail,
+        actionability=_task_actionability(
+            task,
+            related_approvals,
+            task_actions_enabled=task_actions_enabled,
+        ),
     )
 
 
@@ -1328,32 +1572,99 @@ def build_owner_console_task_list(
     *,
     status: str | None = None,
     work_type: str | None = None,
+    category: str | None = None,
     limit: int = 20,
+    page: int = 1,
+    page_size: int | None = None,
+    task_actions_enabled: bool = False,
 ) -> OwnerConsoleTaskList:
     if work_type is not None and work_type not in OWNER_CONSOLE_WORK_TYPES:
         raise ValueError("unsupported owner console work type")
-    tasks = list_agent_tasks(
-        session_key=context.session_key,
-        user_id=context.user_id,
-        status=status,
-        work_type=work_type,
-        limit=limit,
+    if category is not None and category not in OWNER_CONSOLE_TASK_CATEGORIES:
+        raise ValueError("unsupported owner console task category")
+    safe_page_size = min(
+        OWNER_CONSOLE_TASK_PAGE_SIZE_MAX,
+        _safe_limit(page_size if page_size is not None else limit),
     )
-    rows: list[OwnerConsoleTaskRow] = []
-    for task in tasks:
-        approvals = list_agent_approvals(
+    requested_page = _safe_limit(page)
+
+    def build_rows(tasks: list[AgentTask]) -> list[OwnerConsoleTaskRow]:
+        built_rows: list[OwnerConsoleTaskRow] = []
+        for task in tasks:
+            approvals = list_agent_approvals(
+                session_key=context.session_key,
+                user_id=context.user_id,
+                task_id=task.id,
+                status=AGENT_APPROVAL_PENDING,
+                limit=20,
+            )
+            built_rows.append(
+                _task_row(
+                    task,
+                    approvals=approvals,
+                    task_actions_enabled=task_actions_enabled,
+                )
+            )
+        return built_rows
+
+    if category is None:
+        total_matching = count_agent_tasks(
             session_key=context.session_key,
             user_id=context.user_id,
-            task_id=task.id,
-            status=AGENT_APPROVAL_PENDING,
-            limit=20,
+            status=status,
+            work_type=work_type,
         )
-        rows.append(_task_row(task, approvals=approvals))
+        total_pages = max(1, (total_matching + safe_page_size - 1) // safe_page_size)
+        safe_page = min(requested_page, total_pages)
+        tasks = list_agent_tasks(
+            session_key=context.session_key,
+            user_id=context.user_id,
+            status=status,
+            work_type=work_type,
+            limit=safe_page_size,
+            offset=(safe_page - 1) * safe_page_size,
+        )
+        rows = build_rows(tasks)
+    else:
+        matching_rows: list[OwnerConsoleTaskRow] = []
+        scan_offset = 0
+        while True:
+            task_batch = list_agent_tasks(
+                session_key=context.session_key,
+                user_id=context.user_id,
+                status=status,
+                work_type=work_type,
+                limit=OWNER_CONSOLE_TASK_SCAN_BATCH_SIZE,
+                offset=scan_offset,
+            )
+            if not task_batch:
+                break
+            matching_rows.extend(
+                row
+                for row in build_rows(task_batch)
+                if row.processing_category == category
+            )
+            scan_offset += len(task_batch)
+            if len(task_batch) < OWNER_CONSOLE_TASK_SCAN_BATCH_SIZE:
+                break
+        total_matching = len(matching_rows)
+        total_pages = max(1, (total_matching + safe_page_size - 1) // safe_page_size)
+        safe_page = min(requested_page, total_pages)
+        start = (safe_page - 1) * safe_page_size
+        rows = matching_rows[start : start + safe_page_size]
+
     return OwnerConsoleTaskList(
         generated_at=utc_now(),
         status_filter=status,
         work_type_filter=work_type,
-        limit=_safe_limit(limit),
+        category_filter=category,
+        limit=safe_page_size,
+        page=safe_page,
+        page_size=safe_page_size,
+        total_matching=total_matching,
+        total_pages=total_pages,
+        has_previous=safe_page > 1,
+        has_next=safe_page < total_pages,
         total_visible=len(rows),
         rows=rows,
         boundary=OwnerConsoleRuntimeBoundary(),
@@ -1366,6 +1677,10 @@ def build_owner_console_task_detail(
     *,
     event_limit: int = 20,
     preview_limit: int = DEFAULT_PREVIEW_LIMIT,
+    actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None,
+    task_actions_enabled: bool = False,
 ) -> OwnerConsoleTaskDetail | None:
     task = get_agent_task(
         task_id,
@@ -1381,7 +1696,12 @@ def build_owner_console_task_detail(
         task_id=task.id,
         limit=20,
     )
-    task_row = _task_row(task, approvals=approvals, preview_limit=preview_limit)
+    task_row = _task_row(
+        task,
+        approvals=approvals,
+        preview_limit=preview_limit,
+        task_actions_enabled=task_actions_enabled,
+    )
     return OwnerConsoleTaskDetail(
         generated_at=utc_now(),
         task=task_row,
@@ -1392,10 +1712,14 @@ def build_owner_console_task_detail(
             for event in events
         ],
         approvals=[
-            _approval_row(approval, reason_limit=preview_limit)
+            _approval_row(
+                approval,
+                reason_limit=preview_limit,
+                actionability_provider=actionability_provider,
+            )
             for approval in approvals
         ],
-        next_action=task_row.next_action,
+        next_action=task_row.processing_detail,
         boundary=OwnerConsoleRuntimeBoundary(),
     )
 
@@ -1405,6 +1729,9 @@ def build_owner_console_approval_list(
     *,
     status: str | None = None,
     limit: int = 20,
+    actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None,
 ) -> OwnerConsoleApprovalList:
     approvals = list_agent_approvals(
         session_key=context.session_key,
@@ -1412,7 +1739,13 @@ def build_owner_console_approval_list(
         status=status,
         limit=limit,
     )
-    rows = [_approval_row(approval) for approval in approvals]
+    rows = [
+        _approval_row(
+            approval,
+            actionability_provider=actionability_provider,
+        )
+        for approval in approvals
+    ]
     return OwnerConsoleApprovalList(
         generated_at=utc_now(),
         status_filter=status,
@@ -1428,6 +1761,10 @@ def build_owner_console_overview(
     *,
     task_limit: int = 5,
     approval_limit: int = 5,
+    actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None,
+    task_actions_enabled: bool = False,
 ) -> OwnerConsoleOverview:
     safe_task_limit = _safe_limit(task_limit)
     safe_approval_limit = _safe_limit(approval_limit)
@@ -1451,8 +1788,40 @@ def build_owner_console_overview(
             status=AGENT_APPROVAL_PENDING,
             limit=20,
         )
-        recent_task_rows.append(_task_row(task, approvals=task_pending_approvals))
-    approval_rows = [_approval_row(approval) for approval in pending_approvals]
+        recent_task_rows.append(
+            _task_row(
+                task,
+                approvals=task_pending_approvals,
+                task_actions_enabled=task_actions_enabled,
+            )
+        )
+    pending_task_rows: list[OwnerConsoleTaskRow] = []
+    for task in list_agent_tasks(
+        session_key=context.session_key,
+        user_id=context.user_id,
+        status=AGENT_TASK_PENDING,
+        limit=10_000,
+    ):
+        related = list_agent_approvals(
+            session_key=context.session_key,
+            user_id=context.user_id,
+            task_id=task.id,
+            limit=20,
+        )
+        pending_task_rows.append(
+            _task_row(
+                task,
+                approvals=related,
+                task_actions_enabled=task_actions_enabled,
+            )
+        )
+    approval_rows = [
+        _approval_row(
+            approval,
+            actionability_provider=actionability_provider,
+        )
+        for approval in pending_approvals
+    ]
     return OwnerConsoleOverview(
         generated_at=utc_now(),
         task_limit=safe_task_limit,
@@ -1475,6 +1844,18 @@ def build_owner_console_overview(
             ),
             recent_tasks_visible=len(recent_task_rows),
             pending_approvals_visible=len(approval_rows),
+            awaiting_approval_tasks=sum(
+                row.processing_category == "awaiting_approval"
+                for row in pending_task_rows
+            ),
+            ordinary_pending_tasks=sum(
+                row.processing_category == "ordinary_pending"
+                for row in pending_task_rows
+            ),
+            stale_pending_tasks=sum(
+                row.processing_category == "stale_residual"
+                for row in pending_task_rows
+            ),
         ),
         recent_tasks=recent_task_rows,
         pending_approvals=approval_rows,
@@ -1488,6 +1869,9 @@ def build_owner_console_approval_detail(
     *,
     event_limit: int = 5,
     preview_limit: int = DEFAULT_PREVIEW_LIMIT,
+    actionability_provider: Callable[
+        [AgentApproval], OwnerConsoleApprovalActionability
+    ] | None = None,
 ) -> OwnerConsoleApprovalDetail | None:
     approval = get_agent_approval(
         approval_id,
@@ -1510,7 +1894,11 @@ def build_owner_console_approval_detail(
     events = list_agent_task_events(approval.task_id, limit=event_limit)
     return OwnerConsoleApprovalDetail(
         generated_at=utc_now(),
-        approval=_approval_row(approval, reason_limit=preview_limit),
+        approval=_approval_row(
+            approval,
+            reason_limit=preview_limit,
+            actionability_provider=actionability_provider,
+        ),
         reason=approval.reason,
         tool_input=build_tool_input_preview(
             approval.tool_input_json,

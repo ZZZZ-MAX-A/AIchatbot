@@ -43,6 +43,8 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         self.assertFalse(snapshot.context_override_allowed)
         self.assertFalse(snapshot.write_routes_enabled)
         self.assertFalse(snapshot.manual_runtime_action_routes_enabled)
+        self.assertFalse(snapshot.approval_action_routes_enabled)
+        self.assertFalse(snapshot.access_action_routes_enabled)
         self.assertFalse(snapshot.boundary.ordinary_chat_can_trigger_main_agent)
         self.assertTrue(snapshot.boundary.owner_write_requires_approval)
 
@@ -84,6 +86,60 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "manual-diagnostics",
                 "/api/v1/owner-console/manual-diagnostics",
                 "manual_diagnostics",
+            ),
+            (
+                "tasks.cancel",
+                "tasks/cancel",
+                "/api/v1/owner-console/tasks/{task_id}/cancel",
+                "task_detail",
+            ),
+            (
+                "approvals.approve",
+                "approvals/approve",
+                "/api/v1/owner-console/approvals/{approval_id}/approve",
+                "approval_detail",
+            ),
+            (
+                "approvals.reject",
+                "approvals/reject",
+                "/api/v1/owner-console/approvals/{approval_id}/reject",
+                "approval_detail",
+            ),
+            (
+                "access-control.private-whitelist.add",
+                "access-control/private-whitelist/add",
+                "/api/v1/owner-console/access-control/private-whitelist/add",
+                "access_control",
+            ),
+            (
+                "access-control.private-whitelist.remove",
+                "access-control/private-whitelist/remove",
+                "/api/v1/owner-console/access-control/private-whitelist/remove",
+                "access_control",
+            ),
+            (
+                "access-control.group-whitelist.add",
+                "access-control/group-whitelist/add",
+                "/api/v1/owner-console/access-control/group-whitelist/add",
+                "access_control",
+            ),
+            (
+                "access-control.group-whitelist.remove",
+                "access-control/group-whitelist/remove",
+                "/api/v1/owner-console/access-control/group-whitelist/remove",
+                "access_control",
+            ),
+            (
+                "access-control.user-blacklist.add",
+                "access-control/user-blacklist/add",
+                "/api/v1/owner-console/access-control/user-blacklist/add",
+                "access_control",
+            ),
+            (
+                "access-control.user-blacklist.remove",
+                "access-control/user-blacklist/remove",
+                "/api/v1/owner-console/access-control/user-blacklist/remove",
+                "access_control",
             ),
             (
                 "manual-diagnostics.project-doc-rag",
@@ -189,7 +245,27 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
             self.assertFalse(row.http_api_enabled)
             self.assertFalse(row.web_write_enabled)
             self.assertFalse(row.direct_qq_dependency_allowed)
-            if row.name in {
+            if row.name == "tasks.cancel":
+                self.assertEqual(row.method, "POST")
+                self.assertFalse(row.read_only)
+                self.assertTrue(row.write_side_effect_allowed)
+                self.assertFalse(row.manual_runtime_action_allowed)
+                self.assertFalse(row.approval_action_allowed)
+                self.assertTrue(row.task_action_allowed)
+            elif row.name in {"approvals.approve", "approvals.reject"}:
+                self.assertEqual(row.method, "POST")
+                self.assertFalse(row.read_only)
+                self.assertTrue(row.write_side_effect_allowed)
+                self.assertFalse(row.manual_runtime_action_allowed)
+                self.assertTrue(row.approval_action_allowed)
+            elif row.access_action_allowed:
+                self.assertEqual(row.method, "POST")
+                self.assertFalse(row.read_only)
+                self.assertTrue(row.write_side_effect_allowed)
+                self.assertFalse(row.manual_runtime_action_allowed)
+                self.assertFalse(row.approval_action_allowed)
+                self.assertFalse(row.task_action_allowed)
+            elif row.name in {
                 "manual-diagnostics.project-doc-rag",
                 "manual-diagnostics.memory-rag-consistency",
                 "manual-diagnostics.main-llm-contract",
@@ -245,9 +321,18 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
         )
         self.assertEqual(
             rows["tasks"].query_params,
-            ["status", "work_type", "limit"],
+            [
+                "status",
+                "work_type",
+                "category",
+                "page",
+                "page_size",
+                "limit",
+            ],
         )
         self.assertEqual(rows["approvals.detail"].path_params, ["approval_id"])
+        self.assertEqual(rows["approvals.approve"].path_params, ["approval_id"])
+        self.assertEqual(rows["approvals.reject"].path_params, ["approval_id"])
         self.assertEqual(rows["settings"].query_params, [])
         self.assertFalse(rows["settings"].requires_context)
         self.assertTrue(rows["external-read"].requires_context)

@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import date
 from typing import Mapping, Protocol
 
 from .external_read_security import (
@@ -22,7 +23,7 @@ TAVILY_PROVIDER_NAME = "tavily"
 TAVILY_SEARCH_ENDPOINT = "https://api.tavily.com/search"
 TAVILY_ALLOWED_HOSTS = ("api.tavily.com",)
 TAVILY_USER_AGENT = "AIchatbot-Tavily-Search/1.0"
-TAVILY_MAX_CONTENT_CHARS = 360
+TAVILY_MAX_CONTENT_CHARS = 500
 
 _TAVILY_MARKDOWN_HEADING_PATTERN = re.compile(
     r"(^|\s)#{1,6}\s+",
@@ -150,17 +151,88 @@ class TavilyBasicSearchProvider:
         query: str,
         *,
         max_results: int,
+        topic: str = "general",
+        search_depth: str = "advanced",
+        time_range: str = "",
+        start_date: str = "",
+        end_date: str = "",
     ) -> ExternalSearchProviderResponse:
         if isinstance(max_results, bool) or not isinstance(max_results, int):
             raise ExternalReadPolicyError(
                 ExternalReadPolicyCategory.INVALID_BUDGET,
                 "Tavily max_results must be an integer",
             )
-        if not 1 <= max_results <= 3:
+        if not 1 <= max_results <= 10:
             raise ExternalReadPolicyError(
                 ExternalReadPolicyCategory.INVALID_BUDGET,
-                "Tavily max_results must be between 1 and 3",
+                "Tavily max_results must be between 1 and 10",
             )
+        if topic not in {"general", "news"}:
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "Tavily topic is invalid",
+            )
+        if search_depth not in {"basic", "advanced"}:
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "Tavily search depth is invalid",
+            )
+        if time_range not in {"", "day", "week", "month", "year"}:
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "Tavily time range is invalid",
+            )
+        if time_range and (start_date or end_date):
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "Tavily relative and absolute time ranges are mutually exclusive",
+            )
+        if bool(start_date) != bool(end_date):
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "Tavily date range must include both boundaries",
+            )
+        if start_date:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_date) or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}", end_date
+            ):
+                raise ExternalReadPolicyError(
+                    ExternalReadPolicyCategory.INVALID_BUDGET,
+                    "Tavily date range must use YYYY-MM-DD",
+                )
+            try:
+                parsed_start = date.fromisoformat(start_date)
+                parsed_end = date.fromisoformat(end_date)
+            except ValueError as exc:
+                raise ExternalReadPolicyError(
+                    ExternalReadPolicyCategory.INVALID_BUDGET,
+                    "Tavily date range is invalid",
+                ) from exc
+            if parsed_start > parsed_end:
+                raise ExternalReadPolicyError(
+                    ExternalReadPolicyCategory.INVALID_BUDGET,
+                    "Tavily date range is reversed",
+                )
+
+        request_body: dict[str, object] = {
+            "query": query,
+            "search_depth": search_depth,
+            "max_results": max_results,
+            "include_answer": False,
+            "include_raw_content": False,
+            "include_images": False,
+            "auto_parameters": False,
+            "include_usage": True,
+        }
+        if search_depth == "advanced":
+            request_body["chunks_per_source"] = 2
+        if topic != "general":
+            request_body["topic"] = topic
+        if time_range:
+            request_body["time_range"] = time_range
+        if start_date:
+            request_body["start_date"] = start_date
+            request_body["end_date"] = end_date
 
         response = await self._transport.post_json(
             self._endpoint,
@@ -170,15 +242,7 @@ class TavilyBasicSearchProvider:
                 "User-Agent": TAVILY_USER_AGENT,
                 "Authorization": f"Bearer {self._api_key}",
             },
-            json_body={
-                "query": query,
-                "search_depth": "basic",
-                "max_results": max_results,
-                "include_answer": False,
-                "include_raw_content": False,
-                "include_images": False,
-                "auto_parameters": False,
-            },
+            json_body=request_body,
             timeout_seconds=self._timeout_seconds,
             max_response_bytes=self._max_response_bytes,
         )
@@ -233,6 +297,11 @@ class TavilyBasicSearchProvider:
                     snippet=normalize_tavily_content(item.get("content", "")),
                     source_url=item.get("url", ""),
                     published_at=published_at,
+                    # Raw page content is intentionally neither requested nor consumed.
+                    # Date evidence must come from provider metadata or the bounded
+                    # title/search snippet already present in this response.
+                    raw_content="",
+                    score=item.get("score"),
                 )
             )
 

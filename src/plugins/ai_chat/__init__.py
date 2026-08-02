@@ -45,9 +45,26 @@ from .chat_graph_bridge import (
     ChatGraphSessionResult,
     run_chat_graph_session,
 )
+from .chat_weather import (
+    ChatWeatherMode,
+    build_weather_system_context,
+    build_weather_unavailable_system_context,
+    cached_weather_forecast,
+    detect_weather_intent,
+    fetch_open_meteo_forecast,
+    normalize_chat_weather_mode,
+    remember_weather_forecast,
+    shadow_weather_intent,
+)
 from .compressor import CompressionResult, compress_session
 from .config import load_config
-from .database import DATABASE_PATH, connect, connect_read_only, ensure_database
+from .database import (
+    DATABASE_PATH,
+    connect,
+    connect_read_only,
+    current_database_path,
+    ensure_database,
+)
 from .diagnostics import (
     check_ollama,
     clear_error_log,
@@ -79,6 +96,13 @@ from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_s
 from .external_read_status import (
     external_read_task_snapshot_lines,
     latest_external_read_task_snapshot,
+    parse_external_read_quality_review_command,
+    review_external_read_task_quality,
+)
+from .external_read_security import (
+    ExternalReadSearchPlan,
+    ExternalReadTemporalQuery,
+    rewrite_external_read_temporal_query,
 )
 from .failure_diagnostics import (
     classify_failure,
@@ -140,6 +164,7 @@ from .graph import (
     VoiceGraphRunner,
     VoiceMode,
     VoiceState,
+    EXTERNAL_READ_TOOL_NAME,
 )
 from .manual_memory import (
     MANUAL_FACT_TYPE,
@@ -161,8 +186,10 @@ from .local_time import (
     finalize_local_time_chat_reply,
     history_with_trusted_local_time_context,
     resolve_local_time_request,
+    timezone_for_name,
 )
 from .lc import (
+    create_external_research_llm_call,
     create_main_agent_lc_call_handler,
     create_main_agent_tool_summary_lc_handler,
     create_main_llm_call,
@@ -213,7 +240,14 @@ from .reliability_events import (
     record_result_safely,
     record_success_safely,
 )
+from .ephemeral_persona_history import ephemeral_persona_history
 from .reply_decider import ReplyDecision, decide_group_auto_reply
+from .persona_scope import (
+    ConversationScope,
+    PersonaRoutingSettings,
+    resolve_conversation_scope,
+)
+from .persona_memory_scope import persona_memory_database_scope
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, select_role_card
 from .summaries import (
     clear_all_summaries,
@@ -272,6 +306,7 @@ from .vision import (
     is_direct_image_source,
     is_low_quality_vision_description,
     is_vision_failure_description,
+    resolve_private_image_wait_seconds,
     sanitize_vision_description,
     vision_safety_context,
 )
@@ -425,10 +460,13 @@ def main_agent_session_lock(key: str) -> asyncio.Lock:
 def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
     ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     group = event.group_id if isinstance(event, GroupMessageEvent) else ""
+    persona = conversation_scope(event)
     diagnosis = classify_failure(exc)
     with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(
             f"{datetime.now().isoformat(timespec='seconds')} "
+            f"bot={persona.bot_self_id or '-'} persona={persona.persona_id} "
+            f"runtime={persona.runtime_mode} "
             f"user={event.user_id} group={group} "
             f"category={diagnosis.category.value} code={diagnosis.code} "
             f"type={type(exc).__name__} "
@@ -439,9 +477,12 @@ def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
 def log_main_agent_observation(message: str, event: MessageEvent) -> None:
     ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     group = event.group_id if isinstance(event, GroupMessageEvent) else ""
+    persona = conversation_scope(event)
     with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(
             f"{datetime.now().isoformat(timespec='seconds')} "
+            f"bot={persona.bot_self_id or '-'} persona={persona.persona_id} "
+            f"runtime={persona.runtime_mode} "
             f"user={event.user_id} group={group} "
             f"{sanitize_failure_text(message, limit=500)}\n"
         )
@@ -557,10 +598,108 @@ def session_key(event: MessageEvent) -> str:
     return f"private:{event.user_id}"
 
 
+def conversation_scope(event: MessageEvent) -> ConversationScope:
+    is_group = isinstance(event, GroupMessageEvent)
+    available_role_card_keys = frozenset(card.key for card in list_role_cards())
+    return resolve_conversation_scope(
+        getattr(config, "persona_routing", PersonaRoutingSettings()),
+        bot_self_id=str(getattr(event, "self_id", "")),
+        user_id=user_id(event),
+        chat_type="group" if is_group else "private",
+        group_id=group_id(event) if is_group else "",
+        legacy_session_key=session_key(event),
+        available_role_card_keys=available_role_card_keys,
+    )
+
+
+def chat_session_key(event: MessageEvent) -> str:
+    return conversation_scope(event).runtime_session_key
+
+
+def persona_memory_id_from_session_key(key: str) -> str:
+    parts = key.split(":", 2)
+    if len(parts) != 3 or parts[0] != "persona" or not parts[1]:
+        return ""
+    # Validation remains centralized in persona_memory_database_scope.
+    return parts[1]
+
+
+def persona_memory_write_enabled(persona_id: str) -> bool:
+    settings = getattr(config, "persona_routing", PersonaRoutingSettings())
+    if not settings.routing_v2_enabled or not settings.memory_v2_enabled:
+        return False
+    return any(
+        binding.persona_id == persona_id
+        and binding.bot_self_id in settings.routing_v2_bot_ids
+        and binding.bot_self_id in settings.memory_v2_bot_ids
+        for binding in settings.bindings
+    )
+
+
+def add_manual_memory_for_session(**kwargs) -> int:
+    persona_id = persona_memory_id_from_session_key(
+        str(kwargs.get("source_session_key") or "")
+    )
+    if persona_id:
+        if not persona_memory_write_enabled(persona_id):
+            raise RuntimeError("persona persistent memory is not enabled")
+        with persona_memory_database_scope(persona_id):
+            return add_manual_memory(**kwargs)
+    return add_manual_memory(**kwargs)
+
+
+def clear_session_summaries_for_session(key: str) -> int:
+    persona_id = persona_memory_id_from_session_key(key)
+    if persona_id:
+        if not persona_memory_write_enabled(persona_id):
+            raise RuntimeError("persona persistent memory is not enabled")
+        with persona_memory_database_scope(persona_id):
+            return clear_session_summaries(key)
+    return clear_session_summaries(key)
+
+
+def delete_session_summary_for_session(key: str, summary_id: int) -> bool:
+    persona_id = persona_memory_id_from_session_key(key)
+    if persona_id:
+        if not persona_memory_write_enabled(persona_id):
+            raise RuntimeError("persona persistent memory is not enabled")
+        with persona_memory_database_scope(persona_id):
+            return delete_session_summary(key, summary_id)
+    return delete_session_summary(key, summary_id)
+
+
+def tts_enabled_for_event(event: MessageEvent) -> bool:
+    return bool(config.enable_tts and not conversation_scope(event).routing_v2_active)
+
+
+def chat_request_for_event(
+    event: MessageEvent,
+    text: str,
+    image_context: ChatImageContext,
+) -> ChatRequest:
+    scope = conversation_scope(event)
+    return ChatRequest(
+        key=scope.runtime_session_key,
+        text=text,
+        image_context=image_context,
+        persona_id=scope.persona_id if scope.routing_v2_active else "",
+        role_card_key=scope.role_card_key if scope.routing_v2_active else "",
+        persistent_memory_enabled=not scope.routing_v2_active,
+        persona_memory_enabled=scope.memory_v2_active,
+        tts_enabled=bool(config.enable_tts and not scope.routing_v2_active),
+    )
+
+
+def persona_scope_runtime_artifacts(event: MessageEvent) -> dict[str, object]:
+    return {PERSONA_SCOPE_ARTIFACT: conversation_scope(event).as_artifact()}
+
+
 def image_cache_key(event: MessageEvent) -> str:
+    scope = conversation_scope(event)
+    prefix = f"persona:{scope.persona_id}:" if scope.routing_v2_active else ""
     if isinstance(event, GroupMessageEvent):
-        return f"group:{event.group_id}:user:{event.user_id}"
-    return f"private:{event.user_id}"
+        return f"{prefix}group:{event.group_id}:user:{event.user_id}"
+    return f"{prefix}private:{event.user_id}"
 
 
 def cache_image_urls(event: MessageEvent, urls: list[str]) -> None:
@@ -710,6 +849,7 @@ async def run_vision_graph(
     apply_cache_policy: bool = True,
     describe: bool = True,
     cache_only: bool = False,
+    role_card_key: str = "",
 ) -> VisionGraphExecution:
     state = VisionContext(
         text=text,
@@ -741,7 +881,10 @@ async def run_vision_graph(
             return current
 
         if isinstance(event, PrivateMessageEvent) and current.image_urls and not current.text:
-            wait_seconds = max(config.vision_private_image_wait_seconds, 0)
+            wait_seconds = resolve_private_image_wait_seconds(
+                config,
+                conversation_scope(event).role_card_key,
+            )
             if wait_seconds > 0:
                 cache_image_urls(event, current.image_urls)
                 await asyncio.sleep(wait_seconds)
@@ -768,7 +911,11 @@ async def run_vision_graph(
             return current
         if current.image_urls:
             try:
-                current.descriptions = await describe_images(config, current.image_urls)
+                current.descriptions = await describe_images(
+                    config,
+                    current.image_urls,
+                    role_card_key=role_card_key,
+                )
             except Exception as exc:
                 log_ai_event_error(exc, event)
                 current.descriptions = [VISION_FAILURE_DESCRIPTION]
@@ -908,9 +1055,39 @@ async def build_chat_prompt_context(
     *,
     semantic_voice: bool,
     has_image_context: bool,
+    persistent_memory_enabled: bool = True,
+    persona_memory_id: str = "",
 ) -> ChatPromptContext:
-    memory_execution = await run_memory_context_graph(event, key, query=query)
-    history = list(memory_execution.result.history)
+    uses_persistent_memory = bool(persistent_memory_enabled or persona_memory_id)
+    if persona_memory_id:
+        with persona_memory_database_scope(persona_memory_id):
+            memory_execution = await run_memory_context_graph(event, key, query=query)
+        history = list(memory_execution.result.history)
+        semantic_memory_result_count = memory_execution.result.semantic_memory_result_count
+        semantic_memory_context_chars = len(memory_execution.result.semantic_memory_context)
+        semantic_memory_error = memory_execution.result.semantic_memory_error
+        semantic_memory_hits = memory_execution.result.semantic_memory_hits
+    elif persistent_memory_enabled:
+        memory_execution = await run_memory_context_graph(event, key, query=query)
+        history = list(memory_execution.result.history)
+        semantic_memory_result_count = memory_execution.result.semantic_memory_result_count
+        semantic_memory_context_chars = len(memory_execution.result.semantic_memory_context)
+        semantic_memory_error = memory_execution.result.semantic_memory_error
+        semantic_memory_hits = memory_execution.result.semantic_memory_hits
+    else:
+        history = ephemeral_persona_history.build_history(
+            key,
+            config.max_context_messages,
+            [
+                language_reset_context(),
+                speaker_identity_context(event),
+                owner_public_context(),
+            ],
+        )
+        semantic_memory_result_count = 0
+        semantic_memory_context_chars = 0
+        semantic_memory_error = ""
+        semantic_memory_hits = ()
     if semantic_voice:
         history.append({"role": "system", "content": semantic_voice_instruction()})
     if has_image_context:
@@ -922,11 +1099,11 @@ async def build_chat_prompt_context(
         history=history,
         user_id=event_user_id,
         group_id=event_group_id,
-        semantic_memory_query=query.strip(),
-        semantic_memory_result_count=memory_execution.result.semantic_memory_result_count,
-        semantic_memory_context_chars=len(memory_execution.result.semantic_memory_context),
-        semantic_memory_error=memory_execution.result.semantic_memory_error,
-        semantic_memory_hits=memory_execution.result.semantic_memory_hits,
+        semantic_memory_query=query.strip() if uses_persistent_memory else "",
+        semantic_memory_result_count=semantic_memory_result_count,
+        semantic_memory_context_chars=semantic_memory_context_chars,
+        semantic_memory_error=semantic_memory_error,
+        semantic_memory_hits=semantic_memory_hits,
     )
 
 
@@ -934,6 +1111,8 @@ async def describe_chat_images(
     bot: Bot,
     event: MessageEvent,
     image_context: ChatImageContext,
+    *,
+    role_card_key: str = "",
 ) -> list[str]:
     execution = await run_vision_graph(
         bot,
@@ -943,6 +1122,7 @@ async def describe_chat_images(
         initial_urls=list(image_context.urls),
         apply_cache_policy=False,
         describe=True,
+        role_card_key=role_card_key,
     )
     return list(execution.result.artifact.descriptions)
 
@@ -1004,6 +1184,7 @@ def status_lines() -> list[str]:
         f"群白名单：{len(access.group_whitelist)}",
         f"黑名单：{len(access.user_blacklist)}",
         f"私聊长度限制：{config.max_private_message_length}",
+        f"主人私聊长度限制：{config.owner_max_private_message_length}",
         f"群聊长度限制：{config.max_group_message_length}",
         f"私聊冷却：{config.private_rate_limit_seconds} 秒",
         f"群聊冷却：{config.group_rate_limit_seconds} 秒",
@@ -1023,7 +1204,7 @@ def memory_status_lines(
     trials = trial_stats()
     embedding_check = memory_rag_embedding_check_snapshot()
     lines = [
-        f"数据库：{DATABASE_PATH}",
+        f"数据库：{current_database_path()}",
         f"消息数量：{stats['message_count']}",
         f"会话数量：{stats['session_count']}",
         f"摘要数量：{stats['summary_count']}",
@@ -1699,6 +1880,19 @@ def _memory_rag_root_evidence_lines(root_lines: list[str]) -> list[str]:
 
 
 async def agent_memory_rag_troubleshoot_reply(event: MessageEvent) -> str:
+    scope = conversation_scope(event)
+    if scope.routing_v2_active and not scope.memory_v2_active:
+        return (
+            "当前角色的持久记忆尚未启用；"
+            "本次诊断没有读取爱可的记忆或向量索引。"
+        )
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            return await _agent_memory_rag_troubleshoot_reply_scoped(event)
+    return await _agent_memory_rag_troubleshoot_reply_scoped(event)
+
+
+async def _agent_memory_rag_troubleshoot_reply_scoped(event: MessageEvent) -> str:
     step_lines: list[str] = []
 
     rag_execution = await run_memory_retrieval_graph(event, MemoryRetrievalAction.STATUS)
@@ -1785,10 +1979,11 @@ async def agent_memory_rag_troubleshoot_reply(event: MessageEvent) -> str:
 
 
 async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = DiagnosticsView.FULL):
+    scope = conversation_scope(event)
     state = DiagnosticsState(
         view=view,
         requester_id=user_id(event),
-        session_key=session_key(event),
+        session_key=scope.runtime_session_key,
     )
 
     async def read_config_snapshot(current: DiagnosticsState) -> DiagnosticsState:
@@ -1821,7 +2016,16 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         return current
 
     async def read_memory_stats(current: DiagnosticsState) -> DiagnosticsState:
-        current.memory_stats = memory_stats()
+        current.memory_stats = (
+            memory_stats()
+            if not scope.routing_v2_active or scope.memory_v2_active
+            else {
+                "message_count": 0,
+                "session_count": 0,
+                "summary_count": 0,
+                "summarized_message_count": 0,
+            }
+        )
         return current
 
     async def read_image_cache_stats(current: DiagnosticsState) -> DiagnosticsState:
@@ -1838,9 +2042,14 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         elif current.view == DiagnosticsView.IMAGE_CACHE:
             current.reply_text = format_image_cache_status(config, current.image_cache_stats)
         elif current.view == DiagnosticsView.MEMORY:
-            current.reply_text = "\n".join(
-                memory_status_lines(event, stats=current.memory_stats)
-            )
+            if scope.routing_v2_active and not scope.memory_v2_active:
+                current.reply_text = (
+                    "当前角色的持久记忆尚未启用；本次没有读取爱可的记忆数据库。"
+                )
+            else:
+                current.reply_text = "\n".join(
+                    memory_status_lines(event, stats=current.memory_stats)
+                )
         elif current.view == DiagnosticsView.TTS:
             current.reply_text = "\n".join(tts_status_reply_lines(current.tts_health))
         else:
@@ -1862,6 +2071,9 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         read_image_cache_stats=read_image_cache_stats,
         render_diagnostic_reply=render_diagnostic_reply,
     )
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            return await runner.run(state)
     return await runner.run(state)
 
 
@@ -1870,6 +2082,7 @@ async def run_memory_retrieval_graph(
     action: MemoryRetrievalAction,
     query: str = "",
 ) -> MemoryRetrievalGraphExecution:
+    scope = conversation_scope(event)
     state = MemoryRetrievalState(
         action=action,
         query=query.strip(),
@@ -1877,6 +2090,12 @@ async def run_memory_retrieval_graph(
     )
 
     async def validate_retrieval_request(current: MemoryRetrievalState) -> MemoryRetrievalState:
+        if scope.routing_v2_active and not scope.memory_v2_active:
+            current.reply_text = (
+                "当前角色的持久记忆尚未启用；本次没有访问爱可的 MemoryRAG。"
+            )
+            current.error = "persona_memory_unavailable"
+            return current
         if config.memory_rag_owner_only_debug and not current.is_owner:
             current.reply_text = "只有主人可以执行 MemoryRAG 调试命令。"
             current.error = "permission_denied"
@@ -1951,6 +2170,9 @@ async def run_memory_retrieval_graph(
         execute_retrieval_operation=execute_retrieval_operation,
         render_retrieval_reply=render_retrieval_reply,
     )
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            return await runner.run(state)
     return await runner.run(state)
 
 
@@ -2213,9 +2435,10 @@ async def run_memory_admin_graph(
     content: str = "",
     target_id: str = "",
 ) -> MemoryAdminGraphExecution:
+    scope = conversation_scope(event)
     state = MemoryAdminState(
         action=action,
-        session_key=session_key(event),
+        session_key=scope.runtime_session_key,
         content=content.strip(),
         target_id=target_id.strip(),
     )
@@ -2230,6 +2453,12 @@ async def run_memory_admin_graph(
         return usage.get(current.action, "用法不正确。")
 
     async def validate_admin_request(current: MemoryAdminState) -> MemoryAdminState:
+        if scope.routing_v2_active and not scope.memory_v2_active:
+            current.reply_text = (
+                "当前角色的持久记忆尚未启用；本次没有修改爱可的记忆数据库。"
+            )
+            current.error = "persona_memory_unavailable"
+            return current
         if current.action in {
             MemoryAdminAction.ADD_FACT_MEMORY,
             MemoryAdminAction.ADD_PREFERENCE_MEMORY,
@@ -2363,6 +2592,9 @@ async def run_memory_admin_graph(
         execute_admin_operation=execute_admin_operation,
         render_admin_reply=render_admin_reply,
     )
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            return await runner.run(state)
     return await runner.run(state)
 
 
@@ -2535,6 +2767,8 @@ async def send_tts_record(
     refresh_cache: bool = False,
     force_language: str = "",
 ) -> None:
+    if not tts_enabled_for_event(event):
+        raise RuntimeError("TTS is disabled for this persona route")
     adapted = adapt_speech_text(text, force_language="zh")
     if not adapted.text:
         raise RuntimeError("empty speakable text")
@@ -2559,7 +2793,7 @@ async def handle_direct_or_last_tts(
 ) -> bool:
     if not isinstance(event, PrivateMessageEvent):
         return False
-    if not config.enable_tts:
+    if not tts_enabled_for_event(event):
         await matcher.finish("语音功能当前未开启。")
     if not is_owner(config, event):
         await matcher.finish("只有主人可以使用语音功能。")
@@ -2626,7 +2860,7 @@ async def run_voice_graph_intent(
     async def check_voice_policy(current: VoiceState) -> VoiceState:
         if not isinstance(event, PrivateMessageEvent):
             return set_error(current, "private_only")
-        if not config.enable_tts:
+        if not tts_enabled_for_event(event):
             return set_error(current, "tts_disabled")
         if not is_owner(config, event):
             return set_error(current, "not_owner")
@@ -2659,7 +2893,12 @@ async def run_voice_graph_intent(
         if request is None:
             return set_error(current, "empty_chat_request")
 
-        shadow_state = safe_build_shadow_chat_state(event, request, options)
+        shadow_state = safe_build_shadow_chat_state(
+            event,
+            request,
+            options,
+            runtime_artifacts=persona_scope_runtime_artifacts(event),
+        )
         safe_record_shadow_chat_snapshot(event, shadow_state)
 
         if config.enable_chat_graph_runtime and shadow_state is not None:
@@ -2704,8 +2943,17 @@ async def run_voice_graph_intent(
             query=request.text,
             semantic_voice=True,
             has_image_context=request.image_context.has_context,
+            persistent_memory_enabled=request.persistent_memory_enabled,
+            persona_memory_id=(
+                request.persona_id if request.persona_memory_enabled else ""
+            ),
         )
-        image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        image_descriptions = await describe_chat_images(
+            bot,
+            event,
+            request.image_context,
+            role_card_key=request.role_card_key,
+        )
         update_chat_image_description_commit(shadow_state, image_descriptions)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, shadow_state)
@@ -2734,6 +2982,7 @@ async def run_voice_graph_intent(
             user_content,
             options,
             send_voice=False,
+            role_card_key=request.role_card_key,
         )
         if result is None:
             return set_error(current, "empty_chat_response")
@@ -2809,7 +3058,7 @@ async def run_voice_graph_intent(
         return await runner.run(state)
 
     if mode == VoiceMode.SEMANTIC_REPLY:
-        async with session_lock(session_key(event)):
+        async with session_lock(chat_session_key(event)):
             execution = await run_graph()
             error = execution.result.error
             if error:
@@ -2847,6 +3096,11 @@ async def run_voice_graph_intent(
                 user_content,
                 committed_result,
                 options,
+                persistent_memory_enabled=request.persistent_memory_enabled,
+                persona_memory_id=(
+                    request.persona_id if request.persona_memory_enabled else ""
+                ),
+                tts_candidate_enabled=request.tts_enabled,
             )
             return True
 
@@ -3011,6 +3265,19 @@ def rag_index_detail_lines() -> list[str]:
             f"embeddings={int(row['embedding_count'] or 0)}"
         )
     return lines
+
+
+def rag_index_detail_lines_for_event(event: MessageEvent) -> list[str]:
+    scope = conversation_scope(event)
+    if scope.routing_v2_active and not scope.memory_v2_active:
+        return [
+            "当前角色的持久记忆尚未启用；",
+            "本次没有读取爱可的 RAG 索引详情。",
+        ]
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            return rag_index_detail_lines()
+    return rag_index_detail_lines()
 
 
 def recent_main_agent_observation_lines(limit: int = 8) -> list[str]:
@@ -3253,6 +3520,34 @@ async def schedule_chat_compression(key: str, event: MessageEvent) -> MemoryPers
     )
 
 
+async def persist_scoped_chat_turn(
+    key: str,
+    event: MessageEvent,
+    prompt_context: ChatPromptContext,
+    turn: ChatTurn,
+    *,
+    persona_memory_id: str = "",
+) -> MemoryPersistGraphExecution:
+    if persona_memory_id:
+        with persona_memory_database_scope(persona_memory_id):
+            return await persist_chat_turn(key, event, prompt_context, turn)
+    return await persist_chat_turn(key, event, prompt_context, turn)
+
+
+async def schedule_scoped_chat_compression(
+    key: str,
+    event: MessageEvent,
+    *,
+    persona_memory_id: str = "",
+) -> MemoryPersistGraphExecution:
+    if persona_memory_id:
+        # The child task created by schedule_chat_compression inherits this
+        # ContextVar-backed database scope and keeps it after this block exits.
+        with persona_memory_database_scope(persona_memory_id):
+            return await schedule_chat_compression(key, event)
+    return await schedule_chat_compression(key, event)
+
+
 def graph_actor_role_for_event(event: MessageEvent) -> ActorRole:
     access = current_access()
     event_user_id = user_id(event)
@@ -3279,6 +3574,7 @@ LEGACY_CHAT_PRODUCTION_ROUTE = "legacy_chat_runtime"
 ROOT_GRAPH_CHAT_PRODUCTION_ROUTE = "root_graph_chat"
 CHAT_ACCESS_POLICY_ARTIFACT = "chat_access_policy"
 CHAT_COMMIT_ARTIFACT = "chat_commit"
+PERSONA_SCOPE_ARTIFACT = "persona_scope"
 
 
 def deny_chat_access_policy(
@@ -3314,6 +3610,16 @@ def build_chat_access_policy(
         "actor_role": graph_actor_role_for_event(event).value,
         "silent_limit_rejection": options.silent_limit_rejection,
     }
+    scope = conversation_scope(event)
+    if scope.routing_v2_requested and not scope.routing_v2_active:
+        return deny_chat_access_policy(
+            decision="persona_v2_configuration_error",
+            reason=scope.configuration_error or "persona V2 route is unavailable",
+            should_reply=True,
+            response_text="当前角色配置尚未准备好，本次消息没有转交给其他角色。",
+            error="persona_v2_configuration_error",
+            **base,
+        )
 
     if isinstance(event, PrivateMessageEvent):
         allowed, reason = can_private_chat(config, access, event)
@@ -3397,10 +3703,10 @@ def build_chat_preflight_runtime_state(
     has_image: bool,
     options: ChatOptions,
 ) -> RuntimeState:
-    request = ChatRequest(
-        key=session_key(event),
-        text=text,
-        image_context=ChatImageContext(urls=[], has_context=has_image),
+    request = chat_request_for_event(
+        event,
+        text,
+        ChatImageContext(urls=[], has_context=has_image),
     )
     runtime = runtime_state_from_chat_request(
         request,
@@ -3416,6 +3722,7 @@ def build_chat_preflight_runtime_state(
         text,
         options,
     )
+    runtime.artifacts.update(persona_scope_runtime_artifacts(event))
     runtime.artifacts["chat_runtime"] = {
         "entry": "root_graph",
         "stage": "preflight",
@@ -3641,6 +3948,7 @@ def record_root_graph_chat_observation(
     chat_runtime = _artifact_dict(runtime, "chat_runtime")
     chat_access_policy = _artifact_dict(runtime, CHAT_ACCESS_POLICY_ARTIFACT)
     chat_commit = _artifact_dict(runtime, CHAT_COMMIT_ARTIFACT)
+    persona_scope_artifact = _artifact_dict(runtime, PERSONA_SCOPE_ARTIFACT)
     error_artifact = _artifact_dict(runtime, "error")
 
     snapshot_dict: dict[str, object] = {}
@@ -3662,6 +3970,9 @@ def record_root_graph_chat_observation(
         "group_id": runtime.session.group_id,
         "user_id": runtime.actor.user_id,
         "actor_role": runtime.actor.role.value,
+        "bot_self_id": persona_scope_artifact.get("bot_self_id", ""),
+        "persona_id": persona_scope_artifact.get("persona_id", ""),
+        "runtime_mode": persona_scope_artifact.get("runtime_mode", "legacy"),
         "has_plain_text": bool(runtime.event.plain_text.strip()),
         "has_image": runtime.event.has_image,
         "error": runtime.error or "",
@@ -3673,6 +3984,7 @@ def record_root_graph_chat_observation(
         "chat_runtime": chat_runtime,
         "chat_access_policy": chat_access_policy,
         "chat_commit": chat_commit,
+        "persona_scope": persona_scope_artifact,
         "error_artifact": error_artifact,
         "shadow_snapshot": snapshot_dict,
         "shadow_validation": validation_dict,
@@ -3692,6 +4004,7 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
     chat_runtime = observation.get("chat_runtime", {})
     chat_access_policy = observation.get("chat_access_policy", {})
     chat_commit = observation.get("chat_commit", {})
+    persona_scope_artifact = observation.get("persona_scope", {})
     error_artifact = observation.get("error_artifact", {})
     shadow = observation.get("shadow_snapshot", {})
     validation = observation.get("shadow_validation", {})
@@ -3711,6 +4024,8 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
         chat_access_policy = {}
     if not isinstance(chat_commit, dict):
         chat_commit = {}
+    if not isinstance(persona_scope_artifact, dict):
+        persona_scope_artifact = {}
     if not isinstance(error_artifact, dict):
         error_artifact = {}
     if not isinstance(shadow, dict):
@@ -3736,7 +4051,12 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
         (
             "Actor："
             f"user={observation.get('user_id', '')} "
-            f"role={observation.get('actor_role', '')}"
+            f"role={observation.get('actor_role', '')} "
+            f"bot={observation.get('bot_self_id', '') or '-'} "
+            f"persona={observation.get('persona_id', '') or '-'} "
+            f"runtime={observation.get('runtime_mode', 'legacy')} "
+            f"routing_v2={_bool_text(persona_scope_artifact.get('routing_v2_active'))} "
+            f"memory_v2={_bool_text(persona_scope_artifact.get('memory_v2_active'))}"
         ),
         (
             "Policy："
@@ -3961,11 +4281,7 @@ async def prepare_chat_request(
     if not image_context.should_continue:
         return None
 
-    return ChatRequest(
-        key=session_key(event),
-        text=text,
-        image_context=image_context,
-    )
+    return chat_request_for_event(event, text, image_context)
 
 
 async def evaluate_chat_sticker_intent_shadow(
@@ -4437,11 +4753,77 @@ def schedule_remote_sticker_classifier_shadow(
     _remote_sticker_classifier_task = asyncio.create_task(run_classifier())
 
 
+async def build_chat_weather_context(
+    event: MessageEvent,
+    text: str,
+) -> str:
+    """Return ephemeral weather context without changing the normal chat route."""
+    if not config.enable_chat_weather:
+        return ""
+    if not isinstance(event, PrivateMessageEvent) or not is_owner(config, event):
+        return ""
+
+    mode = normalize_chat_weather_mode(config.chat_weather_mode)
+    if mode == ChatWeatherMode.OFF:
+        return ""
+    if mode == ChatWeatherMode.SHADOW:
+        shadow_weather_intent(text)
+        return ""
+
+    intent = detect_weather_intent(text, mode=mode)
+    if intent is None:
+        return ""
+    if config.chat_weather_provider != "open_meteo":
+        return build_weather_unavailable_system_context()
+
+    location = config.chat_weather_default_location.strip()
+    if not location:
+        return build_weather_unavailable_system_context(needs_location=True)
+    if not (
+        -90 <= config.chat_weather_default_latitude <= 90
+        and -180 <= config.chat_weather_default_longitude <= 180
+        and config.chat_weather_timeout_seconds > 0
+    ):
+        return build_weather_unavailable_system_context()
+
+    forecast = cached_weather_forecast(
+        latitude=config.chat_weather_default_latitude,
+        longitude=config.chat_weather_default_longitude,
+        location=location,
+        target_date=intent.target_date,
+    )
+    if forecast is None:
+        try:
+            forecast = await fetch_open_meteo_forecast(
+                latitude=config.chat_weather_default_latitude,
+                longitude=config.chat_weather_default_longitude,
+                location=location,
+                target_date=intent.target_date,
+                timeout_seconds=config.chat_weather_timeout_seconds,
+            )
+        except Exception:
+            # Weather is optional. A provider, transport, or validation failure
+            # must never prevent the existing Chatbot from replying normally.
+            return build_weather_unavailable_system_context()
+        remember_weather_forecast(
+            forecast,
+            latitude=config.chat_weather_default_latitude,
+            longitude=config.chat_weather_default_longitude,
+        )
+    return build_weather_system_context(forecast)
+
+
+def combine_ephemeral_chat_system_contexts(*contexts: str) -> str:
+    return "\n\n".join(context.strip() for context in contexts if context.strip())
+
+
 async def generate_chat_text_response(
     event: MessageEvent,
     matcher: Matcher,
     prompt_context: ChatPromptContext,
     user_content: ChatUserContent,
+    *,
+    role_card_key: str = "",
 ) -> ChatRuntimeResult | None:
     if user_content.vision_failed:
         return ChatRuntimeResult(
@@ -4458,16 +4840,24 @@ async def generate_chat_text_response(
             prompt_context.history,
             local_time_request,
         )
+    weather_context = await build_chat_weather_context(
+        event,
+        clean_text(event),
+    )
     try:
         reply = await ask_llm(
             config,
             llm_history,
             llm_user_text(event, user_content.for_llm),
-            extra_system_context=(
-                STICKER_INTENT_SYSTEM_CONTEXT
-                if config.enable_chat_sticker_intent_shadow
-                else ""
+            extra_system_context=combine_ephemeral_chat_system_contexts(
+                (
+                    STICKER_INTENT_SYSTEM_CONTEXT
+                    if config.enable_chat_sticker_intent_shadow
+                    else ""
+                ),
+                weather_context,
             ),
+            role_card_key=role_card_key,
         )
     except Exception as exc:
         log_ai_event_error(exc, event)
@@ -4511,8 +4901,15 @@ async def generate_legacy_chat_response(
     options: ChatOptions,
     *,
     send_voice: bool = True,
+    role_card_key: str = "",
 ) -> ChatRuntimeResult | None:
-    result = await generate_chat_text_response(event, matcher, prompt_context, user_content)
+    result = await generate_chat_text_response(
+        event,
+        matcher,
+        prompt_context,
+        user_content,
+        role_card_key=role_card_key,
+    )
     if result is None:
         return None
     reply = result.reply
@@ -4609,12 +5006,13 @@ async def render_chat_result(
         should_reply_text=True,
     )
     if result.reply != VISION_FAILURE_REPLY:
-        schedule_remote_sticker_classifier_shadow(
-            bot,
-            event,
-            classifier_user_text,
-            result.reply,
-        )
+        if not conversation_scope(event).routing_v2_active:
+            schedule_remote_sticker_classifier_shadow(
+                bot,
+                event,
+                classifier_user_text,
+                result.reply,
+            )
 
 
 async def finalize_chat_result(
@@ -4629,17 +5027,35 @@ async def finalize_chat_result(
     state: ChatState | None = None,
     *,
     classifier_user_text: str = "",
+    persistent_memory_enabled: bool = True,
+    persona_memory_id: str = "",
+    tts_candidate_enabled: bool = True,
 ) -> None:
     turn = build_chat_turn(user_content.stored, result.stored_assistant)
-    await persist_chat_turn(
-        key,
-        event,
-        prompt_context,
-        turn,
-    )
+    uses_persistent_memory = bool(persistent_memory_enabled or persona_memory_id)
+    if uses_persistent_memory:
+        await persist_scoped_chat_turn(
+            key,
+            event,
+            prompt_context,
+            turn,
+            persona_memory_id=persona_memory_id,
+        )
+        update_chat_commit(state, persisted_turn_saved=True)
+    else:
+        ephemeral_persona_history.append_turn(
+            key,
+            turn.stored_user,
+            turn.stored_assistant,
+            config.max_context_messages,
+        )
+        update_chat_commit(
+            state,
+            persisted_turn_saved=False,
+            ephemeral_turn_saved=True,
+        )
     update_chat_commit(
         state,
-        persisted_turn_saved=True,
         stored_user_chars=len(turn.stored_user),
         stored_assistant_chars=len(turn.stored_assistant),
     )
@@ -4648,16 +5064,21 @@ async def finalize_chat_result(
         update_chat_commit(state, trial_updated=True)
     if options.semantic_voice:
         voice_text = result.voice_text if result.voice_text is not None else result.reply
-        set_last_tts_candidate(voice_text, force_language="zh")
-        update_chat_commit(
-            state,
-            tts_candidate_updated=True,
-            tts_candidate_source="semantic_voice",
-            qq_reply_sent=False,
-            should_reply_text=False,
-        )
-        await schedule_chat_compression(key, event)
-        update_chat_commit(state, compression_scheduled=True)
+        if tts_candidate_enabled:
+            set_last_tts_candidate(voice_text, force_language="zh")
+            update_chat_commit(
+                state,
+                tts_candidate_updated=True,
+                tts_candidate_source="semantic_voice",
+            )
+        update_chat_commit(state, qq_reply_sent=False, should_reply_text=False)
+        if uses_persistent_memory:
+            await schedule_scoped_chat_compression(
+                key,
+                event,
+                persona_memory_id=persona_memory_id,
+            )
+            update_chat_commit(state, compression_scheduled=True)
         await matcher.finish()
         return
     await matcher.send(result.reply)
@@ -4668,21 +5089,31 @@ async def finalize_chat_result(
         should_reply_text=True,
     )
     if result.reply != VISION_FAILURE_REPLY:
-        schedule_remote_sticker_classifier_shadow(
-            bot,
-            event,
-            classifier_user_text,
-            result.reply,
-        )
-    if isinstance(event, PrivateMessageEvent) and is_owner(config, event):
+        if not conversation_scope(event).routing_v2_active:
+            schedule_remote_sticker_classifier_shadow(
+                bot,
+                event,
+                classifier_user_text,
+                result.reply,
+            )
+    if (
+        tts_candidate_enabled
+        and isinstance(event, PrivateMessageEvent)
+        and is_owner(config, event)
+    ):
         set_last_tts_candidate(result.reply)
         update_chat_commit(
             state,
             tts_candidate_updated=True,
             tts_candidate_source="owner_private_text",
         )
-    await schedule_chat_compression(key, event)
-    update_chat_commit(state, compression_scheduled=True)
+    if uses_persistent_memory:
+        await schedule_scoped_chat_compression(
+            key,
+            event,
+            persona_memory_id=persona_memory_id,
+        )
+        update_chat_commit(state, compression_scheduled=True)
 
 
 async def run_chat_graph_session_runtime(
@@ -4703,7 +5134,12 @@ async def run_chat_graph_session_runtime(
 
     async def resolve_image_context(chat_state: ChatState) -> ChatState:
         nonlocal image_descriptions
-        image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        image_descriptions = await describe_chat_images(
+            bot,
+            event,
+            request.image_context,
+            role_card_key=request.role_card_key,
+        )
         update_chat_image_description_commit(chat_state, image_descriptions)
         updated = safe_apply_shadow_vision_result(event, chat_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, updated)
@@ -4716,6 +5152,10 @@ async def run_chat_graph_session_runtime(
             query=request.text,
             semantic_voice=options.semantic_voice,
             has_image_context=request.image_context.has_context,
+            persistent_memory_enabled=request.persistent_memory_enabled,
+            persona_memory_id=(
+                request.persona_id if request.persona_memory_enabled else ""
+            ),
         )
         user_content = build_chat_user_content(
             request.text,
@@ -4749,6 +5189,7 @@ async def run_chat_graph_session_runtime(
             matcher,
             prompt_context,
             user_content,
+            role_card_key=request.role_card_key,
         )
 
     async def maybe_voice_response_node(
@@ -4792,15 +5233,30 @@ async def run_chat_graph_session_runtime(
         __,
     ) -> None:
         turn = build_chat_turn(prompt_bundle.user_content.stored, result.stored_assistant)
-        await persist_chat_turn(
-            request.key,
-            event,
-            prompt_bundle.prompt_context,
-            turn,
+        uses_persistent_memory = bool(
+            request.persistent_memory_enabled or request.persona_memory_enabled
         )
+        if uses_persistent_memory:
+            await persist_scoped_chat_turn(
+                request.key,
+                event,
+                prompt_bundle.prompt_context,
+                turn,
+                persona_memory_id=(
+                    request.persona_id if request.persona_memory_enabled else ""
+                ),
+            )
+        else:
+            ephemeral_persona_history.append_turn(
+                request.key,
+                turn.stored_user,
+                turn.stored_assistant,
+                config.max_context_messages,
+            )
         update_chat_commit(
             chat_state,
-            persisted_turn_saved=True,
+            persisted_turn_saved=uses_persistent_memory,
+            ephemeral_turn_saved=not uses_persistent_memory,
             stored_user_chars=len(turn.stored_user),
             stored_assistant_chars=len(turn.stored_assistant),
         )
@@ -4819,6 +5275,8 @@ async def run_chat_graph_session_runtime(
         __: ChatGraphPromptBundle,
         result: ChatRuntimeResult,
     ) -> None:
+        if not request.tts_enabled:
+            return
         if options.semantic_voice:
             voice_text = result.voice_text if result.voice_text is not None else result.reply
             set_last_tts_candidate(voice_text, force_language="zh")
@@ -4840,7 +5298,13 @@ async def run_chat_graph_session_runtime(
         __: ChatGraphPromptBundle,
         ___: ChatRuntimeResult,
     ) -> None:
-        await schedule_chat_compression(request.key, event)
+        await schedule_scoped_chat_compression(
+            request.key,
+            event,
+            persona_memory_id=(
+                request.persona_id if request.persona_memory_enabled else ""
+            ),
+        )
         update_chat_commit(chat_state, compression_scheduled=True)
 
     return await run_chat_graph_session(
@@ -4855,7 +5319,12 @@ async def run_chat_graph_session_runtime(
         persist_chat_turn=persist_turn_node if persist_side_effects else None,
         update_trial_accounting=update_trial_accounting_node if persist_side_effects else None,
         update_tts_candidate=update_tts_candidate_node if persist_side_effects else None,
-        schedule_compression=schedule_compression_node if persist_side_effects else None,
+        schedule_compression=(
+            schedule_compression_node
+            if persist_side_effects
+            and (request.persistent_memory_enabled or request.persona_memory_enabled)
+            else None
+        ),
     )
 
 
@@ -4868,7 +5337,12 @@ async def run_legacy_chat_session(
     shadow_state: ChatState | None = None,
 ) -> ChatState | None:
     if shadow_state is None:
-        shadow_state = safe_build_shadow_chat_state(event, request, options)
+        shadow_state = safe_build_shadow_chat_state(
+            event,
+            request,
+            options,
+            runtime_artifacts=persona_scope_runtime_artifacts(event),
+        )
     safe_record_shadow_chat_snapshot(event, shadow_state)
     async with session_lock(request.key):
         if config.enable_chat_graph_runtime and shadow_state is not None:
@@ -4919,8 +5393,17 @@ async def run_legacy_chat_session(
             query=request.text,
             semantic_voice=options.semantic_voice,
             has_image_context=request.image_context.has_context,
+            persistent_memory_enabled=request.persistent_memory_enabled,
+            persona_memory_id=(
+                request.persona_id if request.persona_memory_enabled else ""
+            ),
         )
-        image_descriptions = await describe_chat_images(bot, event, request.image_context)
+        image_descriptions = await describe_chat_images(
+            bot,
+            event,
+            request.image_context,
+            role_card_key=request.role_card_key,
+        )
         update_chat_image_description_commit(shadow_state, image_descriptions)
         shadow_state = safe_apply_shadow_vision_result(event, shadow_state, image_descriptions)
         safe_record_shadow_chat_snapshot(event, shadow_state)
@@ -4948,6 +5431,7 @@ async def run_legacy_chat_session(
             prompt_context,
             user_content,
             options,
+            role_card_key=request.role_card_key,
         )
         if result is None:
             return shadow_state
@@ -4975,6 +5459,11 @@ async def run_legacy_chat_session(
             options,
             shadow_state,
             classifier_user_text=request.text,
+            persistent_memory_enabled=request.persistent_memory_enabled,
+            persona_memory_id=(
+                request.persona_id if request.persona_memory_enabled else ""
+            ),
+            tts_candidate_enabled=request.tts_enabled,
         )
         return shadow_state
 
@@ -5008,11 +5497,7 @@ async def run_chat_via_root_graph(
             )
             return RuntimeResponse("", should_reply=False)
 
-        request = ChatRequest(
-            key=session_key(event),
-            text=text,
-            image_context=image_context,
-        )
+        request = chat_request_for_event(event, text, image_context)
         shadow_state = safe_build_shadow_chat_state(
             event,
             request,
@@ -5136,6 +5621,8 @@ def check_group_auto_reply_cooldown(event: GroupMessageEvent) -> bool:
 
 
 async def should_group_auto_reply(event: GroupMessageEvent) -> bool:
+    if conversation_scope(event).routing_v2_active:
+        return False
     if event.is_tome():
         return False
 
@@ -5190,7 +5677,7 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
             if handled:
                 return
         elif intent.type == VoiceIntentType.SEMANTIC_REPLY:
-            if not config.enable_tts:
+            if not tts_enabled_for_event(event):
                 await matcher.finish("语音功能当前未开启。")
             if not is_owner(config, event):
                 await matcher.finish("只有主人可以使用语音功能。")
@@ -5226,8 +5713,18 @@ async def _(bot: Bot, event: GroupMessageEvent, matcher: Matcher) -> None:
 
 @reset_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
-    clear_session(session_key(event))
-    await matcher.finish("已清空当前会话上下文。")
+    scope = conversation_scope(event)
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            clear_session(scope.runtime_session_key)
+    elif scope.routing_v2_active:
+        ephemeral_persona_history.clear(scope.runtime_session_key)
+    else:
+        clear_session(session_key(event))
+    await matcher.finish(
+        "已清除当前会话的近期原始消息和空窗摘要；"
+        "历史会话摘要已保留，并会继续用于后续对话。"
+    )
 
 
 @status_cmd.handle()
@@ -5661,13 +6158,15 @@ def _system_recent_observation_evidence() -> dict[str, object]:
 
 def _collect_system_memory_rag_evidence(
     observation: dict[str, object],
+    *,
+    storage_available: bool = True,
 ) -> tuple[MemoryRagZoneEvidence, int]:
     storage_ok: bool | None = None
     document_count = 0
     embedding_count = 0
     pending_count = 0
     local_probe_count = 0
-    if config.enable_memory_rag:
+    if config.enable_memory_rag and storage_available:
         local_probe_count = 1
         try:
             storage = memory_rag_storage_stats(ensure_schema=False)
@@ -5768,6 +6267,27 @@ async def run_system_diagnostics_report_for_event(
     event: MessageEvent,
     scope: str,
 ) -> SystemDiagnosticsPayload:
+    conversation = conversation_scope(event)
+    if conversation.memory_v2_active:
+        with persona_memory_database_scope(conversation.persona_id):
+            return await _run_system_diagnostics_report_for_event_scoped(
+                event,
+                scope,
+                memory_storage_available=True,
+            )
+    return await _run_system_diagnostics_report_for_event_scoped(
+        event,
+        scope,
+        memory_storage_available=not conversation.routing_v2_active,
+    )
+
+
+async def _run_system_diagnostics_report_for_event_scoped(
+    event: MessageEvent,
+    scope: str,
+    *,
+    memory_storage_available: bool,
+) -> SystemDiagnosticsPayload:
     if scope not in {
         SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
         SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE,
@@ -5779,7 +6299,8 @@ async def run_system_diagnostics_report_for_event(
     observation = _system_recent_observation_evidence()
     if scope == SYSTEM_DIAGNOSTICS_MEMORY_RAG_SCOPE:
         memory_evidence, memory_probe_count = _collect_system_memory_rag_evidence(
-            observation
+            observation,
+            storage_available=memory_storage_available,
         )
         return build_memory_rag_diagnostics_report(
             memory_evidence,
@@ -5806,7 +6327,8 @@ async def run_system_diagnostics_report_for_event(
 
     voice_evidence, voice_probe_count = await _collect_system_voice_evidence(observation)
     memory_evidence, memory_probe_count = _collect_system_memory_rag_evidence(
-        observation
+        observation,
+        storage_available=memory_storage_available,
     )
     local_probe_count = (
         1 + vision_probe_count + voice_probe_count + memory_probe_count
@@ -5871,7 +6393,15 @@ async def run_system_diagnostics_report_for_event(
     return build_system_diagnostics_overview(evidence)
 
 
-def _configured_external_read_report_for_event():
+def current_bot_local_date():
+    return datetime.now(timezone_for_name(config.bot_timezone)).date()
+
+
+def _configured_external_read_report_for_event(
+    *,
+    trusted_temporal_query: ExternalReadTemporalQuery | None = None,
+    search_plan: ExternalReadSearchPlan | None = None,
+):
     if not config.enable_agent_web:
         return None
 
@@ -5881,23 +6411,40 @@ def _configured_external_read_report_for_event():
     except ImportError:
         return None
 
+    synthesis_call = None
+    if config.main_agent_use_llm and bool(config.main_llm_api_key):
+        try:
+            synthesis_call = create_external_research_llm_call(config)
+        except Exception:
+            synthesis_call = None
+
     executor = create_configured_tavily_external_read_executor(
         feature_enabled=config.enable_agent_web,
         api_key=config.tavily_api_key,
         timeout_seconds=config.tavily_timeout_seconds,
+        synthesis_call=synthesis_call,
+        today_provider=current_bot_local_date,
     )
     if executor is None:
         return None
 
     async def execute_for_event(_event, query: str):
-        return await executor(query)
+        return await executor(
+            query,
+            trusted_temporal_query=trusted_temporal_query,
+            search_plan=search_plan,
+        )
 
     return execute_for_event
 
 
-def owner_runtime_factory() -> OwnerRuntimeFactory:
+def owner_runtime_factory(
+    *,
+    trusted_external_read_temporal_query: ExternalReadTemporalQuery | None = None,
+    trusted_external_read_search_plan: ExternalReadSearchPlan | None = None,
+) -> OwnerRuntimeFactory:
     return OwnerRuntimeFactory(
-        session_key_from_event=session_key,
+        session_key_from_event=chat_session_key,
         user_id_from_event=user_id,
         bot_status_lines=status_lines,
         ops_health_reply_for_event=agent_ops_health_reply,
@@ -5913,6 +6460,7 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         model_config_status_lines=model_config_status_lines,
         access_overview_lines=access_overview_lines,
         rag_index_detail_lines=rag_index_detail_lines,
+        rag_index_detail_lines_for_event=rag_index_detail_lines_for_event,
         main_agent_observation_lines=recent_main_agent_observation_lines,
         root_graph_observation_lines=recent_root_graph_chat_observation_lines,
         current_access=current_access,
@@ -5922,16 +6470,19 @@ def owner_runtime_factory() -> OwnerRuntimeFactory:
         add_access_item=add_item,
         remove_access_item=remove_item,
         select_role_card=select_role_card,
-        add_manual_memory=add_manual_memory,
+        add_manual_memory=add_manual_memory_for_session,
         subject_label=subject_label,
-        clear_session_summaries=clear_session_summaries,
-        delete_session_summary=delete_session_summary,
+        clear_session_summaries=clear_session_summaries_for_session,
+        delete_session_summary=delete_session_summary_for_session,
         owner_user_id_default=str(config.bot_owner_qq).strip(),
         fact_memory_type=MANUAL_FACT_TYPE,
         preference_memory_type=MANUAL_PREFERENCE_TYPE,
         development_context_report_for_event=run_development_context_report_for_event,
         system_diagnostics_report_for_event=run_system_diagnostics_report_for_event,
-        external_read_report_for_event=_configured_external_read_report_for_event(),
+        external_read_report_for_event=_configured_external_read_report_for_event(
+            trusted_temporal_query=trusted_external_read_temporal_query,
+            search_plan=trusted_external_read_search_plan,
+        ),
     )
 
 
@@ -5962,23 +6513,24 @@ def external_read_status_reply(event: MessageEvent) -> str:
     lines = [
         "MainAgent 联网状态：",
         f"开关：{'开启' if config.enable_agent_web else '关闭'}",
-        "Provider：Tavily Basic（固定）",
+        "Provider：Tavily Advanced（固定）",
         f"凭据：{'已配置' if config.tavily_api_key else '未配置'}",
         f"Executor：{'已装配' if executor_configured else '未装配'}",
         f"超时：{config.tavily_timeout_seconds} 秒（{'有效' if timeout_valid else '无效'}）",
         f"HTTP 栈：httpx {httpx_version} / httpcore {httpcore_version}",
         f"HTTP 栈兼容性：{'已验证范围' if http_stack_compatible else '未验证范围'}",
-        "搜索深度：basic",
-        "最多结果：3",
+        "搜索深度：advanced",
+        "最多候选：5；最多综合来源：3",
         "AI answer：关闭",
-        "Raw content：关闭",
+        "Raw content：text（仅本次临时证据，受限清洗，不持久化）",
         "Images：关闭",
-        "每 operation 请求：1",
+        "每 operation：Tavily 1 次；官方阶段成功但合格结果为 0 时增加 1 次媒体补充；隔离 Main LLM 综合总计最多 1 次",
+        f"隔离综合：{'已配置' if (config.main_agent_use_llm and config.main_llm_api_key) else '未配置（安全退回来源列表）'}",
         "自动重试：关闭",
-        "Fallback：关闭",
+        "Provider/model fallback：关闭；综合失败时只退回确定性来源列表",
         "任意 URL 抓取：关闭",
         "普通聊天可触发：否",
-        "Main LLM 可见：否",
+        "显式 /agent 内 MainAgent 可见：是（仅主人私聊且 executor 已配置时）",
         "Live 探针：未执行；本状态查询不访问 Tavily、不消耗 credit。",
     ]
     lines.extend(external_read_task_snapshot_lines(task_snapshot))
@@ -6158,10 +6710,76 @@ def run_main_agent_task_command(event: MessageEvent, query: str) -> str | None:
     )
 
 
+async def execute_external_read_for_event(
+    event: MessageEvent,
+    query: str,
+    *,
+    trusted_temporal_query: ExternalReadTemporalQuery | None = None,
+    search_plan: ExternalReadSearchPlan | None = None,
+    temporal_source_query: str | None = None,
+) -> str:
+    factory = owner_runtime_factory(
+        trusted_external_read_temporal_query=trusted_temporal_query,
+        trusted_external_read_search_plan=search_plan,
+    )
+    decision = prepare_external_read_command(
+        query,
+        is_private_session=isinstance(event, PrivateMessageEvent),
+        owner_authorized=is_owner(config, event),
+        feature_enabled=config.enable_agent_web,
+        executor_configured=(factory.external_read_report_for_event is not None),
+    )
+    if not decision.allowed:
+        return decision.reply_text
+    execution = await factory.execute_external_read_report(
+        event,
+        decision.normalized_query,
+    )
+    return format_owner_agent_work_execution(execution)
+
+
 async def run_main_agent_explicit_work_command(
     event: MessageEvent,
     query: str,
 ) -> str | None:
+    quality_review = parse_external_read_quality_review_command(query)
+    if quality_review is not None:
+        if not isinstance(event, PrivateMessageEvent):
+            return "联网结果质检只允许主人私聊通过 /agent 严格命令执行。"
+        if not is_owner(config, event):
+            return "联网结果质检被拒绝：需要主人权限。"
+        if quality_review.task_id is None:
+            action = "接受" if quality_review.accepted else "拒绝"
+            return f"请提供任务 ID：/agent {action}联网结果 #<任务ID>"
+        review_result = review_external_read_task_quality(
+            task_id=quality_review.task_id,
+            session_key=session_key(event),
+            user_id=user_id(event),
+            accepted=quality_review.accepted,
+        )
+        if review_result.changed:
+            label = "接受" if quality_review.accepted else "拒绝"
+            return (
+                f"已{label}联网结果 #{review_result.task_id}。\n"
+                f"主人质量：{review_result.status}\n"
+                "仅更新该任务的质量枚举；未重新搜索、综合、写入 RAG/记忆或发送额外 QQ。"
+            )
+        if review_result.status in {"owner_accepted", "owner_rejected"}:
+            return (
+                f"联网结果 #{review_result.task_id} 已完成主人质检："
+                f"{review_result.status}；未重复修改。"
+            )
+        if review_result.status == "not_reviewable":
+            return (
+                f"联网结果 #{review_result.task_id} 当前不可质检："
+                "只允许审核技术完成且 owner_quality_pending 的 external-read 任务。"
+            )
+        if review_result.status == "unavailable":
+            return "联网结果质检暂不可用：任务存储读取或更新失败。"
+        return (
+            f"未找到属于当前主人私聊的待质检联网结果 #{review_result.task_id}。"
+        )
+
     if query.strip() in {"联网状态", "外部只读查询状态"}:
         if not isinstance(event, PrivateMessageEvent):
             return "联网状态只允许主人私聊通过 /agent 显式查看。"
@@ -6186,21 +6804,7 @@ async def run_main_agent_explicit_work_command(
 
     external_query = parse_external_read_report_command(query)
     if external_query is not None:
-        factory = owner_runtime_factory()
-        decision = prepare_external_read_command(
-            external_query,
-            is_private_session=isinstance(event, PrivateMessageEvent),
-            owner_authorized=is_owner(config, event),
-            feature_enabled=config.enable_agent_web,
-            executor_configured=(factory.external_read_report_for_event is not None),
-        )
-        if not decision.allowed:
-            return decision.reply_text
-        execution = await factory.execute_external_read_report(
-            event,
-            decision.normalized_query,
-        )
-        return format_owner_agent_work_execution(execution)
+        return await execute_external_read_for_event(event, external_query)
 
     diagnostics_scope = parse_system_diagnostics_report_command(query)
     if diagnostics_scope is None:
@@ -6332,7 +6936,19 @@ async def run_main_agent_qq_command(
             return task_reply
 
     explicit_dev_context = raw_output or is_explicit_main_agent_dev_context_query(query)
-    normalized_query = normalize_main_agent_query(query)
+    planner_query = query
+    trusted_temporal_query = None
+    try:
+        temporal_query = rewrite_external_read_temporal_query(
+            query,
+            reference_date=current_bot_local_date(),
+        )
+        planner_query = temporal_query.query
+        if temporal_query.time_window is not None:
+            trusted_temporal_query = temporal_query
+    except ValueError:
+        pass
+    normalized_query = normalize_main_agent_query(planner_query)
     raw_text = f"/agent {normalized_query}".strip()
     runtime_state = runtime_state_from_main_agent_command(
         raw_text,
@@ -6348,6 +6964,7 @@ async def run_main_agent_qq_command(
     command_artifact = runtime_state.artifacts.get("main_agent_command", {})
     if isinstance(command_artifact, dict):
         command_artifact["explicit_dev_context"] = explicit_dev_context
+        command_artifact["trusted_current_date"] = current_bot_local_date().isoformat()
 
     async def retrieve_dev_context(query_text: str, requester_is_owner: bool) -> str:
         execution = await run_dev_context_graph_for_main_agent(
@@ -6364,6 +6981,18 @@ async def run_main_agent_qq_command(
             event,
             command,
             _context,
+        )
+
+    async def execute_external_read(
+        search_plan: ExternalReadSearchPlan,
+        _context,
+    ) -> str:
+        return await execute_external_read_for_event(
+            event,
+            query,
+            trusted_temporal_query=trusted_temporal_query,
+            search_plan=search_plan,
+            temporal_source_query=query,
         )
 
     async def execute_agent_task_read(command: str, reference: str, _context) -> str:
@@ -6403,6 +7032,14 @@ async def run_main_agent_qq_command(
     main_agent_tool_registry = create_read_only_main_agent_tool_registry(
         retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
+        execute_external_read=(
+            execute_external_read
+            if isinstance(event, PrivateMessageEvent)
+            and is_owner(config, event)
+            and config.enable_agent_web
+            and owner_runtime_factory().external_read_report_for_event is not None
+            else None
+        ),
         execute_owner_write_command=execute_owner_write_command,
         execute_document_delivery_command=(
             execute_document_delivery_command
@@ -6429,6 +7066,11 @@ async def run_main_agent_qq_command(
     handler = create_read_only_main_agent_runtime_handler(
         retrieve_dev_context=retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
+        execute_external_read=(
+            execute_external_read
+            if main_agent_tool_registry.get(EXTERNAL_READ_TOOL_NAME) is not None
+            else None
+        ),
         execute_owner_write_command=execute_owner_write_command,
         execute_document_delivery_command=(
             execute_document_delivery_command
@@ -6612,7 +7254,8 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
 @view_persona_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    prompt = load_persona_prompt()
+    scope = conversation_scope(event)
+    prompt = load_persona_prompt(scope.role_card_key if scope.routing_v2_active else "")
     if not prompt:
         await matcher.finish("\n".join(persona_status_lines()))
     await matcher.finish("当前角色卡内容：\n" + prompt)
@@ -6621,6 +7264,12 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
 @select_persona_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
+    scope = conversation_scope(event)
+    if scope.routing_v2_active:
+        await matcher.finish(
+            f"当前账号已固定绑定角色卡：{scope.role_card_key}；"
+            "不会修改爱可账号的全局角色卡。"
+        )
     target = arg.extract_plain_text().strip()
     if not target:
         cards = list_role_cards()

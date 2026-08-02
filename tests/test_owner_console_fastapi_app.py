@@ -79,6 +79,9 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(payload["snapshot_read_only"])
         self.assertTrue(payload["http_api_enabled"])
         self.assertFalse(payload["web_write_enabled"])
+        self.assertFalse(payload["approval_actions_enabled"])
+        self.assertFalse(payload["task_actions_enabled"])
+        self.assertFalse(payload["access_control_actions_enabled"])
         self.assertFalse(payload["manual_diagnostic_actions_enabled"])
         self.assertFalse(payload["automatic_diagnostics_enabled"])
         self.assertFalse(payload["configuration_write_enabled"])
@@ -126,7 +129,9 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(data["allowed_methods"], ["GET", "POST"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 28)
+        self.assertEqual(data["route_count"], 37)
+        self.assertFalse(data["task_action_routes_enabled"])
+        self.assertFalse(data["access_action_routes_enabled"])
         rows = {row["name"]: row for row in data["rows"]}
         self.assertEqual(
             rows["routes"]["path"],
@@ -148,6 +153,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["approvals"]["http_api_enabled"])
         self.assertTrue(rows["tasks.detail"]["http_api_enabled"])
         self.assertTrue(rows["approvals.detail"]["http_api_enabled"])
+        self.assertFalse(rows["approvals.approve"]["http_api_enabled"])
+        self.assertFalse(rows["approvals.reject"]["http_api_enabled"])
+        self.assertFalse(rows["tasks.cancel"]["http_api_enabled"])
+        self.assertTrue(rows["tasks.cancel"]["task_action_allowed"])
+        self.assertFalse(rows["tasks.cancel"]["approval_action_allowed"])
+        self.assertTrue(rows["approvals.approve"]["approval_action_allowed"])
+        self.assertTrue(rows["approvals.reject"]["approval_action_allowed"])
         self.assertTrue(rows["access-control"]["http_api_enabled"])
         self.assertTrue(rows["settings"]["http_api_enabled"])
         self.assertTrue(rows["memory"]["http_api_enabled"])
@@ -824,8 +836,49 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             [approval_id],
         )
         self.assertEqual(approval_data["rows"][0]["task_id"], owner_task_id)
-        self.assertTrue(
+        self.assertFalse(
             approval_data["rows"][0]["actionability"]["future_operation_only"]
+        )
+        self.assertEqual(
+            approval_data["rows"][0]["actionability"]["blocked_reason"],
+            "web approval actions are disabled",
+        )
+
+    def test_tasks_endpoint_supports_server_side_pagination(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "ENABLE_PRIVATE_CHAT": "true",
+                "ENABLE_GROUP_CHAT": "true",
+            },
+            clear=True,
+        ):
+            task_ids = [
+                self.agent_tasks.create_agent_task(
+                    session_key="private:10001",
+                    user_id="10001",
+                    goal=f"HTTP pagination task {index}",
+                )
+                for index in range(25)
+            ]
+            response = self.client.get(
+                "/api/v1/owner-console/tasks?page=2&page_size=10"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["page"], 2)
+        self.assertEqual(data["page_size"], 10)
+        self.assertEqual(data["total_matching"], 25)
+        self.assertEqual(data["total_pages"], 3)
+        self.assertTrue(data["has_previous"])
+        self.assertTrue(data["has_next"])
+        self.assertEqual(data["total_visible"], 10)
+        self.assertEqual(
+            [row["task_id"] for row in data["rows"]],
+            list(reversed(task_ids))[10:20],
         )
 
     def test_tasks_and_approvals_endpoints_validate_status_limit_and_owner(self):
@@ -844,6 +897,12 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             )
             invalid_work_type = self.client.get(
                 "/api/v1/owner-console/tasks?work_type=unknown_work"
+            )
+            invalid_page = self.client.get(
+                "/api/v1/owner-console/tasks?page=0"
+            )
+            invalid_page_size = self.client.get(
+                "/api/v1/owner-console/tasks?page_size=0"
             )
 
         self.assertEqual(invalid_status.status_code, 400)
@@ -865,6 +924,16 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(limit_payload["error"]["code"], "bad_request")
         self.assertEqual(limit_payload["error"]["details"]["field"], "limit")
         self.assertFalse(limit_payload["web_write_enabled"])
+        self.assertEqual(invalid_page.status_code, 400)
+        self.assertEqual(
+            invalid_page.json()["error"]["details"]["field"],
+            "page",
+        )
+        self.assertEqual(invalid_page_size.status_code, 400)
+        self.assertEqual(
+            invalid_page_size.json()["error"]["details"]["field"],
+            "page_size",
+        )
 
     def test_detail_endpoints_use_owner_context_limits_and_not_found(self):
         temp_dir, patcher = self.temp_database()
@@ -967,6 +1036,578 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
             other_approval_response.json()["error"]["details"],
             {"approval_id": other_approval_id},
         )
+
+    def test_web_approval_approve_uses_fixed_contract_and_resumes_once(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="web approval dry-run",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json=(
+                    '{"path":"docs/private-example.md",'
+                    '"content_summary":"sensitive original summary"}'
+                ),
+                risk_level="write_local",
+                reason="verify fixed web approval contract",
+            )
+            approval_runtime = (
+                self.fastapi_app_module.OwnerConsoleApprovalActionRuntime(enabled=True)
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                approval_action_runtime=approval_runtime,
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+
+            detail_response = client.get(
+                f"/api/v1/owner-console/approvals/{approval_id}"
+            )
+            detail_data = detail_response.json()["data"]
+            approve_response = client.post(
+                f"/api/v1/owner-console/approvals/{approval_id}/approve",
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-approve-v1",
+                },
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            duplicate_response = client.post(
+                f"/api/v1/owner-console/approvals/{approval_id}/approve",
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-approve-v1",
+                },
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertIn("owner_console_action_session", detail_response.cookies)
+        self.assertTrue(detail_data["approval"]["actionability"]["can_approve"])
+        self.assertTrue(detail_data["approval"]["actionability"]["can_reject"])
+        self.assertFalse(
+            detail_data["approval"]["actionability"]["future_operation_only"]
+        )
+        self.assertEqual(approve_response.status_code, 200)
+        payload = approve_response.json()
+        self.assertFalse(payload["read_only"])
+        self.assertTrue(payload["web_write_enabled"])
+        self.assertTrue(payload["approval_action"])
+        self.assertFalse(payload["manual_runtime_action"])
+        self.assertTrue(payload["business_data_write_enabled"])
+        self.assertEqual(payload["data"]["action"]["decision"], "approved")
+        self.assertTrue(payload["data"]["action"]["resume_executed"])
+        self.assertEqual(payload["data"]["action"]["task_status"], "done")
+        self.assertEqual(
+            payload["data"]["approval_detail"]["approval"]["status"],
+            "approved",
+        )
+        self.assertEqual(duplicate_response.status_code, 409)
+        self.assertEqual(duplicate_response.json()["error"]["code"], "conflict")
+        event_payloads = "\n".join(
+            event.input_json
+            for event in events
+            if event.kind in {
+                "approval_requested",
+                "approval_approved",
+                "tool_resume_started",
+                "tool_resume_finished",
+            }
+        )
+        self.assertNotIn("sensitive original summary", event_payloads)
+        self.assertNotIn("docs/private-example.md", event_payloads)
+        self.assertEqual(
+            [event.kind for event in events].count("tool_resume_started"),
+            1,
+        )
+        self.assertEqual(
+            [event.kind for event in events].count("tool_resume_finished"),
+            1,
+        )
+
+    def test_web_approval_rejects_external_write_without_execution(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="external delivery must not be web approved",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="document_delivery_command",
+                tool_input_json=(
+                    '{"command":"create_and_send_txt_document",'
+                    '"title":"test","content":"test"}'
+                ),
+                risk_level="write_external",
+                reason="external write",
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                approval_action_runtime=(
+                    self.fastapi_app_module.OwnerConsoleApprovalActionRuntime(
+                        enabled=True
+                    )
+                ),
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            detail_response = client.get(
+                f"/api/v1/owner-console/approvals/{approval_id}"
+            )
+            approve_response = client.post(
+                f"/api/v1/owner-console/approvals/{approval_id}/approve",
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-approve-v1",
+                },
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            reject_response = client.post(
+                f"/api/v1/owner-console/approvals/{approval_id}/reject",
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-reject-v1",
+                },
+                json={"confirmation": "reject_registered_pending_approval"},
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        actionability = detail_response.json()["data"]["approval"]["actionability"]
+        self.assertFalse(actionability["can_approve"])
+        self.assertTrue(actionability["can_reject"])
+        self.assertIn("external writes", actionability["blocked_reason"])
+        self.assertEqual(approve_response.status_code, 403)
+        self.assertEqual(reject_response.status_code, 200)
+        self.assertEqual(reject_response.json()["data"]["action"]["decision"], "rejected")
+        self.assertFalse(reject_response.json()["data"]["action"]["resume_attempted"])
+        self.assertNotIn("tool_resume_started", [event.kind for event in events])
+
+    def test_web_approval_requires_same_origin_cookie_header_and_fixed_body(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="verify web approval csrf boundary",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"path":"docs/test.md","content_summary":"test"}',
+                risk_level="write_local",
+                reason="verify csrf boundary",
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                approval_action_runtime=(
+                    self.fastapi_app_module.OwnerConsoleApprovalActionRuntime(
+                        enabled=True
+                    )
+                ),
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            path = f"/api/v1/owner-console/approvals/{approval_id}/approve"
+            action_headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "approval-approve-v1",
+            }
+            missing_cookie = client.post(
+                path,
+                headers=action_headers,
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            client.get(f"/api/v1/owner-console/approvals/{approval_id}")
+            wrong_origin = client.post(
+                path,
+                headers={**action_headers, "Origin": "http://example.com"},
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            wrong_header = client.post(
+                path,
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-reject-v1",
+                },
+                json={"confirmation": "approve_registered_pending_approval"},
+            )
+            wrong_body = client.post(
+                path,
+                headers=action_headers,
+                json={"confirmation": "approve", "tool_name": "dry_run_write_file"},
+            )
+            approval = self.agent_tasks.get_agent_approval(
+                approval_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+        self.assertEqual(missing_cookie.status_code, 403)
+        self.assertIn("session", missing_cookie.json()["error"]["message"])
+        self.assertEqual(wrong_origin.status_code, 403)
+        self.assertIn("same-origin", wrong_origin.json()["error"]["message"])
+        self.assertEqual(wrong_header.status_code, 403)
+        self.assertIn("header", wrong_header.json()["error"]["message"])
+        self.assertEqual(wrong_body.status_code, 400)
+        self.assertIn("confirmation", wrong_body.json()["error"]["message"])
+        self.assertIsNotNone(approval)
+        self.assertEqual(approval.status, "pending")
+
+    def test_web_task_cancel_uses_fixed_contract_and_changes_state_once(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="web task cancellation dry-run",
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                task_action_runtime=(
+                    self.fastapi_app_module.OwnerConsoleTaskActionRuntime(enabled=True)
+                ),
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            detail_response = client.get(
+                f"/api/v1/owner-console/tasks/{task_id}"
+            )
+            headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "task-cancel-v1",
+            }
+            cancel_response = client.post(
+                f"/api/v1/owner-console/tasks/{task_id}/cancel",
+                headers=headers,
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            duplicate_response = client.post(
+                f"/api/v1/owner-console/tasks/{task_id}/cancel",
+                headers=headers,
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertIn("owner_console_action_session", detail_response.cookies)
+        self.assertTrue(
+            detail_response.json()["data"]["task"]["actionability"]["can_cancel"]
+        )
+        self.assertEqual(cancel_response.status_code, 200)
+        payload = cancel_response.json()
+        self.assertFalse(payload["read_only"])
+        self.assertTrue(payload["web_write_enabled"])
+        self.assertFalse(payload["approval_action"])
+        self.assertTrue(payload["task_action"])
+        self.assertFalse(payload["manual_runtime_action"])
+        self.assertTrue(payload["business_data_write_enabled"])
+        self.assertEqual(payload["data"]["action"]["task_status"], "cancelled")
+        self.assertFalse(payload["data"]["action"]["tool_executed"])
+        self.assertFalse(payload["data"]["action"]["approval_resumed"])
+        self.assertEqual(
+            payload["data"]["task_detail"]["task"]["status"],
+            "cancelled",
+        )
+        self.assertEqual(duplicate_response.status_code, 409)
+        self.assertEqual(duplicate_response.json()["error"]["code"], "conflict")
+        self.assertEqual([event.kind for event in events].count("cancelled"), 1)
+
+    def test_web_task_cancel_requires_same_origin_cookie_header_and_exact_body(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="verify task cancellation csrf boundary",
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                task_action_runtime=(
+                    self.fastapi_app_module.OwnerConsoleTaskActionRuntime(enabled=True)
+                ),
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            path = f"/api/v1/owner-console/tasks/{task_id}/cancel"
+            action_headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "task-cancel-v1",
+            }
+            missing_cookie = client.post(
+                path,
+                headers=action_headers,
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            client.get(f"/api/v1/owner-console/tasks/{task_id}")
+            wrong_origin = client.post(
+                path,
+                headers={**action_headers, "Origin": "http://example.com"},
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            wrong_header = client.post(
+                path,
+                headers={
+                    "Origin": "http://127.0.0.1:8090",
+                    "X-Owner-Console-Action": "approval-reject-v1",
+                },
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            wrong_body = client.post(
+                path,
+                headers=action_headers,
+                json={"confirmation": "cancel_single_pending_task", "task_id": task_id},
+            )
+            task = self.agent_tasks.get_agent_task(
+                task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+        self.assertEqual(missing_cookie.status_code, 403)
+        self.assertEqual(wrong_origin.status_code, 403)
+        self.assertEqual(wrong_header.status_code, 403)
+        self.assertEqual(wrong_body.status_code, 400)
+        self.assertEqual(task.status, "pending")
+
+    def test_web_task_cancel_blocks_pending_approval_and_hides_other_context(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="pending approval blocks web cancellation",
+            )
+            self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="must be decided first",
+            )
+            other_task_id = self.agent_tasks.create_agent_task(
+                session_key="private:20002",
+                user_id="20002",
+                goal="other private context",
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                task_action_runtime=(
+                    self.fastapi_app_module.OwnerConsoleTaskActionRuntime(enabled=True)
+                ),
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            client.get(f"/api/v1/owner-console/tasks/{task_id}")
+            headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "task-cancel-v1",
+            }
+            blocked = client.post(
+                f"/api/v1/owner-console/tasks/{task_id}/cancel",
+                headers=headers,
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            hidden = client.post(
+                f"/api/v1/owner-console/tasks/{other_task_id}/cancel",
+                headers=headers,
+                json={"confirmation": "cancel_single_pending_task"},
+            )
+            task = self.agent_tasks.get_agent_task(
+                task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(hidden.status_code, 404)
+        self.assertEqual(task.status, "pending")
+
+    def test_web_access_actions_add_remove_and_preserve_environment_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "BOT_OWNER_QQ": "10001",
+                "PRIVATE_WHITELIST": "11111",
+                "OWNER_CONSOLE_STATIC_ENABLED": "false",
+            },
+            clear=True,
+        ):
+            store_path = Path(temp_dir) / "access.json"
+            access_runtime = self.fastapi_app_module.OwnerConsoleAccessActionRuntime(
+                enabled=True,
+                store_path=store_path,
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                access_action_runtime=access_runtime,
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            snapshot = client.get("/api/v1/owner-console/access-control")
+            fixed_item = snapshot.json()["data"]["private_whitelist"]["items"][0]
+            headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "access-group-whitelist-add-v1",
+            }
+            fixed_duplicate = client.post(
+                "/api/v1/owner-console/access-control/private-whitelist/add",
+                headers={
+                    **headers,
+                    "X-Owner-Console-Action": "access-private-whitelist-add-v1",
+                },
+                json={
+                    "item": "11111",
+                    "revision": 0,
+                    "confirmation": "add_private_whitelist_item",
+                },
+            )
+            added = client.post(
+                "/api/v1/owner-console/access-control/group-whitelist/add",
+                headers=headers,
+                json={
+                    "item": "22222",
+                    "revision": 0,
+                    "confirmation": "add_group_whitelist_item",
+                },
+            )
+            removed = client.post(
+                "/api/v1/owner-console/access-control/group-whitelist/remove",
+                headers={
+                    **headers,
+                    "X-Owner-Console-Action": "access-group-whitelist-remove-v1",
+                },
+                json={
+                    "item": "22222",
+                    "revision": 1,
+                    "confirmation": "remove_group_whitelist_item",
+                },
+            )
+            fixed_remove = client.post(
+                "/api/v1/owner-console/access-control/private-whitelist/remove",
+                headers={
+                    **headers,
+                    "X-Owner-Console-Action": "access-private-whitelist-remove-v1",
+                },
+                json={
+                    "item": "11111",
+                    "revision": 2,
+                    "confirmation": "remove_private_whitelist_item",
+                },
+            )
+            owner_block = client.post(
+                "/api/v1/owner-console/access-control/user-blacklist/add",
+                headers={
+                    **headers,
+                    "X-Owner-Console-Action": "access-user-blacklist-add-v1",
+                },
+                json={
+                    "item": "10001",
+                    "revision": 2,
+                    "confirmation": "add_user_blacklist_item",
+                },
+            )
+
+        self.assertIn("owner_console_action_session", snapshot.cookies)
+        self.assertEqual(fixed_item["source"], "environment")
+        self.assertFalse(fixed_item["editable"])
+        self.assertEqual(fixed_duplicate.status_code, 409)
+        self.assertEqual(added.status_code, 200)
+        self.assertEqual(added.json()["data"]["action"]["revision"], 1)
+        self.assertTrue(added.json()["access_action"])
+        self.assertFalse(added.json()["configuration_write_enabled"])
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(removed.json()["data"]["action"]["revision"], 2)
+        self.assertFalse(removed.json()["data"]["action"]["effective"])
+        self.assertEqual(fixed_remove.status_code, 403)
+        self.assertEqual(owner_block.status_code, 403)
+
+    def test_web_access_actions_enforce_csrf_exact_body_and_revision(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"BOT_OWNER_QQ": "10001", "OWNER_CONSOLE_STATIC_ENABLED": "false"},
+            clear=True,
+        ):
+            store_path = Path(temp_dir) / "access.json"
+            access_runtime = self.fastapi_app_module.OwnerConsoleAccessActionRuntime(
+                enabled=True,
+                store_path=store_path,
+            )
+            app = self.fastapi_app_module.create_owner_console_fastapi_app(
+                access_action_runtime=access_runtime,
+                action_session_token="fixed-test-action-token",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            path = "/api/v1/owner-console/access-control/private-whitelist/add"
+            body = {
+                "item": "22222",
+                "revision": 0,
+                "confirmation": "add_private_whitelist_item",
+            }
+            headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": "access-private-whitelist-add-v1",
+            }
+            missing_cookie = client.post(path, headers=headers, json=body)
+            client.get("/api/v1/owner-console/access-control")
+            wrong_origin = client.post(
+                path,
+                headers={**headers, "Origin": "http://example.com"},
+                json=body,
+            )
+            wrong_header = client.post(
+                path,
+                headers={**headers, "X-Owner-Console-Action": "task-cancel-v1"},
+                json=body,
+            )
+            extra_key = client.post(
+                path,
+                headers=headers,
+                json={**body, "list_name": "private_whitelist"},
+            )
+            first = client.post(path, headers=headers, json=body)
+            stale = client.post(
+                "/api/v1/owner-console/access-control/group-whitelist/add",
+                headers={
+                    **headers,
+                    "X-Owner-Console-Action": "access-group-whitelist-add-v1",
+                },
+                json={
+                    "item": "33333",
+                    "revision": 0,
+                    "confirmation": "add_group_whitelist_item",
+                },
+            )
+
+        self.assertEqual(missing_cookie.status_code, 403)
+        self.assertEqual(wrong_origin.status_code, 403)
+        self.assertEqual(wrong_header.status_code, 403)
+        self.assertEqual(extra_key.status_code, 400)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(stale.status_code, 409)
 
     def test_detail_endpoints_validate_ids_limits_and_owner(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -1072,11 +1713,20 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(access_data["unknown_private_policy"], "allow_trial")
         self.assertTrue(
             {"10001", "20002"}.issubset(
-                set(access_data["private_whitelist"]["items"])
+                {
+                    item["value"]
+                    for item in access_data["private_whitelist"]["items"]
+                }
             )
         )
-        self.assertIn("90001", access_data["group_whitelist"]["items"])
-        self.assertIn("30003", access_data["user_blacklist"]["items"])
+        self.assertIn(
+            "90001",
+            {item["value"] for item in access_data["group_whitelist"]["items"]},
+        )
+        self.assertIn(
+            "30003",
+            {item["value"] for item in access_data["user_blacklist"]["items"]},
+        )
         self.assertFalse(
             access_data["boundary"]["ordinary_chat_can_trigger_main_agent"]
         )
@@ -1251,7 +1901,21 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "结果数：3。",
                 "来源主机数：2。",
                 "丢弃结果数：1。",
+                "Provider候选数：4。",
+                "官方正文强日期数：1。",
+                "业务场景：recommendation。",
+                "日期缺失丢弃：1。",
+                "窗口外丢弃：0。",
+                "仅弱日期丢弃：0。",
+                "日期冲突丢弃：0。",
+                "注入嫌疑丢弃：0。",
+                "清洗去重丢弃：0。",
                 "外部请求：1。",
+                "Provider请求：1。",
+                "综合请求：1。",
+                "综合状态：completed。",
+                "综合错误：none。",
+                "主人质量：owner_quality_pending。",
                 "状态类别：completed。",
                 "错误类别：none。",
             ]
@@ -1301,14 +1965,37 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(data["credential_configured"])
         self.assertTrue(data["executor_configured"])
         self.assertEqual(data["provider_name"], "tavily")
-        self.assertEqual(data["search_depth"], "basic")
-        self.assertEqual(data["max_results"], 3)
+        self.assertEqual(data["search_depth"], "planned_basic_or_advanced")
+        self.assertEqual(data["max_results"], 10)
+        self.assertFalse(data["synthesis_configured"])
         self.assertEqual(data["endpoint_host"], "api.tavily.com")
         self.assertTrue(data["dependencies"]["compatible"])
         self.assertTrue(data["recent_task"]["available"])
         self.assertEqual(data["recent_task"]["task_id"], task_id)
         self.assertEqual(data["recent_task"]["result_count"], 3)
+        self.assertEqual(data["recent_task"]["provider_candidate_count"], 4)
+        self.assertEqual(data["recent_task"]["official_content_strong_count"], 1)
+        self.assertEqual(data["recent_task"]["scene"], "recommendation")
+        self.assertEqual(data["recent_task"]["dropped_missing_date_count"], 1)
+        self.assertEqual(data["recent_task"]["dropped_outside_window_count"], 0)
+        self.assertEqual(data["recent_task"]["dropped_weak_only_count"], 0)
+        self.assertEqual(data["recent_task"]["dropped_conflicting_date_count"], 0)
+        self.assertEqual(data["recent_task"]["dropped_injection_count"], 0)
+        self.assertEqual(data["recent_task"]["dropped_sanitization_count"], 0)
         self.assertEqual(data["recent_task"]["external_request_count"], 1)
+        self.assertEqual(data["recent_task"]["provider_request_count"], 1)
+        self.assertEqual(data["recent_task"]["synthesis_request_count"], 1)
+        self.assertEqual(data["recent_task"]["synthesis_status"], "completed")
+        self.assertEqual(
+            data["recent_task"]["synthesis_error_category"],
+            "none",
+        )
+        self.assertEqual(
+            data["recent_task"]["owner_quality_status"],
+            "owner_quality_pending",
+        )
+        self.assertFalse(data["boundary"]["raw_content_enabled"])
+        self.assertTrue(data["boundary"]["isolated_synthesis_enabled"])
         self.assertFalse(data["boundary"]["live_probe_executed"])
         self.assertFalse(data["boundary"]["external_request_executed"])
         self.assertFalse(data["boundary"]["query_exposed"])

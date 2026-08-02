@@ -125,7 +125,16 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             result_count=0,
             source_host_count=0,
             dropped_result_count=0,
-            external_request_count=1,
+            provider_candidate_count=0,
+            official_content_strong_count=0,
+            dropped_source_policy_count=0,
+            external_request_count=2,
+            provider_request_count=2,
+            search_stage_count=2,
+            official_stage_candidate_count=0,
+            official_stage_result_count=0,
+            media_stage_candidate_count=0,
+            media_stage_result_count=0,
             response_truncated=False,
             status_category="no_results",
             error_category="none",
@@ -819,6 +828,201 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                     self.tool_registry.ToolContext(is_owner=True),
                 )
             )
+
+    def test_external_read_tool_is_owner_private_and_policy_allowed(self):
+        calls = []
+
+        async def retrieve_dev_context(_query, _is_owner):
+            raise AssertionError("dev_context must not run for external_read")
+
+        async def execute_external_read(plan, context):
+            calls.append((plan, context.is_owner, context.is_group))
+            return "外部只读查询任务 #55 已完成。"
+
+        def call_main_agent(state):
+            state.raw_action_request = {
+                "action": "tool_request",
+                "tool_name": "external_read",
+                "arguments": {
+                    "query": "今天 模型 更新 官方",
+                    "source_scope": "official",
+                    "evidence_role": "official_confirmation",
+                },
+                "reason": "current public information is required",
+            }
+            return state
+
+        runner = self.main_agent_bridge.create_read_only_main_agent_runner(
+            retrieve_dev_context=retrieve_dev_context,
+            execute_external_read=execute_external_read,
+            call_main_agent=call_main_agent,
+            render_mode="concise",
+        )
+        execution = asyncio.run(
+            runner.run(
+                self.main_agent.MainAgentState(
+                    query="帮我查一下今天的模型更新",
+                    is_owner=True,
+                    is_group=False,
+                )
+            )
+        )
+
+        self.assertEqual(execution.result.error, "")
+        self.assertEqual(execution.result.requested_tool, "external_read")
+        self.assertEqual(execution.result.policy_decision, "allow")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0].primary_query, "今天 模型 更新 官方")
+        self.assertEqual(calls[0][0].primary_source_scope, "official")
+        self.assertEqual(
+            calls[0][0].primary_evidence_role,
+            "official_confirmation",
+        )
+        self.assertEqual(calls[0][0].secondary_mode, "none")
+        self.assertEqual(calls[0][0].scene, "official_update")
+        self.assertEqual(calls[0][1:], (True, False))
+        self.assertEqual(
+            execution.result.response_text,
+            "外部只读查询任务 #55 已完成。",
+        )
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            retrieve_dev_context,
+            execute_external_read=execute_external_read,
+        )
+        self.assertIn("external_read", registry.visible_tool_names())
+        self.assertEqual(
+            registry.require("external_read").risk_level,
+            self.policy_risk.RiskLevel.READ_EXTERNAL,
+        )
+        for context in (
+            self.tool_registry.ToolContext(is_owner=False, is_group=False),
+            self.tool_registry.ToolContext(is_owner=True, is_group=True),
+        ):
+            with self.assertRaises(self.tool_registry.ToolExecutionError):
+                asyncio.run(
+                    registry.execute(
+                        "external_read",
+                        {"query": "公开信息", "source_scope": "general"},
+                        context,
+                    )
+                )
+
+    def test_external_read_broadens_redundant_official_secondary_for_upcoming_character(self):
+        calls = []
+
+        async def execute_external_read(plan, context):
+            calls.append((plan, context.query))
+            return "外部只读查询任务 #67 已完成。"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            lambda _query, _is_owner: "unused",
+            execute_external_read=execute_external_read,
+        )
+
+        result = asyncio.run(
+            registry.execute(
+                "external_read",
+                {
+                    "query": "原神 下一版本 官方前瞻",
+                    "source_scope": "official",
+                    "secondary_query": "原神 下一版本 角色复刻",
+                    "secondary_source_scope": "official",
+                    "secondary_time_range": "month",
+                    "secondary_evidence_role": "reported_candidate",
+                    "secondary_mode": "always",
+                },
+                self.tool_registry.ToolContext(
+                    query="原神下一个版本的角色是谁",
+                    is_owner=True,
+                    is_group=False,
+                ),
+            )
+        )
+
+        self.assertEqual(result.text, "外部只读查询任务 #67 已完成。")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0].primary_source_scope, "general")
+        self.assertEqual(calls[0][0].primary_evidence_role, "context")
+        self.assertEqual(calls[0][0].secondary_source_scope, "news")
+        self.assertEqual(calls[0][0].secondary_time_range, "month")
+        self.assertEqual(
+            calls[0][0].secondary_evidence_role,
+            "reported_candidate",
+        )
+        self.assertEqual(calls[0][0].secondary_mode, "always")
+        self.assertEqual(calls[0][0].scene, "current_status")
+        self.assertEqual(calls[0][1], "原神下一个版本的角色是谁")
+
+    def test_external_read_keeps_two_official_scopes_for_unrelated_policy_queries(self):
+        calls = []
+
+        async def execute_external_read(plan, _context):
+            calls.append(plan)
+            return "done"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            lambda _query, _is_owner: "unused",
+            execute_external_read=execute_external_read,
+        )
+
+        asyncio.run(
+            registry.execute(
+                "external_read",
+                {
+                    "query": "某政策 官方全文",
+                    "source_scope": "official",
+                    "secondary_query": "某政策 官方实施细则",
+                    "secondary_source_scope": "official",
+                    "secondary_mode": "always",
+                },
+                self.tool_registry.ToolContext(
+                    query="查询某政策及其实施细则",
+                    is_owner=True,
+                    is_group=False,
+                ),
+            )
+        )
+
+        self.assertEqual(calls[0].secondary_source_scope, "official")
+
+    def test_external_read_keeps_official_only_current_status_sources(self):
+        calls = []
+
+        async def execute_external_read(plan, _context):
+            calls.append(plan)
+            return "done"
+
+        registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
+            lambda _query, _is_owner: "unused",
+            execute_external_read=execute_external_read,
+        )
+
+        asyncio.run(
+            registry.execute(
+                "external_read",
+                {
+                    "query": "原神 下一版本 官方前瞻",
+                    "source_scope": "official",
+                    "secondary_query": "原神 下一版本 角色复刻",
+                    "secondary_source_scope": "official",
+                    "secondary_time_range": "month",
+                    "secondary_evidence_role": "official_confirmation",
+                    "secondary_mode": "always",
+                    "scene": "current_status",
+                },
+                self.tool_registry.ToolContext(
+                    query="只看官方：原神下一个版本的角色是谁",
+                    is_owner=True,
+                    is_group=False,
+                ),
+            )
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].primary_source_scope, "official")
+        self.assertEqual(calls[0].secondary_source_scope, "official")
+        self.assertEqual(calls[0].scene, "current_status")
 
     def test_read_only_runner_executes_semantic_agent_task_read(self):
         calls = []

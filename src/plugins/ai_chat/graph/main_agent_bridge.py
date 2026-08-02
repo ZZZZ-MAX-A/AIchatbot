@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import TypeAlias
 
 from ..document_artifacts import (
@@ -14,6 +15,11 @@ from ..document_artifacts import (
     presentation_slide_count,
 )
 from ..failure_diagnostics import format_failure_user_message
+from ..external_read_security import (
+    adapt_external_read_scene_plan,
+    ExternalReadSearchPlan,
+    external_read_query_requires_official_sources,
+)
 from ..policy.engine import PolicyDecisionType, ToolPolicyInput, decide_tool_policy
 from ..policy.risk import RiskLevel
 from .main_agent import (
@@ -35,12 +41,17 @@ from .tool_registry import (
     ToolExecutionError,
     ToolExecutor,
     ToolRegistry,
+    ToolSpec,
     create_default_main_agent_tool_registry,
 )
 
 
 ReadOnlyDevContextTool: TypeAlias = Callable[[str, bool], str | Awaitable[str]]
 OwnerReadCommandTool: TypeAlias = Callable[[str, ToolContext], str | Awaitable[str]]
+ExternalReadTool: TypeAlias = Callable[
+    [ExternalReadSearchPlan, ToolContext],
+    str | Awaitable[str],
+]
 OwnerWriteCommandTool: TypeAlias = Callable[[str, ToolContext], str]
 AgentTaskReadTool: TypeAlias = Callable[
     [str, str, ToolContext],
@@ -57,6 +68,32 @@ ApprovalRequestHandler: TypeAlias = Callable[
 ]
 
 OWNER_READ_COMMAND_TOOL_NAME = "owner_read_command"
+EXTERNAL_READ_TOOL_NAME = "external_read"
+
+_UPCOMING_EXTERNAL_READ_MARKERS = (
+    "下一个",
+    "下一",
+    "即将",
+    "未来",
+    "未发布",
+    "next",
+    "upcoming",
+    "future",
+    "unreleased",
+)
+_MIXED_EVIDENCE_EXTERNAL_READ_MARKERS = (
+    "角色",
+    "复刻",
+    "卡池",
+    "阵容",
+    "名单",
+    "选角",
+    "character",
+    "rerun",
+    "roster",
+    "lineup",
+    "casting",
+)
 OWNER_WRITE_COMMAND_TOOL_NAME = "owner_write_command"
 DOCUMENT_DELIVERY_TOOL_NAME = "document_delivery_command"
 AGENT_TASK_READ_TOOL_NAME = "agent_task_read"
@@ -159,6 +196,7 @@ def create_read_only_main_agent_runner(
     *,
     retrieve_dev_context: ReadOnlyDevContextTool,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
+    execute_external_read: ExternalReadTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
     execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
@@ -174,6 +212,7 @@ def create_read_only_main_agent_runner(
     active_tool_registry = tool_registry or create_read_only_main_agent_tool_registry(
         retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
+        execute_external_read=execute_external_read,
         execute_owner_write_command=execute_owner_write_command,
         execute_document_delivery_command=execute_document_delivery_command,
         execute_agent_task_read=execute_agent_task_read,
@@ -209,6 +248,10 @@ def create_read_only_main_agent_runner(
             risk_level_for_tool=lambda state: active_tool_registry.require(
                 state.requested_tool
             ).risk_level,
+            enable_external_read=any(
+                spec.risk_level == RiskLevel.READ_EXTERNAL
+                for spec in active_tool_registry.visible_specs()
+            ),
             enable_local_write=any(
                 spec.risk_level == RiskLevel.WRITE_LOCAL
                 for spec in active_tool_registry.visible_specs()
@@ -225,6 +268,7 @@ def create_read_only_main_agent_runtime_handler(
     *,
     retrieve_dev_context: ReadOnlyDevContextTool,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
+    execute_external_read: ExternalReadTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
     execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
@@ -240,6 +284,7 @@ def create_read_only_main_agent_runtime_handler(
     runner = create_read_only_main_agent_runner(
         retrieve_dev_context=retrieve_dev_context,
         execute_owner_read_command=execute_owner_read_command,
+        execute_external_read=execute_external_read,
         execute_owner_write_command=execute_owner_write_command,
         execute_document_delivery_command=execute_document_delivery_command,
         execute_agent_task_read=execute_agent_task_read,
@@ -271,6 +316,9 @@ def create_read_only_main_agent_runtime_handler(
                 "group_id": state.session.group_id or "",
                 "explicit_dev_context": bool(
                     command_artifact.get("explicit_dev_context")
+                ),
+                "trusted_current_date": str(
+                    command_artifact.get("trusted_current_date") or ""
                 ),
             },
         )
@@ -346,6 +394,7 @@ def create_read_only_main_agent_tool_registry(
     retrieve_dev_context: ReadOnlyDevContextTool,
     *,
     execute_owner_read_command: OwnerReadCommandTool | None = None,
+    execute_external_read: ExternalReadTool | None = None,
     execute_owner_write_command: OwnerWriteCommandTool | None = None,
     execute_document_delivery_command: OwnerWriteCommandTool | None = None,
     execute_agent_task_read: AgentTaskReadTool | None = None,
@@ -396,6 +445,8 @@ def create_read_only_main_agent_tool_registry(
                 approval_resume_enabled=False,
             )
         )
+    if execute_external_read is not None:
+        specs.append(_external_read_tool_spec(execute_external_read))
     if execute_agent_task_read is not None:
         specs.append(
             type(spec)(
@@ -514,6 +565,128 @@ def create_read_only_main_agent_tool_registry(
             )
         )
     return ToolRegistry(specs)
+
+
+def _external_read_tool_spec(execute_external_read: ExternalReadTool) -> ToolSpec:
+    return ToolSpec(
+        name=EXTERNAL_READ_TOOL_NAME,
+        description=(
+            "Run one owner-private read-only public internet search and return a "
+            "Chinese evidence answer. Choose this only when the owner explicitly asks "
+            "to search/check online, or when a reliable answer requires current public "
+            "information such as news, prices, weather, releases, policies, schedules, "
+            "or live service documentation. Never use it for casual conversation, "
+            "creative writing, private/personal facts, chat history, memory, local runtime "
+            "state, project development context, or questions answerable without current "
+            "web evidence. First understand the owner's intent, relative time, entity, and "
+            "evidence needs, then write arguments.query as the exact primary search-engine "
+            "query using at most 50 characters. Choose arguments.source_scope from official, "
+            "general, or news, and choose arguments.scene from general_lookup, official_update, "
+            "current_status, technical_docs, news_summary, recommendation, or comparison. "
+            "Optionally choose arguments.time_range from day, week, "
+            "month, six_months, or year. Set arguments.evidence_role to context, direct_answer, "
+            "official_confirmation, reported_candidate, or recommendation so the isolated "
+            "synthesizer knows what the query is intended to prove. Use official only when "
+            "first-party confirmation materially "
+            "matters; local food, travel, reputation, and recommendation questions normally "
+            "use general and must not force an official stage. General may still return official "
+            "pages; it does not discard reputable non-official evidence. For an upcoming game "
+            "version, unreleased character, rerun roster, casting decision, or future product, "
+            "prefer two complementary news queries with distinct time ranges: one using preview "
+            "or announcement language for official_confirmation and one using the user's direct "
+            "entity need for reported_candidate. Do not require an official-only domain stage. "
+            "Optional arguments.secondary_query "
+            "is a distinct complementary query of at most 50 characters. When present, also set "
+            "secondary_source_scope, secondary_time_range, secondary_evidence_role, and "
+            "secondary_mode to if_no_results or always. Otherwise omit all secondary arguments. "
+            "Use no more than two queries total. Never include a "
+            "URL, credential, local path, private data, instruction to retry, or copied filler. "
+            "For a vague recent query, use at most a rolling six-month conditional fallback, "
+            "not one year. After an official primary stage has no qualified evidence, that "
+            "conditional fallback may use general scope with reported_candidate evidence, "
+            "unless the owner explicitly requested official-only sources. The executor permits "
+            "at most two fixed-provider reads, at most one isolated evidence synthesis, zero "
+            "retries, and zero provider fallback."
+        ),
+        risk_level=RiskLevel.READ_EXTERNAL,
+        required_arguments=("query", "source_scope"),
+        optional_arguments=(
+            "scene",
+            "time_range",
+            "evidence_role",
+            "secondary_query",
+            "secondary_source_scope",
+            "secondary_time_range",
+            "secondary_evidence_role",
+            "secondary_mode",
+        ),
+        executor=create_external_read_executor(execute_external_read),
+        enabled=True,
+        llm_visible=True,
+        requires_approval=False,
+        approval_resume_enabled=False,
+    )
+
+
+def create_external_read_executor(
+    execute_external_read: ExternalReadTool,
+) -> ToolExecutor:
+    async def execute_external(arguments, context: ToolContext):
+        if not context.is_owner or context.is_group:
+            raise ToolExecutionError(
+                "external_read requires an owner private-chat context"
+            )
+        secondary_query = str(arguments.get("secondary_query") or "").strip()
+        secondary_source_scope = str(
+            arguments.get("secondary_source_scope") or ""
+        ).strip()
+        secondary_time_range = str(
+            arguments.get("secondary_time_range") or ""
+        ).strip()
+        secondary_evidence_role = str(
+            arguments.get("secondary_evidence_role") or ""
+        ).strip()
+        secondary_mode = str(arguments.get("secondary_mode") or "none").strip()
+        try:
+            plan = ExternalReadSearchPlan(
+                primary_query=str(arguments["query"]).strip(),
+                primary_source_scope=str(arguments["source_scope"]).strip(),
+                primary_time_range=str(arguments.get("time_range") or "").strip(),
+                primary_evidence_role=str(
+                    arguments.get("evidence_role") or "direct_answer"
+                ).strip(),
+                secondary_query=secondary_query,
+                secondary_source_scope=secondary_source_scope,
+                secondary_time_range=secondary_time_range,
+                secondary_evidence_role=secondary_evidence_role,
+                secondary_mode=secondary_mode,
+                scene=str(arguments.get("scene") or "general_lookup").strip(),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError(f"external_read search plan is invalid: {exc}") from exc
+        plan = adapt_external_read_scene_plan(
+            plan,
+            source_query=context.query,
+        )
+        coverage_text = " ".join(
+            (context.query, plan.primary_query, plan.secondary_query)
+        ).casefold()
+        if (
+            plan.planning_mode == "main_agent"
+            and plan.primary_source_scope == "official"
+            and plan.secondary_source_scope == "official"
+            and plan.secondary_mode != "none"
+            and any(marker in coverage_text for marker in _UPCOMING_EXTERNAL_READ_MARKERS)
+            and any(
+                marker in coverage_text
+                for marker in _MIXED_EVIDENCE_EXTERNAL_READ_MARKERS
+            )
+            and not external_read_query_requires_official_sources(context.query)
+        ):
+            plan = replace(plan, secondary_source_scope="news")
+        return str(await _maybe_await(execute_external_read(plan, context)))
+
+    return execute_external
 
 
 def create_owner_read_command_executor(

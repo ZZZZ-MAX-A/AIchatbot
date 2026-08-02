@@ -7,6 +7,9 @@ param(
     [switch]$EnableMainLlmContractProbe,
     [switch]$EnableTtsSynthesisProbe,
     [switch]$EnableCloudVisionProbe,
+    [switch]$EnableApprovalActions,
+    [switch]$EnableTaskActions,
+    [switch]$EnableAccessActions,
     [switch]$Build,
     [switch]$Foreground,
     [switch]$CheckOnly
@@ -42,6 +45,30 @@ function Test-OwnerConsoleProcess {
     param([object]$ProcessInfo)
 
     return $ProcessInfo.CommandLine -like "*src.owner_console_fastapi_launcher:app*"
+}
+
+function Test-OwnerConsoleHealth {
+    param(
+        [string]$HealthHost,
+        [int]$HealthPort
+    )
+
+    $requestHost = if ($HealthHost -in @("0.0.0.0", "::", "[::]")) {
+        "127.0.0.1"
+    } else {
+        $HealthHost
+    }
+    if ($requestHost.Contains(":") -and -not $requestHost.StartsWith("[")) {
+        $requestHost = "[$requestHost]"
+    }
+    $healthUrl = "http://$requestHost`:$HealthPort/healthz"
+
+    try {
+        $response = Invoke-RestMethod -Method Get -Uri $healthUrl -TimeoutSec 1
+    } catch {
+        return $false
+    }
+    return $response.ok -eq $true -and $response.service -eq "owner-console"
 }
 
 function Reset-ProcessPathEnvironment {
@@ -145,6 +172,9 @@ $env:OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = if ($EnableMainLlmContractProbe) 
 $env:OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED = if ($EnableTtsSynthesisProbe) { "true" } else { "false" }
 $env:OWNER_CONSOLE_VISION_INFERENCE_ENABLED = "false"
 $env:OWNER_CONSOLE_CLOUD_VISION_ENABLED = if ($EnableCloudVisionProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_APPROVAL_ACTIONS_ENABLED = if ($EnableApprovalActions) { "true" } else { "false" }
+$env:OWNER_CONSOLE_TASK_ACTIONS_ENABLED = if ($EnableTaskActions) { "true" } else { "false" }
+$env:OWNER_CONSOLE_ACCESS_ACTIONS_ENABLED = if ($EnableAccessActions) { "true" } else { "false" }
 
 $arguments = @(
     "-m",
@@ -174,14 +204,25 @@ $process = Start-Process `
     -WindowStyle Hidden `
     -PassThru
 
+$startupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$startupDeadline = [DateTime]::UtcNow.AddSeconds(10)
 $startedListeners = @()
-for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    Start-Sleep -Seconds 1
-    $startedListeners = @(Get-PortListener -LocalPort $Port | Where-Object { Test-OwnerConsoleProcess $_ })
-    if ($startedListeners.Count -gt 0 -or $process.HasExited) {
+do {
+    if (Test-OwnerConsoleHealth -HealthHost $HostAddress -HealthPort $Port) {
+        $startedListeners = @(
+            Get-PortListener -LocalPort $Port |
+                Where-Object { Test-OwnerConsoleProcess $_ }
+        )
+        if ($startedListeners.Count -gt 0) {
+            break
+        }
+    }
+    if ($process.HasExited) {
         break
     }
-}
+    Start-Sleep -Milliseconds 200
+} while ([DateTime]::UtcNow -lt $startupDeadline)
+$startupStopwatch.Stop()
 
 if ($startedListeners.Count -eq 0) {
     Write-Host "Owner Console failed to start. Check logs:"
@@ -193,6 +234,7 @@ if ($startedListeners.Count -eq 0) {
 Write-Host "Owner Console started."
 Write-Host "URL: http://$HostAddress`:$Port/owner-console"
 Write-Host "ProcessId: $($process.Id)"
+Write-Host "Ready in: $($startupStopwatch.ElapsedMilliseconds) ms"
 Write-Host "Logs:"
 Write-Host "  $outLog"
 Write-Host "  $errLog"

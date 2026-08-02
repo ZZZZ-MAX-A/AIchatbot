@@ -44,6 +44,7 @@ from .agent_tasks import (
     parse_agent_task_id,
     resume_agent_approval,
 )
+from .external_read_ephemeral_details import get_external_read_ephemeral_detail
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,21 @@ def format_owner_agent_task_read(
             user_id=context.user_id,
             task_id=task.id,
         )
-        return format_agent_task_detail(task, events, approvals)
+        reply = format_agent_task_detail(task, events, approvals)
+        ephemeral_detail = get_external_read_ephemeral_detail(
+            session_key=context.session_key,
+            user_id=context.user_id,
+            task_id=task.id,
+        )
+        if ephemeral_detail:
+            reply = "\n\n".join(
+                (
+                    reply,
+                    "本次 Bot 运行期联网详情（未写入任务数据库，重启后失效）：\n"
+                    + ephemeral_detail,
+                )
+            )
+        return reply
     if command == "approval_detail":
         approval_id = parse_agent_task_id(reference)
         if approval_id is None and (not reference or is_latest_agent_reference(reference)):

@@ -53,6 +53,11 @@ class ChatRequest:
     key: str
     text: str
     image_context: ChatImageContext
+    persona_id: str = ""
+    role_card_key: str = ""
+    persistent_memory_enabled: bool = True
+    persona_memory_enabled: bool = False
+    tts_enabled: bool = True
 
 
 @dataclass(frozen=True)

@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -7,11 +8,71 @@ from .config import AiChatConfig
 from .role_cards import (
     active_role_card,
     load_active_role_card_prompt,
+    load_role_card_prompt,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SYSTEM_PROMPT_PATH = PROJECT_ROOT / "prompts" / "system.md"
+
+
+@dataclass(frozen=True)
+class ChatCompletionRoute:
+    api_key: str = field(repr=False)
+    base_url: str
+    model: str
+    timeout_seconds: int
+    source: str
+
+
+def resolve_chat_completion_route(
+    config: AiChatConfig,
+    role_card_key: str = "",
+) -> ChatCompletionRoute:
+    """Select an explicitly allowlisted persona endpoint or the legacy route.
+
+    The alternate route is deliberately limited to normal persona replies.
+    Summary and memory-compression calls continue to use the legacy DeepSeek
+    endpoint, which keeps those pipelines stable and makes rollback a single
+    environment flag change.
+    """
+
+    legacy_route = ChatCompletionRoute(
+        api_key=config.openai_api_key,
+        base_url=config.openai_base_url,
+        model=config.openai_model,
+        timeout_seconds=config.ai_timeout_seconds,
+        source="legacy",
+    )
+    normalized_role_card_key = role_card_key.strip()
+    if not (
+        getattr(config, "enable_persona_llm_routing", False)
+        and normalized_role_card_key
+        and normalized_role_card_key
+        in getattr(config, "persona_llm_role_card_keys", frozenset())
+    ):
+        return legacy_route
+
+    values = {
+        "PERSONA_LLM_API_KEY": getattr(config, "persona_llm_api_key", "").strip(),
+        "PERSONA_LLM_BASE_URL": getattr(config, "persona_llm_base_url", "").strip(),
+        "PERSONA_LLM_MODEL": getattr(config, "persona_llm_model", "").strip(),
+    }
+    missing = [name for name, value in values.items() if not value]
+    timeout_seconds = int(getattr(config, "persona_llm_timeout_seconds", 0))
+    if timeout_seconds <= 0:
+        missing.append("PERSONA_LLM_TIMEOUT_SECONDS")
+    if missing:
+        raise RuntimeError(
+            "persona LLM route is enabled but incomplete: " + ", ".join(missing)
+        )
+    return ChatCompletionRoute(
+        api_key=values["PERSONA_LLM_API_KEY"],
+        base_url=values["PERSONA_LLM_BASE_URL"],
+        model=values["PERSONA_LLM_MODEL"],
+        timeout_seconds=timeout_seconds,
+        source="persona",
+    )
 
 
 def load_system_prompt() -> str:
@@ -20,8 +81,12 @@ def load_system_prompt() -> str:
     return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
-def load_persona_prompt() -> str:
-    prompt = load_active_role_card_prompt()
+def load_persona_prompt(role_card_key: str = "") -> str:
+    prompt = (
+        load_role_card_prompt(role_card_key)
+        if role_card_key.strip()
+        else load_active_role_card_prompt()
+    )
     if not prompt:
         return ""
     return (
@@ -83,21 +148,25 @@ async def ask_llm(
     user_text: str,
     *,
     extra_system_context: str = "",
+    role_card_key: str = "",
 ) -> str:
-    if not config.openai_api_key:
+    route = resolve_chat_completion_route(config, role_card_key)
+    if not route.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
     client = AsyncOpenAI(
-        api_key=config.openai_api_key,
-        base_url=config.openai_base_url,
-        timeout=config.ai_timeout_seconds,
+        api_key=route.api_key,
+        base_url=route.base_url,
+        timeout=route.timeout_seconds,
     )
 
     messages = [{"role": "system", "content": load_system_prompt()}]
     base_prompt = load_base_chat_prompt()
     if base_prompt:
         messages.append({"role": "system", "content": base_prompt})
-    persona_prompt = load_persona_prompt()
+    persona_prompt = load_persona_prompt(role_card_key)
+    if role_card_key.strip() and not persona_prompt:
+        raise RuntimeError(f"configured role card is unavailable: {role_card_key}")
     if persona_prompt:
         messages.append({"role": "system", "content": persona_prompt})
     if extra_system_context.strip():
@@ -106,7 +175,7 @@ async def ask_llm(
     messages.append({"role": "user", "content": user_text})
 
     response = await client.chat.completions.create(
-        model=config.openai_model,
+        model=route.model,
         messages=messages,
         temperature=config.ai_temperature,
     )

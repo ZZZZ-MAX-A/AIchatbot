@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -65,15 +66,44 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
         self.assertEqual(config.chat_llm_model, "deepseek-v4-flash")
         self.assertEqual(config.chat_llm_timeout_seconds, config.ai_timeout_seconds)
+        self.assertFalse(config.enable_persona_llm_routing)
+        self.assertEqual(config.persona_llm_role_card_keys, frozenset())
+        self.assertEqual(config.persona_llm_api_key, "")
+        self.assertEqual(config.persona_llm_base_url, "")
+        self.assertEqual(config.persona_llm_model, "")
+        self.assertEqual(
+            config.persona_llm_timeout_seconds,
+            config.ai_timeout_seconds,
+        )
+        self.assertFalse(config.enable_persona_vision_routing)
+        self.assertEqual(config.persona_vision_role_card_keys, frozenset())
+        self.assertEqual(config.persona_vision_model, "")
+        self.assertEqual(
+            config.persona_vision_timeout_seconds,
+            config.ai_timeout_seconds,
+        )
+        self.assertEqual(
+            config.persona_vision_private_image_wait_seconds,
+            -1,
+        )
+        self.assertFalse(config.enable_chat_weather)
+        self.assertEqual(config.chat_weather_mode, "off")
+        self.assertEqual(config.chat_weather_provider, "open_meteo")
+        self.assertEqual(config.chat_weather_default_location, "")
+        self.assertEqual(config.chat_weather_default_latitude, 0.0)
+        self.assertEqual(config.chat_weather_default_longitude, 0.0)
+        self.assertEqual(config.chat_weather_timeout_seconds, 5.0)
         self.assertEqual(config.vision_provider, "aliyun_bailian")
         self.assertEqual(config.vision_cloud_model, "qwen3.7-flash")
         self.assertEqual(config.aliyun_bailian_base_url, "")
         self.assertEqual(config.aliyun_bailian_api_key, "")
+        self.assertEqual(config.vision_trusted_local_roots, ())
         self.assertFalse(config.enable_memory_rag)
         self.assertFalse(config.enable_project_doc_rag)
         self.assertEqual(config.memory_rag_embedding_provider, "ollama")
         self.assertEqual(config.memory_rag_embedding_model, "bge-m3")
         self.assertEqual(config.memory_rag_embedding_base_url, "http://127.0.0.1:11434")
+        self.assertEqual(config.memory_rag_embedding_num_gpu, -1)
         self.assertEqual(config.memory_rag_top_k, 5)
         self.assertEqual(config.memory_rag_min_score, 0.55)
         self.assertEqual(config.project_doc_rag_top_k, 4)
@@ -85,6 +115,18 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertFalse(config.memory_rag_include_gap_scene_summaries)
         self.assertTrue(config.memory_rag_owner_only_debug)
         self.assertFalse(config.memory_rag_inject_in_chat)
+        self.assertFalse(config.persona_routing.routing_v2_enabled)
+        self.assertFalse(config.persona_routing.memory_v2_enabled)
+        self.assertEqual(config.persona_routing.routing_v2_bot_ids, frozenset())
+        self.assertEqual(config.persona_routing.memory_v2_bot_ids, frozenset())
+        self.assertEqual(config.persona_routing.legacy_persona_id, "aike")
+        self.assertEqual(config.persona_routing.legacy_role_card_key, "aike")
+        self.assertEqual(config.persona_routing.bindings, ())
+        self.assertEqual(config.persona_routing.binding_errors, ())
+        self.assertEqual(config.max_private_message_length, 150)
+        self.assertEqual(config.owner_max_private_message_length, 220)
+        self.assertEqual(config.tts_max_chars, 260)
+        self.assertEqual(config.tts_max_total_seconds, 60)
 
     def test_chat_llm_falls_back_to_legacy_openai_compatible_settings(self):
         config = self.load_with_env(
@@ -100,6 +142,35 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_llm_base_url, "https://legacy.example/v1")
         self.assertEqual(config.chat_llm_model, "legacy-chat")
         self.assertEqual(config.chat_llm_timeout_seconds, 33)
+
+    def test_persona_v2_configuration_is_explicit_and_observe_only(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_PERSONA_ROUTING_V2": "true",
+                "ENABLE_PERSONA_MEMORY_V2": "true",
+                "PERSONA_ROUTING_V2_BOT_IDS": "10001,20002",
+                "PERSONA_MEMORY_V2_BOT_IDS": "20002",
+                "LEGACY_PERSONA_ID": "aike",
+                "LEGACY_ROLE_CARD_KEY": "aike",
+                "BOT_PERSONA_BINDINGS": (
+                    "10001=aike:aike;20002=luna:luna-card"
+                ),
+            }
+        )
+
+        settings = config.persona_routing
+        self.assertTrue(settings.routing_v2_enabled)
+        self.assertTrue(settings.memory_v2_enabled)
+        self.assertEqual(settings.routing_v2_bot_ids, {"10001", "20002"})
+        self.assertEqual(settings.memory_v2_bot_ids, {"20002"})
+        self.assertEqual(
+            [(item.bot_self_id, item.persona_id, item.role_card_key) for item in settings.bindings],
+            [
+                ("10001", "aike", "aike"),
+                ("20002", "luna", "luna-card"),
+            ],
+        )
+        self.assertEqual(settings.binding_errors, ())
 
     def test_chat_llm_overrides_do_not_change_main_llm_settings(self):
         config = self.load_with_env(
@@ -126,6 +197,34 @@ class ConfigLoadingTests(unittest.TestCase):
         config_repr = repr(config)
         self.assertNotIn("main-key", config_repr)
         self.assertNotIn("chat-key", config_repr)
+
+    def test_persona_llm_route_is_explicit_and_keeps_secret_out_of_repr(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_PERSONA_LLM_ROUTING": "true",
+                "PERSONA_LLM_ROLE_CARD_KEYS": "linyin",
+                "PERSONA_LLM_API_KEY": "persona-secret",
+                "PERSONA_LLM_BASE_URL": "https://persona.example/v1",
+                "PERSONA_LLM_MODEL": "persona-model",
+                "PERSONA_LLM_TIMEOUT_SECONDS": "75",
+                "ENABLE_PERSONA_VISION_ROUTING": "true",
+                "PERSONA_VISION_ROLE_CARD_KEYS": "linyin",
+                "PERSONA_VISION_MODEL": "persona-vision-model",
+                "PERSONA_VISION_TIMEOUT_SECONDS": "80",
+            }
+        )
+
+        self.assertTrue(config.enable_persona_llm_routing)
+        self.assertEqual(config.persona_llm_role_card_keys, {"linyin"})
+        self.assertEqual(config.persona_llm_api_key, "persona-secret")
+        self.assertEqual(config.persona_llm_base_url, "https://persona.example/v1")
+        self.assertEqual(config.persona_llm_model, "persona-model")
+        self.assertEqual(config.persona_llm_timeout_seconds, 75)
+        self.assertTrue(config.enable_persona_vision_routing)
+        self.assertEqual(config.persona_vision_role_card_keys, {"linyin"})
+        self.assertEqual(config.persona_vision_model, "persona-vision-model")
+        self.assertEqual(config.persona_vision_timeout_seconds, 80)
+        self.assertNotIn("persona-secret", repr(config))
 
     def test_invalid_tavily_timeout_loads_fail_closed_sentinel(self):
         config = self.load_with_env(
@@ -167,6 +266,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     "https://ws-unit123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
                 ),
                 "ALIYUN_BAILIAN_API_KEY": "bailian-secret",
+                "USERPROFILE": "D:\\Users\\unit",
+                "VISION_TRUSTED_LOCAL_ROOTS": (
+                    "%USERPROFILE%\\NapCat Cache;relative-vision-cache"
+                ),
                 "ENABLE_LOCAL_STICKERS": "true",
                 "LOCAL_STICKER_MAX_FILE_BYTES": "1024",
                 "LOCAL_STICKER_MAX_DYNAMIC_FILE_BYTES": "2048",
@@ -192,6 +295,13 @@ class ConfigLoadingTests(unittest.TestCase):
                 "CHAT_STICKER_MAX_PER_HOUR": "5",
                 "CHAT_STICKER_MAX_PER_REPLY": "1",
                 "CHAT_STICKER_MIN_INTENT_CONFIDENCE": "0.88",
+                "ENABLE_CHAT_WEATHER": "true",
+                "CHAT_WEATHER_MODE": "owner_auto",
+                "CHAT_WEATHER_PROVIDER": "open_meteo",
+                "CHAT_WEATHER_DEFAULT_LOCATION": "萍乡",
+                "CHAT_WEATHER_DEFAULT_LATITUDE": "27.62",
+                "CHAT_WEATHER_DEFAULT_LONGITUDE": "113.85",
+                "CHAT_WEATHER_TIMEOUT_SECONDS": "2.5",
                 "ENABLE_MEMORY_RAG": "true",
                 "ENABLE_PROJECT_DOC_RAG": "yes",
                 "MEMORY_RAG_EMBEDDING_PROVIDER": "unit",
@@ -199,6 +309,7 @@ class ConfigLoadingTests(unittest.TestCase):
                 "MEMORY_RAG_EMBEDDING_BASE_URL": "http://127.0.0.1:9999",
                 "MEMORY_RAG_EMBEDDING_DIMENSION": "3",
                 "MEMORY_RAG_EMBEDDING_TIMEOUT_SECONDS": "7",
+                "MEMORY_RAG_EMBEDDING_NUM_GPU": "0",
                 "MEMORY_RAG_TOP_K": "6",
                 "MEMORY_RAG_MIN_SCORE": "0.45",
                 "MEMORY_RAG_MAX_CONTEXT_CHARS": "700",
@@ -241,6 +352,16 @@ class ConfigLoadingTests(unittest.TestCase):
         )
         self.assertEqual(config.aliyun_bailian_api_key, "bailian-secret")
         self.assertNotIn("bailian-secret", repr(config))
+        self.assertEqual(
+            config.vision_trusted_local_roots,
+            (
+                Path("D:/Users/unit/NapCat Cache").resolve(strict=False),
+                (self.config_module.PROJECT_ROOT / "relative-vision-cache").resolve(
+                    strict=False
+                ),
+            ),
+        )
+        self.assertNotIn("NapCat Cache", repr(config))
         self.assertTrue(config.enable_local_stickers)
         self.assertEqual(config.local_sticker_max_file_bytes, 1024)
         self.assertEqual(config.local_sticker_max_dynamic_file_bytes, 2048)
@@ -270,9 +391,17 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_sticker_max_per_hour, 5)
         self.assertEqual(config.chat_sticker_max_per_reply, 1)
         self.assertEqual(config.chat_sticker_min_intent_confidence, 0.88)
+        self.assertTrue(config.enable_chat_weather)
+        self.assertEqual(config.chat_weather_mode, "owner_auto")
+        self.assertEqual(config.chat_weather_provider, "open_meteo")
+        self.assertEqual(config.chat_weather_default_location, "萍乡")
+        self.assertEqual(config.chat_weather_default_latitude, 27.62)
+        self.assertEqual(config.chat_weather_default_longitude, 113.85)
+        self.assertEqual(config.chat_weather_timeout_seconds, 2.5)
         self.assertTrue(config.enable_memory_rag)
         self.assertTrue(config.enable_project_doc_rag)
         self.assertEqual(config.memory_rag_embedding_provider, "unit")
+        self.assertEqual(config.memory_rag_embedding_num_gpu, 0)
         self.assertEqual(config.memory_rag_embedding_model, "toy")
         self.assertEqual(config.memory_rag_embedding_base_url, "http://127.0.0.1:9999")
         self.assertEqual(config.memory_rag_embedding_dimension, 3)
@@ -346,6 +475,23 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertTrue(config.enable_remote_sticker_classifier)
         self.assertEqual(config.sticker_classifier_timeout_seconds, 0)
         self.assertEqual(config.sticker_classifier_max_input_chars, 0)
+
+    def test_invalid_chat_weather_configuration_fails_closed(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_CHAT_WEATHER": "true",
+                "CHAT_WEATHER_MODE": "not-a-mode",
+                "CHAT_WEATHER_DEFAULT_LATITUDE": "invalid",
+                "CHAT_WEATHER_DEFAULT_LONGITUDE": "invalid",
+                "CHAT_WEATHER_TIMEOUT_SECONDS": "invalid",
+            }
+        )
+
+        self.assertTrue(config.enable_chat_weather)
+        self.assertEqual(config.chat_weather_mode, "off")
+        self.assertEqual(config.chat_weather_default_latitude, 0.0)
+        self.assertEqual(config.chat_weather_default_longitude, 0.0)
+        self.assertEqual(config.chat_weather_timeout_seconds, 0.0)
 
 
 if __name__ == "__main__":

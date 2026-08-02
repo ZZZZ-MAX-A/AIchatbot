@@ -12,7 +12,7 @@ from ..graph.main_agent_llm import (
     create_main_agent_tool_summary_handler,
 )
 from ..graph.tool_registry import ToolRegistry
-from .models import build_main_llm
+from .models import build_external_research_llm, build_main_llm
 
 
 class MainAgentLLMInvocationError(RuntimeError):
@@ -59,6 +59,14 @@ def create_main_llm_call(
         return await invoke_main_llm(model, messages)
 
     return call
+
+
+def create_external_research_llm_call(config: AiChatConfig) -> MainAgentLLMCall:
+    """Create the isolated zero-retry model call used after external search."""
+    return create_main_llm_call(
+        config,
+        llm=build_external_research_llm(config),
+    )
 
 
 def create_main_agent_lc_call_handler(

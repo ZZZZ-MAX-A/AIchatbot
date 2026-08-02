@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .agent_tasks import AGENT_APPROVAL_STATUSES, AGENT_TASK_STATUSES
+from .access_store import load_access_store
 from .config import PROJECT_ROOT, load_config
 from .owner_console_http_adapter import (
     OwnerConsoleHttpAdapterError,
@@ -28,8 +29,38 @@ from .owner_console_http_models import (
     OWNER_CONSOLE_HTTP_SCHEMA_VERSION,
     owner_console_http_action_error_response,
     owner_console_http_action_success_response,
+    owner_console_http_access_action_error_response,
+    owner_console_http_access_action_success_response,
+    owner_console_http_approval_action_error_response,
+    owner_console_http_approval_action_success_response,
+    owner_console_http_task_action_error_response,
+    owner_console_http_task_action_success_response,
     owner_console_http_error_response,
     owner_console_http_success_response,
+)
+from .owner_console_access_actions import (
+    OWNER_CONSOLE_ACCESS_ACTIONS_ENABLED_ENV,
+    OWNER_CONSOLE_ACCESS_ACTION_HEADERS,
+    OWNER_CONSOLE_ACCESS_CONFIRMATIONS,
+    OwnerConsoleAccessActionError,
+    OwnerConsoleAccessActionRuntime,
+)
+from .owner_console_approval_actions import (
+    OWNER_CONSOLE_APPROVAL_ACTIONS_ENABLED_ENV,
+    OWNER_CONSOLE_APPROVAL_APPROVE_ACTION_HEADER,
+    OWNER_CONSOLE_APPROVAL_APPROVE_CONFIRMATION,
+    OWNER_CONSOLE_APPROVAL_PREVIEW_LIMIT,
+    OWNER_CONSOLE_APPROVAL_REJECT_ACTION_HEADER,
+    OWNER_CONSOLE_APPROVAL_REJECT_CONFIRMATION,
+    OwnerConsoleApprovalActionError,
+    OwnerConsoleApprovalActionRuntime,
+)
+from .owner_console_task_actions import (
+    OWNER_CONSOLE_TASK_ACTIONS_ENABLED_ENV,
+    OWNER_CONSOLE_TASK_CANCEL_ACTION_HEADER,
+    OWNER_CONSOLE_TASK_CANCEL_CONFIRMATION,
+    OwnerConsoleTaskActionError,
+    OwnerConsoleTaskActionRuntime,
 )
 from .owner_console_manual_diagnostics import (
     MAIN_LLM_CONTRACT_ACTION_HEADER,
@@ -66,7 +97,11 @@ from .owner_console_manual_diagnostics import (
     OwnerConsoleCloudVisionReviewUnavailable,
     create_owner_console_manual_diagnostics_runtime,
 )
-from .owner_console_read_runtime import DEFAULT_PREVIEW_LIMIT, OWNER_CONSOLE_WORK_TYPES
+from .owner_console_read_runtime import (
+    DEFAULT_PREVIEW_LIMIT,
+    OWNER_CONSOLE_TASK_CATEGORIES,
+    OWNER_CONSOLE_WORK_TYPES,
+)
 
 
 OWNER_CONSOLE_FASTAPI_APP_TITLE = "AIchatbot Owner Console API"
@@ -150,6 +185,27 @@ def _owner_console_manual_diagnostics_enabled() -> bool:
     )
 
 
+def _owner_console_approval_actions_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_APPROVAL_ACTIONS_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_task_actions_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_TASK_ACTIONS_ENABLED_ENV,
+        False,
+    )
+
+
+def _owner_console_access_actions_enabled() -> bool:
+    return _owner_console_bool_env(
+        OWNER_CONSOLE_ACCESS_ACTIONS_ENABLED_ENV,
+        False,
+    )
+
+
 def _owner_console_project_doc_rag_probe_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED_ENV,
@@ -223,9 +279,20 @@ def _owner_console_prepare_static_dir() -> Path:
     return static_dir
 
 
-def _owner_console_runtime_from_config(config: Any) -> Any:
+def _owner_console_runtime_from_config(
+    config: Any,
+    *,
+    approval_actionability_provider: Any | None = None,
+    task_actions_enabled: bool = False,
+    access_actions_enabled: bool = False,
+    dynamic_access_provider: Any | None = None,
+) -> Any:
     return create_owner_console_http_read_runtime(
         config_provider=lambda: config,
+        approval_actionability_provider=approval_actionability_provider,
+        task_actions_enabled=task_actions_enabled,
+        access_actions_enabled=access_actions_enabled,
+        dynamic_access_provider=dynamic_access_provider,
     )
 
 
@@ -298,6 +365,81 @@ def _owner_console_action_error_response(
     message: str,
 ) -> JSONResponse:
     payload = owner_console_http_action_error_response(
+        resource,
+        code=code,
+        message=message,
+        details={},
+        http_api_enabled=True,
+    )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _owner_console_approval_action_success(resource: str, data: Any) -> dict[str, Any]:
+    return owner_console_http_approval_action_success_response(
+        resource,
+        data,
+        http_api_enabled=True,
+    )
+
+
+def _owner_console_approval_action_error_response(
+    resource: str,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    payload = owner_console_http_approval_action_error_response(
+        resource,
+        code=code,
+        message=message,
+        details={},
+        http_api_enabled=True,
+    )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _owner_console_task_action_success(resource: str, data: Any) -> dict[str, Any]:
+    return owner_console_http_task_action_success_response(
+        resource,
+        data,
+        http_api_enabled=True,
+    )
+
+
+def _owner_console_task_action_error_response(
+    resource: str,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    payload = owner_console_http_task_action_error_response(
+        resource,
+        code=code,
+        message=message,
+        details={},
+        http_api_enabled=True,
+    )
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+def _owner_console_access_action_success(resource: str, data: Any) -> dict[str, Any]:
+    return owner_console_http_access_action_success_response(
+        resource,
+        data,
+        http_api_enabled=True,
+    )
+
+
+def _owner_console_access_action_error_response(
+    resource: str,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    payload = owner_console_http_access_action_error_response(
         resource,
         code=code,
         message=message,
@@ -433,8 +575,32 @@ def _register_owner_console_static_routes(app: FastAPI, static_dir: Path) -> Non
 def create_owner_console_fastapi_app(
     *,
     manual_diagnostics_runtime: Any | None = None,
+    approval_action_runtime: Any | None = None,
+    task_action_runtime: Any | None = None,
+    access_action_runtime: Any | None = None,
     action_session_token: str | None = None,
 ) -> FastAPI:
+    approval_runtime = approval_action_runtime
+    if approval_runtime is None:
+        approval_runtime = OwnerConsoleApprovalActionRuntime(
+            enabled=_owner_console_approval_actions_enabled(),
+        )
+    approval_actions_enabled = bool(approval_runtime.enabled)
+    task_runtime = task_action_runtime
+    if task_runtime is None:
+        task_runtime = OwnerConsoleTaskActionRuntime(
+            enabled=_owner_console_task_actions_enabled(),
+        )
+    task_actions_enabled = bool(task_runtime.enabled)
+    access_runtime = access_action_runtime
+    if access_runtime is None:
+        access_runtime = OwnerConsoleAccessActionRuntime(
+            enabled=_owner_console_access_actions_enabled(),
+        )
+    access_actions_enabled = bool(access_runtime.enabled)
+    business_write_enabled = (
+        approval_actions_enabled or task_actions_enabled or access_actions_enabled
+    )
     manual_runtime = manual_diagnostics_runtime
     if manual_runtime is None:
         manual_runtime = create_owner_console_manual_diagnostics_runtime(
@@ -480,6 +646,33 @@ def create_owner_console_fastapi_app(
     )
     enabled_route_names = set(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES)
     enabled_routes = list(OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES)
+    if approval_actions_enabled:
+        enabled_route_names.update({"approvals.approve", "approvals.reject"})
+        enabled_routes.extend(
+            [
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/approve",
+                f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/reject",
+            ]
+        )
+    if task_actions_enabled:
+        enabled_route_names.add("tasks.cancel")
+        enabled_routes.append(
+            f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks/{{task_id}}/cancel"
+        )
+    if access_actions_enabled:
+        for route_name in (
+            "private-whitelist",
+            "group-whitelist",
+            "user-blacklist",
+        ):
+            for operation in ("add", "remove"):
+                enabled_route_names.add(
+                    f"access-control.{route_name}.{operation}"
+                )
+                enabled_routes.append(
+                    f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/"
+                    f"{route_name}/{operation}"
+                )
     if project_doc_rag_action_enabled:
         enabled_route_names.add("manual-diagnostics.project-doc-rag")
         enabled_routes.append(
@@ -562,14 +755,17 @@ def create_owner_console_fastapi_app(
             "service": "owner-console",
             "schema_version": OWNER_CONSOLE_HTTP_SCHEMA_VERSION,
             "api_prefix": OWNER_CONSOLE_HTTP_API_PREFIX,
-            "read_only": True,
+            "read_only": not business_write_enabled,
             "snapshot_read_only": True,
             "http_api_enabled": True,
-            "web_write_enabled": False,
+            "web_write_enabled": business_write_enabled,
+            "approval_actions_enabled": approval_actions_enabled,
+            "task_actions_enabled": task_actions_enabled,
+            "access_control_actions_enabled": access_actions_enabled,
             "manual_diagnostic_actions_enabled": manual_action_enabled,
             "automatic_diagnostics_enabled": False,
             "configuration_write_enabled": False,
-            "business_data_write_enabled": False,
+            "business_data_write_enabled": business_write_enabled,
             "enabled_routes": enabled_routes,
         }
 
@@ -608,7 +804,11 @@ def create_owner_console_fastapi_app(
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+                task_actions_enabled=task_actions_enabled,
+            )
             overview = runtime.build_overview(
                 context,
                 task_limit=parsed_task_limit,
@@ -634,6 +834,9 @@ def create_owner_console_fastapi_app(
     async def owner_console_tasks(
         status: str | None = None,
         work_type: str | None = None,
+        category: str | None = None,
+        page: str | None = None,
+        page_size: str | None = None,
         limit: str | None = None,
     ) -> Any:
         try:
@@ -646,19 +849,40 @@ def create_owner_console_fastapi_app(
                 default=20,
                 field_name="limit",
             )
+            parsed_page = parse_owner_console_positive_int(
+                page,
+                default=1,
+                field_name="page",
+            )
+            parsed_page_size = parse_owner_console_positive_int(
+                page_size,
+                default=parsed_limit,
+                field_name="page_size",
+            )
             parsed_work_type = parse_owner_console_optional_status(
                 work_type,
                 allowed_statuses=OWNER_CONSOLE_WORK_TYPES,
                 field_name="work_type",
             )
+            parsed_category = parse_owner_console_optional_status(
+                category,
+                allowed_statuses=OWNER_CONSOLE_TASK_CATEGORIES,
+                field_name="category",
+            )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                task_actions_enabled=task_actions_enabled,
+            )
             task_list = runtime.build_task_list(
                 context,
                 status=parsed_status,
                 work_type=parsed_work_type,
+                category=parsed_category,
                 limit=parsed_limit,
+                page=parsed_page,
+                page_size=parsed_page_size,
             )
         except OwnerConsoleHttpAdapterError as exc:
             return _owner_console_adapter_error(
@@ -699,7 +923,11 @@ def create_owner_console_fastapi_app(
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+                task_actions_enabled=task_actions_enabled,
+            )
             task_detail = runtime.build_task_detail(
                 context,
                 parsed_task_id,
@@ -725,9 +953,126 @@ def create_owner_console_fastapi_app(
                 message="failed to build owner console task detail",
                 exc=exc,
             )
-        return _owner_console_success(
+        payload = _owner_console_success(
             "tasks",
             task_detail,
+        )
+        if not task_actions_enabled:
+            return payload
+        response = JSONResponse(content=payload)
+        response.set_cookie(
+            OWNER_CONSOLE_ACTION_COOKIE,
+            action_token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path=OWNER_CONSOLE_HTTP_API_PREFIX,
+        )
+        return response
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}/tasks/{{task_id}}/cancel",
+        response_model=None,
+    )
+    async def owner_console_task_cancel(task_id: str, request: Request) -> Any:
+        resource = f"tasks/{task_id}/cancel"
+        if not task_actions_enabled:
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="web task actions are disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="task action requires a same-origin loopback request",
+            )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            OWNER_CONSOLE_TASK_CANCEL_ACTION_HEADER
+        ):
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="task action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(cookie_token, action_token):
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="task action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="task action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": OWNER_CONSOLE_TASK_CANCEL_CONFIRMATION}:
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="task action confirmation is invalid",
+            )
+        try:
+            parsed_task_id = parse_owner_console_required_positive_int(
+                task_id,
+                field_name="task_id",
+            )
+            config = load_config()
+            context = build_owner_console_context_from_config(config)
+            action_result = await run_in_threadpool(
+                task_runtime.cancel,
+                context,
+                task_id=parsed_task_id,
+            )
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+                task_actions_enabled=task_actions_enabled,
+            )
+            task_detail = runtime.build_task_detail(
+                context,
+                parsed_task_id,
+                event_limit=20,
+                preview_limit=DEFAULT_PREVIEW_LIMIT,
+            )
+        except OwnerConsoleHttpAdapterError as exc:
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=exc.message,
+            )
+        except OwnerConsoleTaskActionError as exc:
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=str(exc),
+            )
+        except Exception:
+            return _owner_console_task_action_error_response(
+                resource,
+                status_code=500,
+                code="internal_error",
+                message="task action failed safely",
+            )
+        return _owner_console_task_action_success(
+            resource,
+            {"action": action_result, "task_detail": task_detail},
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals", response_model=None)
@@ -747,7 +1092,10 @@ def create_owner_console_fastapi_app(
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+            )
             approval_list = runtime.build_approval_list(
                 context,
                 status=parsed_status,
@@ -795,7 +1143,10 @@ def create_owner_console_fastapi_app(
             )
             config = load_config()
             context = build_owner_console_context_from_config(config)
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+            )
             approval_detail = runtime.build_approval_detail(
                 context,
                 parsed_approval_id,
@@ -821,13 +1172,177 @@ def create_owner_console_fastapi_app(
                 message="failed to build owner console approval detail",
                 exc=exc,
             )
-        return _owner_console_success(
+        payload = _owner_console_success(
             "approvals",
             approval_detail,
+        )
+        if not approval_actions_enabled:
+            return payload
+        response = JSONResponse(content=payload)
+        response.set_cookie(
+            OWNER_CONSOLE_ACTION_COOKIE,
+            action_token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path=OWNER_CONSOLE_HTTP_API_PREFIX,
+        )
+        return response
+
+    async def _run_owner_console_approval_action(
+        request: Request,
+        approval_id: str,
+        *,
+        approved: bool,
+    ) -> Any:
+        verb = "approve" if approved else "reject"
+        resource = f"approvals/{approval_id}/{verb}"
+        if not approval_actions_enabled:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="web approval actions are disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="approval action requires a same-origin loopback request",
+            )
+        expected_header = (
+            OWNER_CONSOLE_APPROVAL_APPROVE_ACTION_HEADER
+            if approved
+            else OWNER_CONSOLE_APPROVAL_REJECT_ACTION_HEADER
+        )
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != expected_header:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="approval action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(cookie_token, action_token):
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="approval action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="approval action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="approval action body is invalid",
+            )
+        expected_confirmation = (
+            OWNER_CONSOLE_APPROVAL_APPROVE_CONFIRMATION
+            if approved
+            else OWNER_CONSOLE_APPROVAL_REJECT_CONFIRMATION
+        )
+        if body != {"confirmation": expected_confirmation}:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="approval action confirmation is invalid",
+            )
+        try:
+            parsed_approval_id = parse_owner_console_required_positive_int(
+                approval_id,
+                field_name="approval_id",
+            )
+            config = load_config()
+            context = build_owner_console_context_from_config(config)
+            action_result = await run_in_threadpool(
+                approval_runtime.decide,
+                context,
+                approval_id=parsed_approval_id,
+                approved=approved,
+            )
+            runtime = _owner_console_runtime_from_config(
+                config,
+                approval_actionability_provider=approval_runtime.actionability,
+            )
+            approval_detail = runtime.build_approval_detail(
+                context,
+                parsed_approval_id,
+                event_limit=5,
+                preview_limit=OWNER_CONSOLE_APPROVAL_PREVIEW_LIMIT,
+            )
+        except OwnerConsoleHttpAdapterError as exc:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=exc.message,
+            )
+        except OwnerConsoleApprovalActionError as exc:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=str(exc),
+            )
+        except Exception:
+            return _owner_console_approval_action_error_response(
+                resource,
+                status_code=500,
+                code="internal_error",
+                message="approval action failed safely",
+            )
+        return _owner_console_approval_action_success(
+            resource,
+            {
+                "action": action_result,
+                "approval_detail": approval_detail,
+            },
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/approve",
+        response_model=None,
+    )
+    async def owner_console_approval_approve(
+        approval_id: str,
+        request: Request,
+    ) -> Any:
+        return await _run_owner_console_approval_action(
+            request,
+            approval_id,
+            approved=True,
+        )
+
+    @app.post(
+        f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}/reject",
+        response_model=None,
+    )
+    async def owner_console_approval_reject(
+        approval_id: str,
+        request: Request,
+    ) -> Any:
+        return await _run_owner_console_approval_action(
+            request,
+            approval_id,
+            approved=False,
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control", response_model=None)
     async def owner_console_access_control(
+        request: Request,
         item_limit: str | None = None,
     ) -> Any:
         try:
@@ -837,7 +1352,14 @@ def create_owner_console_fastapi_app(
                 field_name="item_limit",
             )
             config = load_config()
-            runtime = _owner_console_runtime_from_config(config)
+            runtime = _owner_console_runtime_from_config(
+                config,
+                access_actions_enabled=access_actions_enabled,
+                dynamic_access_provider=lambda: load_access_store(
+                    strict=True,
+                    path=access_runtime.store_path,
+                ),
+            )
             access_control = runtime.build_access_control_snapshot(
                 item_limit=parsed_item_limit,
             )
@@ -852,10 +1374,161 @@ def create_owner_console_fastapi_app(
                 message="failed to build owner console access control snapshot",
                 exc=exc,
             )
-        return _owner_console_success(
+        payload = _owner_console_success(
             "access-control",
             access_control,
         )
+        if not access_actions_enabled:
+            return payload
+        response = JSONResponse(content=payload)
+        response.set_cookie(
+            OWNER_CONSOLE_ACTION_COOKIE,
+            action_token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path=OWNER_CONSOLE_HTTP_API_PREFIX,
+        )
+        return response
+
+    async def _run_owner_console_access_action(
+        request: Request,
+        *,
+        list_name: str,
+        route_name: str,
+        operation: str,
+    ) -> Any:
+        resource = f"access-control/{route_name}/{operation}"
+        if not access_actions_enabled:
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="web access actions are disabled",
+            )
+        if not _owner_console_same_origin_request(request):
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="access action requires a same-origin loopback request",
+            )
+        action_key = (list_name, operation)
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
+            OWNER_CONSOLE_ACCESS_ACTION_HEADERS[action_key]
+        ):
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="access action header is invalid",
+            )
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(cookie_token, action_token):
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=403,
+                code="forbidden",
+                message="access action session is invalid",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="access action requires application/json",
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict) or set(body) != {
+            "item",
+            "revision",
+            "confirmation",
+        }:
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="access action body keys are invalid",
+            )
+        item = body.get("item")
+        revision = body.get("revision")
+        confirmation = body.get("confirmation")
+        if (
+            not isinstance(item, str)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or confirmation != OWNER_CONSOLE_ACCESS_CONFIRMATIONS[action_key]
+        ):
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=400,
+                code="bad_request",
+                message="access action body is invalid",
+            )
+        try:
+            action_result = await run_in_threadpool(
+                access_runtime.mutate,
+                list_name=list_name,
+                operation=operation,
+                item=item,
+                expected_revision=revision,
+            )
+            config = load_config()
+            runtime = _owner_console_runtime_from_config(
+                config,
+                access_actions_enabled=access_actions_enabled,
+                dynamic_access_provider=lambda: load_access_store(
+                    strict=True,
+                    path=access_runtime.store_path,
+                ),
+            )
+            snapshot = runtime.build_access_control_snapshot(item_limit=50)
+        except OwnerConsoleAccessActionError as exc:
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=exc.status_code,
+                code=exc.code,
+                message=str(exc),
+            )
+        except Exception:
+            return _owner_console_access_action_error_response(
+                resource,
+                status_code=500,
+                code="internal_error",
+                message="access action failed safely",
+            )
+        return _owner_console_access_action_success(
+            resource,
+            {"action": action_result, "access_control": snapshot},
+        )
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/private-whitelist/add", response_model=None)
+    async def owner_console_private_whitelist_add(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="private_whitelist", route_name="private-whitelist", operation="add")
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/private-whitelist/remove", response_model=None)
+    async def owner_console_private_whitelist_remove(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="private_whitelist", route_name="private-whitelist", operation="remove")
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/group-whitelist/add", response_model=None)
+    async def owner_console_group_whitelist_add(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="group_whitelist", route_name="group-whitelist", operation="add")
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/group-whitelist/remove", response_model=None)
+    async def owner_console_group_whitelist_remove(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="group_whitelist", route_name="group-whitelist", operation="remove")
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/user-blacklist/add", response_model=None)
+    async def owner_console_user_blacklist_add(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="user_blacklist", route_name="user-blacklist", operation="add")
+
+    @app.post(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control/user-blacklist/remove", response_model=None)
+    async def owner_console_user_blacklist_remove(request: Request) -> Any:
+        return await _run_owner_console_access_action(request, list_name="user_blacklist", route_name="user-blacklist", operation="remove")
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings", response_model=None)
     async def owner_console_settings() -> Any:

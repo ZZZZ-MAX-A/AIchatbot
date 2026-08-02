@@ -195,6 +195,16 @@ def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
 def classify_failure(value: object) -> FailureDiagnosis:
     text = sanitize_failure_text(value).lower()
 
+    if (
+        "externalreadresultvalidationerror" in text
+        or "external_read_report result validation failed" in text
+    ):
+        return FailureDiagnosis(
+            FailureCategory.DATA,
+            "data_validation_failed",
+            "外部只读搜索或综合结果未通过本地结构合同校验。",
+            "这不等于数据库、文件或索引损坏；系统未自动重试或覆盖本地数据。",
+        )
     if "too_many_slides" in text:
         return FailureDiagnosis(
             FailureCategory.DATA,

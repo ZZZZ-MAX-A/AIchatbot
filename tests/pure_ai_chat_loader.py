@@ -302,6 +302,14 @@ def load_local_time_module():
     )
 
 
+def load_chat_weather_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.chat_weather",
+        AI_CHAT_ROOT / "chat_weather.py",
+    )
+
+
 def load_sticker_library_module():
     ensure_ai_chat_packages()
     return load_module(
@@ -369,6 +377,10 @@ def load_sticker_selection_module():
 
 def load_tavily_search_modules():
     modules = load_external_search_modules()
+    modules["synthesis"] = load_module(
+        "src.plugins.ai_chat.external_research_synthesis",
+        AI_CHAT_ROOT / "external_research_synthesis.py",
+    )
     modules["tavily"] = load_module(
         "src.plugins.ai_chat.tavily_search",
         AI_CHAT_ROOT / "tavily_search.py",

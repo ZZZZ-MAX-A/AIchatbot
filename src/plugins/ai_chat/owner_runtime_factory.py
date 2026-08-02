@@ -85,6 +85,7 @@ class OwnerRuntimeFactory:
     subject_label: SubjectLabel
     clear_session_summaries: ClearSessionSummaries
     delete_session_summary: DeleteSessionSummary
+    rag_index_detail_lines_for_event: Callable[[Any], list[str]] | None = None
     owner_user_id_default: str = ""
     fact_memory_type: str = "fact_summary"
     preference_memory_type: str = "preference_summary"
@@ -126,7 +127,11 @@ class OwnerRuntimeFactory:
             role_card_list_lines=self.role_card_list_lines,
             model_config_status_lines=self.model_config_status_lines,
             access_overview_lines=self.access_overview_lines,
-            rag_index_detail_lines=self.rag_index_detail_lines,
+            rag_index_detail_lines=(
+                (lambda: self.rag_index_detail_lines_for_event(event))
+                if self.rag_index_detail_lines_for_event is not None
+                else self.rag_index_detail_lines
+            ),
             main_agent_observation_lines=self.main_agent_observation_lines,
             root_graph_observation_lines=self.root_graph_observation_lines,
             group_whitelist_reply=lambda: self.list_lines(

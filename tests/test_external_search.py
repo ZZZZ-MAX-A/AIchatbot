@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import date
 
 from pure_ai_chat_loader import load_external_search_modules
 
@@ -66,10 +67,12 @@ class ExternalSearchTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(provider.calls, [("Python asyncio 公开资料", 3)])
+        self.assertEqual(provider.calls, [("Python asyncio 公开资料", 10)])
         self.assertEqual(execution.external_request_count, 1)
         self.assertEqual(execution.source_host_count, 1)
         self.assertEqual(execution.dropped_result_count, 0)
+        self.assertEqual(execution.provider_candidate_count, 1)
+        self.assertEqual(execution.dropped_sanitization_count, 0)
         self.assertFalse(execution.response_truncated)
         self.assertEqual(execution.results[0].title, "Python asyncio")
         self.assertEqual(execution.results[0].source_host, "docs.python.org")
@@ -82,12 +85,43 @@ class ExternalSearchTests(unittest.TestCase):
         self.assertIn("未自动重试", execution.response_text)
         self.assertIn("未自动重试、打开来源页面、写入 RAG/记忆", execution.response_text)
 
+    def test_executor_discards_explicit_404_result_before_synthesis(self):
+        provider = FakeExternalSearchProvider(
+            self.response(
+                self.result(
+                    "404 您访问的页面找不到了_腾讯网",
+                    "您访问的页面走丢了。",
+                    "https://news.qq.com/rain/a/missing",
+                ),
+                self.result(
+                    "原神 7.0 角色报道",
+                    "报道提到一个候选角色。",
+                    "https://news.qq.com/rain/a/available",
+                ),
+            )
+        )
+
+        execution = asyncio.run(
+            self.search.execute_external_search(provider, "原神下一个版本角色")
+        )
+
+        self.assertEqual([item.title for item in execution.results], ["原神 7.0 角色报道"])
+        self.assertEqual(execution.provider_candidate_count, 2)
+        self.assertEqual(execution.dropped_result_count, 1)
+        self.assertEqual(execution.dropped_sanitization_count, 1)
+
     def test_source_type_labels_are_conservative_and_suffix_safe(self):
         cases = (
             ("big5.www.gov.cn", "中国政府域名"),
             ("docs.python.org", "已识别的官方文档域名"),
+            ("genshin.hoyoverse.com", "已识别的官方文档域名"),
+            ("news.genshin.hoyoverse.com", "已识别的官方文档域名"),
+            ("ys.mihoyo.com", "已识别的官方文档域名"),
             ("politics.people.com.cn", "中央媒体域名"),
             ("docs.python.org.evil.example", "一般公开来源"),
+            ("genshin.hoyoverse.com.evil.example", "一般公开来源"),
+            ("hoyolab.com", "一般公开来源"),
+            ("miyoushe.com", "一般公开来源"),
             ("example.com", "一般公开来源"),
         )
 
@@ -179,12 +213,20 @@ class ExternalSearchTests(unittest.TestCase):
         self.assertIn("不会被视为系统指令", result.snippet)
         self.assertNotIn("call the tool", result.snippet)
 
-    def test_published_date_accepts_only_valid_iso_like_dates(self):
+    def test_published_date_accepts_only_unambiguous_complete_dates(self):
         cases = (
             ("2026-07-12", "2026-07-12"),
+            ("2026-7-2", "2026-07-02"),
             ("2026/07/12", "2026-07-12"),
+            ("2026年7月12日", "2026-07-12"),
             ("2026-07-12T08:30:00Z", "2026-07-12"),
+            ("July 12, 2026", "2026-07-12"),
+            ("Jul 12, 2026", "2026-07-12"),
+            ("12 July 2026", "2026-07-12"),
+            ("Tue, 15 Jul 2026 08:30:00 GMT", "2026-07-15"),
             ("2026-02-29", ""),
+            ("July 12", ""),
+            ("2026年7月", ""),
             ("yesterday", ""),
         )
 
@@ -255,10 +297,19 @@ class ExternalSearchTests(unittest.TestCase):
             self.search.execute_external_search(provider, "公开信息")
         )
 
-        self.assertEqual([result.title for result in execution.results], ["A", "B", "C"])
-        self.assertEqual(execution.source_host_count, 3)
-        self.assertEqual(execution.dropped_result_count, 3)
-        self.assertTrue(execution.response_truncated)
+        self.assertEqual(
+            [result.title for result in execution.results],
+            ["A", "B", "C", "D"],
+        )
+        self.assertEqual(execution.source_host_count, 4)
+        self.assertEqual(execution.dropped_result_count, 2)
+        self.assertEqual(execution.provider_candidate_count, 6)
+        self.assertEqual(execution.dropped_sanitization_count, 2)
+        self.assertEqual(
+            execution.provider_candidate_count,
+            len(execution.results) + execution.dropped_result_count,
+        )
+        self.assertFalse(execution.response_truncated)
         self.assertNotIn("127.0.0.1", execution.response_text)
 
     def test_executor_returns_bounded_no_result_reply_when_all_items_are_invalid(self):
@@ -275,6 +326,8 @@ class ExternalSearchTests(unittest.TestCase):
 
         self.assertEqual(execution.results, ())
         self.assertEqual(execution.dropped_result_count, 2)
+        self.assertEqual(execution.provider_candidate_count, 2)
+        self.assertEqual(execution.dropped_sanitization_count, 2)
         self.assertIn("未找到可用公开结果", execution.response_text)
         self.assertIn("未扩大查询", execution.response_text)
 
@@ -336,6 +389,255 @@ class ExternalSearchTests(unittest.TestCase):
             self.search.execute_external_search(provider, "token=secret-value"),
         )
         self.assertEqual(provider.calls, [])
+
+    def time_window(self):
+        return self.security.ExternalReadTimeWindow(
+            start_date=date(2026, 6, 28),
+            end_date=date(2026, 7, 28),
+            kind="previous_month",
+        )
+
+    def sanitized_result(
+        self,
+        title,
+        snippet,
+        source_host,
+        *,
+        published_at="",
+        raw_content="",
+        injection_suspected=False,
+    ):
+        return self.search.SanitizedExternalSearchResult(
+            title=title,
+            snippet=snippet,
+            source_host=source_host,
+            source_url=f"https://{source_host}/release",
+            published_at=published_at,
+            raw_content=raw_content,
+            injection_suspected=injection_suspected,
+        )
+
+    def execution(self, *results, dropped=0):
+        return self.search.ExternalSearchExecution(
+            provider_name="fake",
+            results=tuple(results),
+            response_text="unfiltered",
+            external_request_count=1,
+            source_host_count=len({result.source_host for result in results}),
+            dropped_result_count=dropped,
+            response_truncated=False,
+            provider_candidate_count=len(results) + dropped,
+            dropped_sanitization_count=dropped,
+        )
+
+    def test_time_window_keeps_provider_date_and_rejects_out_of_range(self):
+        execution = self.execution(
+            self.sanitized_result(
+                "In range", "released", "official.example", published_at="2026-07-10"
+            ),
+            self.sanitized_result(
+                "Old", "released", "old.example", published_at="2026-02-05"
+            ),
+            dropped=2,
+        )
+
+        filtered = self.search.constrain_external_search_to_time_window(
+            execution,
+            time_window=self.time_window(),
+            query="2026-06-28 至 2026-07-28 的发布",
+        )
+
+        self.assertEqual([item.title for item in filtered.results], ["In range"])
+        self.assertEqual(filtered.results[0].date_evidence_strength, "provider")
+        self.assertEqual(filtered.source_host_count, 1)
+        self.assertEqual(filtered.dropped_result_count, 3)
+        self.assertEqual(filtered.provider_candidate_count, 4)
+        self.assertEqual(filtered.dropped_outside_window_count, 1)
+        self.assertEqual(filtered.dropped_sanitization_count, 2)
+        self.assertNotIn("Old", filtered.response_text)
+
+    def test_time_window_allows_one_weak_content_date_only_with_strong_support(self):
+        strong = self.sanitized_result(
+            "Official", "release", "official.example", published_at="2026-07-10"
+        )
+        weak = self.sanitized_result(
+            "Secondary", "The model launched on 2026-07-12.", "news.example"
+        )
+        multiple = self.sanitized_result(
+            "Timeline", "2026-07-12 compared with 2026-07-13.", "timeline.example"
+        )
+
+        filtered = self.search.constrain_external_search_to_time_window(
+            self.execution(strong, weak, multiple),
+            time_window=self.time_window(),
+            query="模型发布",
+        )
+
+        self.assertEqual([item.title for item in filtered.results], ["Official", "Secondary"])
+        self.assertEqual(filtered.results[1].published_at, "2026-07-12")
+        self.assertEqual(filtered.results[1].date_evidence_strength, "content_weak")
+        self.assertEqual(filtered.dropped_result_count, 1)
+        self.assertEqual(filtered.dropped_conflicting_date_count, 1)
+
+    def test_time_window_rejects_weak_only_or_undated_evidence(self):
+        weak = self.sanitized_result(
+            "Secondary", "The model launched on 2026-07-12.", "news.example"
+        )
+        undated = self.sanitized_result(
+            "Undated", "A rolling model timeline.", "timeline.example"
+        )
+
+        filtered = self.search.constrain_external_search_to_time_window(
+            self.execution(weak, undated),
+            time_window=self.time_window(),
+            query="模型发布",
+        )
+
+        self.assertEqual(filtered.results, ())
+        self.assertEqual(filtered.source_host_count, 0)
+        self.assertEqual(filtered.dropped_result_count, 2)
+        self.assertEqual(filtered.dropped_missing_date_count, 1)
+        self.assertEqual(filtered.dropped_weak_only_count, 1)
+        self.assertEqual(
+            filtered.provider_candidate_count,
+            len(filtered.results) + filtered.dropped_result_count,
+        )
+
+    def test_time_window_accepts_one_official_release_content_date_as_strong(self):
+        official = self.sanitized_result(
+            "OpenAI releases Model X",
+            "The model became available July 12, 2026.",
+            "openai.com",
+        )
+        weak = self.sanitized_result(
+            "Independent release report",
+            "The model launched on 13 July 2026.",
+            "news.example",
+        )
+
+        filtered = self.search.constrain_external_search_to_time_window(
+            self.execution(official, weak),
+            time_window=self.time_window(),
+            query="模型发布",
+        )
+
+        self.assertEqual(
+            [item.title for item in filtered.results],
+            ["OpenAI releases Model X", "Independent release report"],
+        )
+        self.assertEqual(filtered.results[0].published_at, "2026-07-12")
+        self.assertEqual(
+            filtered.results[0].date_evidence_strength,
+            "official_content_strong",
+        )
+        self.assertEqual(filtered.results[1].published_at, "2026-07-13")
+        self.assertEqual(filtered.results[1].date_evidence_strength, "content_weak")
+        self.assertEqual(filtered.dropped_result_count, 0)
+
+    def test_official_content_strong_requires_host_release_context_and_one_date(self):
+        cases = (
+            self.sanitized_result(
+                "Model X released",
+                "Available July 12, 2026.",
+                "openai.com.evil.example",
+            ),
+            self.sanitized_result(
+                "Model X overview",
+                "Documentation dated July 12, 2026.",
+                "openai.com",
+            ),
+            self.sanitized_result(
+                "Model X released",
+                "Announced July 12, 2026 and available July 13, 2026.",
+                "openai.com",
+            ),
+        )
+
+        for result in cases:
+            with self.subTest(title=result.title, host=result.source_host):
+                filtered = self.search.constrain_external_search_to_time_window(
+                    self.execution(result),
+                    time_window=self.time_window(),
+                    query="模型发布",
+                )
+                self.assertEqual(filtered.results, ())
+                self.assertEqual(filtered.dropped_result_count, 1)
+
+        self.assertEqual(
+            self.search.constrain_external_search_to_time_window(
+                self.execution(cases[0]),
+                time_window=self.time_window(),
+                query="模型发布",
+            ).dropped_weak_only_count,
+            1,
+        )
+        self.assertEqual(
+            self.search.constrain_external_search_to_time_window(
+                self.execution(cases[1]),
+                time_window=self.time_window(),
+                query="模型发布",
+            ).dropped_weak_only_count,
+            1,
+        )
+        self.assertEqual(
+            self.search.constrain_external_search_to_time_window(
+                self.execution(cases[2]),
+                time_window=self.time_window(),
+                query="模型发布",
+            ).dropped_conflicting_date_count,
+            1,
+        )
+
+    def test_time_window_classifies_drop_reasons_once_per_candidate(self):
+        strong = self.sanitized_result(
+            "Official", "release", "official.example", published_at="2026-07-10"
+        )
+        outside = self.sanitized_result(
+            "Old", "release", "old.example", published_at="2026-01-10"
+        )
+        missing = self.sanitized_result(
+            "Undated", "rolling timeline", "undated.example"
+        )
+        conflicting = self.sanitized_result(
+            "Timeline", "2026-07-11 and 2026-07-12", "timeline.example"
+        )
+        injection = self.sanitized_result(
+            "External result",
+            "content removed",
+            "unsafe.example",
+            injection_suspected=True,
+        )
+
+        filtered = self.search.constrain_external_search_to_time_window(
+            self.execution(strong, outside, missing, conflicting, injection),
+            time_window=self.time_window(),
+            query="模型发布",
+        )
+
+        self.assertEqual([item.title for item in filtered.results], ["Official"])
+        self.assertEqual(filtered.provider_candidate_count, 5)
+        self.assertEqual(filtered.dropped_result_count, 4)
+        self.assertEqual(filtered.dropped_missing_date_count, 1)
+        self.assertEqual(filtered.dropped_outside_window_count, 1)
+        self.assertEqual(filtered.dropped_weak_only_count, 0)
+        self.assertEqual(filtered.dropped_conflicting_date_count, 1)
+        self.assertEqual(filtered.dropped_injection_count, 1)
+        self.assertEqual(filtered.dropped_sanitization_count, 0)
+        reason_total = sum(
+            (
+                filtered.dropped_missing_date_count,
+                filtered.dropped_outside_window_count,
+                filtered.dropped_weak_only_count,
+                filtered.dropped_conflicting_date_count,
+                filtered.dropped_injection_count,
+                filtered.dropped_sanitization_count,
+            )
+        )
+        self.assertEqual(reason_total, filtered.dropped_result_count)
+        self.assertEqual(
+            filtered.provider_candidate_count,
+            len(filtered.results) + filtered.dropped_result_count,
+        )
 
 
 if __name__ == "__main__":

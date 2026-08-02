@@ -90,19 +90,60 @@ LAST_REPLY_MARKERS = (
     "刚才那句",
     "刚刚那句话",
     "刚才那句话",
+    "刚刚这句",
+    "刚才这句",
+    "刚刚这句话",
+    "刚才这句话",
+    "刚刚的回复",
+    "刚才的回复",
+    "刚刚的回答",
+    "刚才的回答",
     "上一句",
     "上一条",
     "上条",
+    "上面那句",
+    "上面这句",
+    "上面那句话",
+    "上面这句话",
+    "上面的那句",
+    "上面的这句",
+    "上面的那句话",
+    "上面的这句话",
+    "上面的回复",
+    "上面的回答",
+    "上面那条",
+    "上面这条",
+    "前面那句",
+    "前面这句",
+    "前面的回复",
+    "前面的回答",
+    "上文那句",
+    "上文这句",
+    "上文的回复",
+    "上文的回答",
 )
 
 LAST_REPLY_ACTIONS = (
-    "语音",
-    "声音",
+    "用语音",
+    "转语音",
+    "转成语音",
+    "生成语音",
+    "用声音",
+    "声音说",
+    "说一下",
+    "说一遍",
+    "说出来",
     "念给我听",
     "念一下",
     "读给我听",
     "读一下",
-    "转语音",
+    "朗读",
+    "复述",
+    "重复一下",
+    "再重复",
+    "请重复",
+    "帮我重复",
+    "播放",
 )
 
 VOICE_WORDS = ("语音", "声音", "念给我听", "说给我听", "读给我听")
@@ -148,6 +189,16 @@ def parse_voice_intent(text: str) -> VoiceIntent | None:
         if match:
             direct_text = match.group("text").strip()
             if direct_text:
+                # “用语音说上面那句话” looks like direct text syntactically,
+                # but semantically it asks to replay the previous assistant
+                # reply.  Keep an explicit colon as the escape hatch for
+                # literal text such as “用语音说：上面那句话”.
+                prefix = normalized[: match.start("text")]
+                if (
+                    any(marker in direct_text for marker in LAST_REPLY_MARKERS)
+                    and not prefix.rstrip().endswith((":", "："))
+                ):
+                    return VoiceIntent(VoiceIntentType.LAST_REPLY, refresh_cache=refresh_cache)
                 return VoiceIntent(VoiceIntentType.DIRECT_TEXT, text=direct_text, refresh_cache=refresh_cache)
 
     if any(marker in normalized for marker in LAST_REPLY_MARKERS) and any(

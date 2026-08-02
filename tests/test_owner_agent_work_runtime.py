@@ -27,6 +27,10 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             "src.plugins.ai_chat.owner_agent_work_runtime",
             AI_CHAT_ROOT / "owner_agent_work_runtime.py",
         )
+        cls.ephemeral_details = load_module(
+            "src.plugins.ai_chat.external_read_ephemeral_details",
+            AI_CHAT_ROOT / "external_read_ephemeral_details.py",
+        )
         cls.system_report = load_module(
             "src.plugins.ai_chat.system_diagnostics_report",
             AI_CHAT_ROOT / "system_diagnostics_report.py",
@@ -181,7 +185,23 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             "response_truncated": False,
             "status_category": "completed",
             "error_category": "none",
-            "report_text": "外部只读查询结果：\n1. 安全标题\n   安全摘要\n   来源：example.com",
+            "report_text": (
+                "外部只读证据回答：\n直接回答：安全结论。[1]\n"
+                "来源 [1]：example.com — https://example.com/source"
+            ),
+            "provider_request_count": 1,
+            "synthesis_request_count": 1,
+            "synthesis_status": "completed",
+            "synthesis_error_category": "none",
+            "owner_quality_status": "owner_quality_pending",
+            "provider_candidate_count": 1,
+            "official_content_strong_count": 0,
+            "dropped_source_policy_count": 0,
+            "search_stage_count": 1,
+            "official_stage_candidate_count": 1,
+            "official_stage_result_count": 1,
+            "media_stage_candidate_count": 0,
+            "media_stage_result_count": 0,
         }
         values.update(overrides)
         return self.work_runtime.ExternalReadReportPayload(**values)
@@ -786,6 +806,7 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
                     )
 
     def test_external_read_work_keeps_query_and_result_details_ephemeral(self):
+        self.ephemeral_details.clear_external_read_ephemeral_details_for_tests()
         temp_dir, patcher = self.temp_database()
         calls: list[str] = []
         query = "查询 Python 3.14 的公开发布信息"
@@ -793,12 +814,16 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         async def executor(value: str):
             calls.append(value)
             return self.external_payload(
-                report_text="\n".join(
+                scene="recommendation",
+                report_text=(
+                    "Python 3.14 已发布；建议先核对版本说明，再评估升级兼容性。"
+                ),
+                detail_text="\n".join(
                     [
                         "外部只读查询结果：",
                         "1. Python 3.14 released",
                         "   This is a sanitized public snippet.",
-                        "   来源：docs.python.org",
+                        "   来源 [1]：docs.python.org — https://docs.python.org/3/",
                     ]
                 )
             )
@@ -841,11 +866,38 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn("docs.python.org", persisted)
         self.assertIn("原文未持久化", execution.task.goal)
         self.assertIn("Provider：fake_search", execution.task.result)
+        self.assertIn("Provider候选数：1", execution.task.result)
+        self.assertIn("官方正文强日期数：0", execution.task.result)
+        self.assertIn("检索阶段数：1", execution.task.result)
+        self.assertIn("业务场景：recommendation", execution.task.result)
+        self.assertIn("第一阶段候选数：1", execution.task.result)
+        self.assertIn("第一阶段合格数：1", execution.task.result)
+        self.assertIn("第二阶段候选数：0", execution.task.result)
+        self.assertIn("第二阶段合格数：0", execution.task.result)
+        self.assertIn("日期缺失丢弃：0", execution.task.result)
+        self.assertIn("窗口外丢弃：0", execution.task.result)
+        self.assertIn("仅弱日期丢弃：0", execution.task.result)
+        self.assertIn("日期冲突丢弃：0", execution.task.result)
+        self.assertIn("注入嫌疑丢弃：0", execution.task.result)
+        self.assertIn("清洗去重丢弃：0", execution.task.result)
+        self.assertIn("来源策略丢弃：0", execution.task.result)
         self.assertIn("外部请求：1", execution.task.result)
-        self.assertIn("Python 3.14 released", reply)
-        self.assertIn("docs.python.org", reply)
-        self.assertIn("外部只读查询任务", reply)
-        self.assertIn("单次固定 provider 外部读取", reply)
+        self.assertIn("Python 3.14 已发布", reply)
+        self.assertIn(f"联网任务 #{execution.task.id}", reply)
+        self.assertIn(f"/agent 任务详情 {execution.task.id}", reply)
+        self.assertNotIn("Python 3.14 released", reply)
+        self.assertNotIn("docs.python.org", reply)
+        self.assertNotIn("Provider", reply)
+        self.assertNotIn("主人质检", reply)
+        self.assertNotIn("边界：", reply)
+        ephemeral_detail = self.ephemeral_details.get_external_read_ephemeral_detail(
+            session_key="private:10001",
+            user_id="10001",
+            task_id=execution.task.id,
+        )
+        self.assertIsNotNone(ephemeral_detail)
+        self.assertIn("Python 3.14 released", ephemeral_detail)
+        self.assertIn("https://docs.python.org/3/", ephemeral_detail)
 
     def test_external_read_no_results_is_a_completed_task(self):
         temp_dir, patcher = self.temp_database()
@@ -856,7 +908,22 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
                     external_executor=lambda _query: self.external_payload(
                         result_count=0,
                         source_host_count=0,
+                        dropped_result_count=5,
+                        provider_candidate_count=5,
+                        dropped_missing_date_count=3,
+                        dropped_outside_window_count=1,
+                        dropped_weak_only_count=1,
+                        external_request_count=2,
+                        provider_request_count=2,
+                        search_stage_count=2,
+                        official_stage_candidate_count=5,
+                        official_stage_result_count=0,
+                        media_stage_candidate_count=0,
+                        media_stage_result_count=0,
                         status_category="no_results",
+                        synthesis_request_count=0,
+                        synthesis_status="not_run_no_evidence",
+                        owner_quality_status="not_applicable",
                         report_text="结果：未找到可用公开结果。\n本次未扩大查询，也未自动重试。",
                     ),
                 ).execute(
@@ -868,6 +935,12 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(execution.outcome, "completed")
         self.assertEqual(execution.task.status, self.agent_tasks.AGENT_TASK_DONE)
         self.assertIn("结果数：0", execution.task.result)
+        self.assertIn("丢弃结果数：5", execution.task.result)
+        self.assertIn("Provider候选数：5", execution.task.result)
+        self.assertIn("日期缺失丢弃：3", execution.task.result)
+        self.assertIn("窗口外丢弃：1", execution.task.result)
+        self.assertIn("仅弱日期丢弃：1", execution.task.result)
+        self.assertIn("检索阶段数：2", execution.task.result)
         self.assertIn("状态类别：no_results", execution.task.result)
         self.assertIn("未找到可用公开结果", execution.response_text)
 
@@ -877,16 +950,48 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             self.external_payload(external_request_count=2),
             self.external_payload(result_count=-1),
             self.external_payload(result_count=True),
-            self.external_payload(result_count=4),
+            self.external_payload(result_count=6),
             self.external_payload(source_host_count=2),
             self.external_payload(dropped_result_count=-1),
+            self.external_payload(provider_candidate_count=-1),
+            self.external_payload(provider_candidate_count=True),
+            self.external_payload(provider_candidate_count=11),
+            self.external_payload(provider_candidate_count=0),
+            self.external_payload(official_content_strong_count=-1),
+            self.external_payload(official_content_strong_count=True),
+            self.external_payload(official_content_strong_count=6),
+            self.external_payload(official_content_strong_count=2),
+            self.external_payload(
+                dropped_result_count=1,
+                provider_candidate_count=2,
+            ),
+            self.external_payload(dropped_missing_date_count=-1),
+            self.external_payload(dropped_missing_date_count=True),
+            self.external_payload(dropped_missing_date_count=11),
+            self.external_payload(
+                dropped_result_count=1,
+                provider_candidate_count=2,
+                dropped_missing_date_count=1,
+                dropped_outside_window_count=1,
+            ),
             self.external_payload(response_truncated=1),
             self.external_payload(provider_name="fake-search"),
             self.external_payload(provider_name=True),
+            self.external_payload(scene="must-not-leak"),
             self.external_payload(status_category="failed"),
             self.external_payload(status_category=None),
             self.external_payload(error_category="provider_unavailable"),
             self.external_payload(error_category=None),
+            self.external_payload(
+                synthesis_status="call_failed",
+                synthesis_error_category="none",
+                status_category="synthesis_fallback",
+            ),
+            self.external_payload(
+                synthesis_status="invalid_response",
+                synthesis_error_category="timeout",
+                status_category="synthesis_fallback",
+            ),
             self.external_payload(result_count=0, source_host_count=0),
         )
 
@@ -894,6 +999,95 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
                     self.work_runtime._sanitize_external_read_report(payload)
+
+    def test_external_read_sanitizer_accepts_two_ten_result_stages_after_dedup(self):
+        sanitized = self.work_runtime._sanitize_external_read_report(
+            self.external_payload(
+                result_count=19,
+                source_host_count=19,
+                dropped_result_count=1,
+                provider_candidate_count=20,
+                dropped_sanitization_count=1,
+                external_request_count=2,
+                provider_request_count=2,
+                search_stage_count=2,
+                planning_mode="main_agent",
+                primary_source_scope="news",
+                secondary_source_scope="news",
+                secondary_mode="always",
+                official_stage_candidate_count=10,
+                official_stage_result_count=10,
+                media_stage_candidate_count=10,
+                media_stage_result_count=9,
+            )
+        )
+
+        self.assertIn("Provider候选数：20", sanitized.persisted_summary)
+        self.assertIn("结果数：19", sanitized.persisted_summary)
+        self.assertIn("清洗去重丢弃：1", sanitized.persisted_summary)
+
+    def test_external_read_sanitizer_accepts_incomplete_scene_evidence_without_call(self):
+        sanitized = self.work_runtime._sanitize_external_read_report(
+            self.external_payload(
+                synthesis_request_count=0,
+                synthesis_status="not_run_incomplete_evidence",
+                status_category="synthesis_fallback",
+                scene="current_status",
+                search_stage_count=2,
+                external_request_count=2,
+                provider_request_count=2,
+                official_stage_candidate_count=0,
+                official_stage_result_count=0,
+                media_stage_candidate_count=1,
+                media_stage_result_count=1,
+                primary_source_scope="general",
+                secondary_source_scope="news",
+                secondary_mode="always",
+            )
+        )
+
+        self.assertIn(
+            "综合状态：not_run_incomplete_evidence",
+            sanitized.persisted_summary,
+        )
+        self.assertIn("综合请求：0", sanitized.persisted_summary)
+
+    def test_external_read_sanitizer_rejects_more_than_two_full_stages(self):
+        with self.assertRaises(ValueError):
+            self.work_runtime._sanitize_external_read_report(
+                self.external_payload(
+                    result_count=21,
+                    source_host_count=21,
+                    provider_candidate_count=21,
+                )
+            )
+
+    def test_external_read_runtime_labels_result_contract_failure_without_database_advice(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(
+                    lambda _query: "project docs: 0\nmemories: 0",
+                    external_executor=lambda _query: self.external_payload(
+                        result_count=21,
+                        source_host_count=21,
+                        provider_candidate_count=21,
+                    ),
+                ).execute(
+                    work_type=self.work_runtime.EXTERNAL_READ_REPORT_WORK_TYPE,
+                    query="公开信息问题",
+                )
+            )
+
+        self.assertEqual(execution.outcome, "failed")
+        self.assertEqual(
+            execution.result_summary,
+            "ExternalReadResultValidationError: external_read_report "
+            "result validation failed.",
+        )
+        self.assertIn("未通过本地结构合同校验", execution.response_text)
+        self.assertIn("不等于数据库、文件或索引损坏", execution.response_text)
+        self.assertNotIn("检查数据库", execution.response_text)
 
     def test_external_read_response_redacts_links_paths_and_secrets(self):
         sanitized = self.work_runtime._sanitize_external_read_report(
@@ -909,6 +1103,18 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertNotIn("D:\\private", sanitized.response_text)
         self.assertNotIn("must-not-leak", sanitized.response_text)
         self.assertIn("[已脱敏链接]", sanitized.response_text)
+
+    def test_external_read_response_preserves_only_valid_numbered_source_url(self):
+        sanitized = self.work_runtime._sanitize_external_read_report(
+            self.external_payload(
+                report_text=(
+                    "直接回答：安全结论。[1]\n"
+                    "来源 [1]：example.com — https://example.com/source"
+                )
+            )
+        )
+
+        self.assertIn("https://example.com/source", sanitized.response_text)
 
     def test_external_read_executor_failure_never_persists_raw_exception(self):
         temp_dir, patcher = self.temp_database()
@@ -964,6 +1170,44 @@ class OwnerAgentWorkRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("固定搜索 provider 请求超时", execution.response_text)
         self.assertIn("未自动重试", execution.response_text)
         self.assertIn("request_timeout", execution.task.result)
+        self.assertNotIn("must-not-leak", execution.response_text)
+        self.assertNotIn("must-not-leak", execution.task.result)
+        self.assertNotIn("must-not-leak", events[-1].error)
+
+    def test_external_read_stage_failure_persists_only_safe_diagnostics(self):
+        temp_dir, patcher = self.temp_database()
+
+        def executor(_query: str):
+            raise self.work_runtime.ExternalReadStagePolicyError(
+                self.work_runtime.ExternalReadPolicyCategory.RESPONSE_TOO_LARGE,
+                "Authorization: Bearer must-not-leak",
+                search_stage="media_fallback",
+                provider_request_count=2,
+            )
+
+        with temp_dir, patcher:
+            execution = asyncio.run(
+                self.make_runtime(
+                    lambda _query: "project docs: 0\nmemories: 0",
+                    external_executor=executor,
+                ).execute(
+                    work_type=self.work_runtime.EXTERNAL_READ_REPORT_WORK_TYPE,
+                    query="公开信息",
+                )
+            )
+            assert execution.task is not None
+            events = self.agent_tasks.list_agent_task_events(execution.task.id)
+
+        self.assertEqual(execution.outcome, "failed")
+        self.assertIn("失败检索阶段：media_fallback。", execution.task.result)
+        self.assertIn("检索阶段数：2。", execution.task.result)
+        self.assertIn("外部请求：2。", execution.task.result)
+        self.assertIn("Provider请求：2。", execution.task.result)
+        self.assertIn("综合请求：0。", execution.task.result)
+        self.assertIn("response_too_large", execution.task.result)
+        self.assertIn("失败阶段：可靠媒体补充阶段", execution.response_text)
+        self.assertIn("Provider 请求：2 次", execution.response_text)
+        self.assertIn("综合请求：0 次", execution.response_text)
         self.assertNotIn("must-not-leak", execution.response_text)
         self.assertNotIn("must-not-leak", execution.task.result)
         self.assertNotIn("must-not-leak", events[-1].error)

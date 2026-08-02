@@ -24,6 +24,16 @@ def build_main_llm(config: AiChatConfig) -> Any:
     )
 
 
+def build_external_research_llm(config: AiChatConfig) -> Any:
+    return _chat_openai(
+        api_key=config.main_llm_api_key,
+        base_url=config.main_llm_base_url,
+        model=config.main_llm_model,
+        timeout=config.main_llm_timeout_seconds,
+        max_retries=0,
+    )
+
+
 def build_chat_llm(config: AiChatConfig) -> Any:
     return _chat_openai(
         api_key=config.chat_llm_api_key,
@@ -31,4 +41,3 @@ def build_chat_llm(config: AiChatConfig) -> Any:
         model=config.chat_llm_model,
         timeout=config.chat_llm_timeout_seconds,
     )
-

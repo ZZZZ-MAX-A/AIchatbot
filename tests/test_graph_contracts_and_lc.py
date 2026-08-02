@@ -320,6 +320,21 @@ class LangChainModelFactoryTests(unittest.TestCase):
             ],
         )
 
+    def test_build_external_research_llm_disables_client_retries(self):
+        config = types.SimpleNamespace(
+            main_llm_api_key="main-key",
+            main_llm_base_url="https://main.example/v1",
+            main_llm_model="gpt-main",
+            main_llm_timeout_seconds=31,
+        )
+
+        llm = self.models.build_external_research_llm(config)
+
+        self.assertEqual(llm["factory"], "chat_openai")
+        self.assertEqual(self.calls[0]["max_retries"], 0)
+        self.assertNotIn("temperature", self.calls[0])
+        self.assertNotIn("max_tokens", self.calls[0])
+
     def test_build_chat_llm_uses_chat_agent_model_settings(self):
         config = types.SimpleNamespace(
             chat_llm_api_key="chat-key",

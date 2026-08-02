@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 import ipaddress
+import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
-from typing import Protocol
-from urllib.parse import urlsplit
+from typing import Mapping, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from .external_read_security import (
     ExternalReadBudget,
     ExternalReadPolicyCategory,
     ExternalReadPolicyError,
+    ExternalReadTimeWindow,
     canonicalize_external_host,
     normalize_external_read_query,
     validate_external_read_addresses,
@@ -24,6 +26,7 @@ EXTERNAL_SEARCH_MAX_TITLE_CHARS = 120
 EXTERNAL_SEARCH_MAX_SNIPPET_CHARS = 500
 EXTERNAL_SEARCH_MAX_PUBLISHED_AT_CHARS = 40
 EXTERNAL_SEARCH_MAX_PROVIDER_NAME_CHARS = 32
+EXTERNAL_SEARCH_MAX_RAW_CONTENT_CHARS = 3500
 
 _TIME_SENSITIVE_QUERY_MARKERS = (
     "今天",
@@ -49,13 +52,22 @@ _TIME_SENSITIVE_QUERY_MARKERS = (
 
 _OFFICIAL_DOCUMENTATION_HOSTS = frozenset(
     {
+        "ai.google.dev",
+        "anthropic.com",
+        "blog.google",
+        "deepmind.google",
         "developer.mozilla.org",
         "developers.google.com",
+        "developers.googleblog.com",
         "docs.github.com",
         "docs.python.org",
         "docs.tavily.com",
+        "genshin.hoyoverse.com",
         "learn.microsoft.com",
+        "openai.com",
+        "qwenlm.github.io",
         "support.google.com",
+        "ys.mihoyo.com",
     }
 )
 
@@ -66,6 +78,52 @@ _CENTRAL_MEDIA_HOSTS = frozenset(
     }
 )
 
+_ENGLISH_MONTH_NUMBERS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_ENGLISH_MONTH_NAME = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?"
+)
+_YEAR_FIRST_CONTENT_DATE_PATTERN = re.compile(
+    r"(?<!\d)(20\d{2})\s*(?:年|[-/])\s*(0?[1-9]|1[0-2])\s*"
+    r"(?:月|[-/])\s*(0?[1-9]|[12]\d|3[01])\s*日?(?!\d)"
+)
+_MONTH_FIRST_ENGLISH_DATE_PATTERN = re.compile(
+    rf"(?<![A-Za-z])(?P<month>{_ENGLISH_MONTH_NAME})\.?\s+"
+    r"(?P<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s*,\s*"
+    r"(?P<year>20\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+_DAY_FIRST_ENGLISH_DATE_PATTERN = re.compile(
+    r"(?<!\d)(?P<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+"
+    rf"(?P<month>{_ENGLISH_MONTH_NAME})\.?\s*,?\s*"
+    r"(?P<year>20\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+_RELEASE_CONTEXT_PATTERN = re.compile(
+    r"(?:发布|推出|上线|公告)|"
+    r"\b(?:release(?:d|s)?|launch(?:ed|es)?|announce(?:d|s)?|"
+    r"announcement|available|availability)\b",
+    re.IGNORECASE,
+)
+_UNAVAILABLE_PAGE_TITLE_PATTERN = re.compile(
+    r"^(?:404\b|page\s+not\s+found\b|页面(?:找不到|不存在)|您访问的页面找不到)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class ExternalSearchResult:
@@ -73,6 +131,8 @@ class ExternalSearchResult:
     snippet: str
     source_url: str
     published_at: str = ""
+    raw_content: str = ""
+    score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +149,7 @@ class ExternalSearchProvider(Protocol):
         query: str,
         *,
         max_results: int,
+        **options: str,
     ) -> ExternalSearchProviderResponse: ...
 
 
@@ -97,8 +158,14 @@ class SanitizedExternalSearchResult:
     title: str
     snippet: str
     source_host: str
+    source_url: str = ""
     published_at: str = ""
+    raw_content: str = ""
+    score: float | None = None
     injection_suspected: bool = False
+    date_evidence_strength: str = "none"
+    search_stage: str = "single"
+    evidence_role: str = "direct_answer"
 
 
 @dataclass(frozen=True)
@@ -110,6 +177,14 @@ class ExternalSearchExecution:
     source_host_count: int
     dropped_result_count: int
     response_truncated: bool
+    provider_candidate_count: int = 0
+    dropped_missing_date_count: int = 0
+    dropped_outside_window_count: int = 0
+    dropped_weak_only_count: int = 0
+    dropped_conflicting_date_count: int = 0
+    dropped_injection_count: int = 0
+    dropped_sanitization_count: int = 0
+    dropped_source_policy_count: int = 0
 
 
 class _VisibleTextParser(HTMLParser):
@@ -200,7 +275,7 @@ def _contains_prompt_injection(value: str) -> bool:
     return False
 
 
-def _source_host_from_url(value: str) -> str:
+def safe_external_source_from_url(value: str) -> tuple[str, str]:
     if not isinstance(value, str) or not value.strip():
         raise ExternalReadPolicyError(
             ExternalReadPolicyCategory.INVALID_PROVIDER_RESPONSE,
@@ -255,7 +330,28 @@ def _source_host_from_url(value: str) -> str:
             ExternalReadPolicyCategory.INVALID_PROVIDER_RESPONSE,
             "external search result source host is not public",
         )
-    return host
+    display_host = f"[{host}]" if ":" in host else host
+    if port is not None:
+        display_host = f"{display_host}:{port}"
+    safe_url = urlunsplit(
+        (
+            parsed.scheme.lower(),
+            display_host,
+            parsed.path or "/",
+            "",
+            "",
+        )
+    )
+    return host, safe_url
+
+
+def _normalized_external_score(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    score = float(value)
+    if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+        return None
+    return score
 
 
 def sanitize_external_search_result(
@@ -275,7 +371,11 @@ def sanitize_external_search_result(
         result.published_at,
         limit=EXTERNAL_SEARCH_MAX_PUBLISHED_AT_CHARS,
     )
-    source_host = _source_host_from_url(result.source_url)
+    source_host, source_url = safe_external_source_from_url(result.source_url)
+    raw_content = _plain_external_text(
+        result.raw_content,
+        limit=EXTERNAL_SEARCH_MAX_RAW_CONTENT_CHARS,
+    )
     if not title:
         raise ExternalReadPolicyError(
             ExternalReadPolicyCategory.INVALID_PROVIDER_RESPONSE,
@@ -283,34 +383,371 @@ def sanitize_external_search_result(
         )
 
     injection_suspected = _contains_prompt_injection(
-        f"{title}\n{snippet}\n{published_text}"
+        f"{title}\n{snippet}\n{published_text}\n{raw_content}"
     )
     published_at = _normalized_external_published_date(published_text)
     if injection_suspected:
         title = "外部结果（疑似包含提示注入）"
         snippet = "外部结果正文已省略；该内容不会被视为系统指令或工具请求。"
         published_at = ""
+        raw_content = ""
 
     return SanitizedExternalSearchResult(
         title=title,
         snippet=snippet,
         source_host=source_host,
+        source_url=source_url,
         published_at=published_at,
+        raw_content=raw_content,
+        score=_normalized_external_score(result.score),
         injection_suspected=injection_suspected,
+        date_evidence_strength="provider" if published_at else "none",
     )
 
 
 def _normalized_external_published_date(value: str) -> str:
     if not value:
         return ""
-    matched = re.fullmatch(r"(\d{4})[-/](\d{2})[-/](\d{2})(?:[Tt ]\S*)?", value)
-    if matched is None:
-        return ""
-    normalized = "-".join(matched.groups())
+    parsed = _content_dates(value)
+    return parsed[0].isoformat() if len(parsed) == 1 else ""
+
+
+def _append_unique_content_date(
+    parsed: list[date],
+    *,
+    year: int,
+    month: int,
+    day: int,
+) -> None:
     try:
-        return date.fromisoformat(normalized).isoformat()
+        candidate = date(year, month, day)
     except ValueError:
-        return ""
+        return
+    if candidate not in parsed:
+        parsed.append(candidate)
+
+
+def _content_dates(value: str) -> tuple[date, ...]:
+    parsed: list[date] = []
+    for matched in _YEAR_FIRST_CONTENT_DATE_PATTERN.finditer(value):
+        _append_unique_content_date(
+            parsed,
+            year=int(matched.group(1)),
+            month=int(matched.group(2)),
+            day=int(matched.group(3)),
+        )
+    for pattern in (
+        _MONTH_FIRST_ENGLISH_DATE_PATTERN,
+        _DAY_FIRST_ENGLISH_DATE_PATTERN,
+    ):
+        for matched in pattern.finditer(value):
+            month_name = matched.group("month").rstrip(".").casefold()
+            _append_unique_content_date(
+                parsed,
+                year=int(matched.group("year")),
+                month=_ENGLISH_MONTH_NUMBERS[month_name[:3]],
+                day=int(matched.group("day")),
+            )
+    return tuple(parsed)
+
+
+def constrain_external_search_to_time_window(
+    execution: ExternalSearchExecution,
+    *,
+    time_window: ExternalReadTimeWindow,
+    query: str,
+) -> ExternalSearchExecution:
+    """Keep strong in-window dates and weak content dates only with strong support."""
+
+    strong: list[SanitizedExternalSearchResult] = []
+    weak: list[SanitizedExternalSearchResult] = []
+    dropped_missing_date_count = 0
+    dropped_outside_window_count = 0
+    dropped_weak_only_count = 0
+    dropped_conflicting_date_count = 0
+    dropped_injection_count = 0
+    dropped_sanitization_count = 0
+    for result in execution.results:
+        if result.injection_suspected:
+            dropped_injection_count += 1
+            continue
+        if result.published_at:
+            try:
+                published_date = date.fromisoformat(result.published_at)
+            except ValueError:
+                dropped_sanitization_count += 1
+                continue
+            if time_window.start_date <= published_date <= time_window.end_date:
+                strong.append(
+                    replace(
+                        result,
+                        published_at=published_date.isoformat(),
+                        date_evidence_strength="provider",
+                    )
+                )
+            else:
+                dropped_outside_window_count += 1
+            continue
+        dates = _content_dates(
+            "\n".join((result.title, result.snippet, result.raw_content))
+        )
+        if not dates:
+            dropped_missing_date_count += 1
+            continue
+        if len(dates) != 1:
+            dropped_conflicting_date_count += 1
+            continue
+        content_date = dates[0]
+        if time_window.start_date <= content_date <= time_window.end_date:
+            official_content_strong = (
+                external_source_is_recognized_official(result.source_host)
+                and _RELEASE_CONTEXT_PATTERN.search(
+                    "\n".join((result.title, result.snippet))
+                )
+                is not None
+            )
+            qualified_result = replace(
+                result,
+                published_at=content_date.isoformat(),
+                date_evidence_strength=(
+                    "official_content_strong"
+                    if official_content_strong
+                    else "content_weak"
+                ),
+            )
+            if official_content_strong:
+                strong.append(qualified_result)
+            else:
+                weak.append(qualified_result)
+        else:
+            dropped_outside_window_count += 1
+
+    if strong:
+        qualified = tuple([*strong, *weak])
+    else:
+        dropped_weak_only_count = len(weak)
+        qualified = ()
+    rejected_count = (
+        dropped_missing_date_count
+        + dropped_outside_window_count
+        + dropped_weak_only_count
+        + dropped_conflicting_date_count
+        + dropped_injection_count
+        + dropped_sanitization_count
+    )
+    return replace(
+        execution,
+        results=qualified,
+        response_text=format_external_search_results(
+            execution.provider_name,
+            qualified,
+            query=query,
+        ),
+        source_host_count=len({result.source_host for result in qualified}),
+        dropped_result_count=execution.dropped_result_count + rejected_count,
+        dropped_missing_date_count=(
+            execution.dropped_missing_date_count + dropped_missing_date_count
+        ),
+        dropped_outside_window_count=(
+            execution.dropped_outside_window_count + dropped_outside_window_count
+        ),
+        dropped_weak_only_count=(
+            execution.dropped_weak_only_count + dropped_weak_only_count
+        ),
+        dropped_conflicting_date_count=(
+            execution.dropped_conflicting_date_count
+            + dropped_conflicting_date_count
+        ),
+        dropped_injection_count=(
+            execution.dropped_injection_count + dropped_injection_count
+        ),
+        dropped_sanitization_count=(
+            execution.dropped_sanitization_count + dropped_sanitization_count
+        ),
+    )
+
+
+def constrain_external_search_to_official_sources(
+    execution: ExternalSearchExecution,
+    *,
+    query: str,
+) -> ExternalSearchExecution:
+    qualified = tuple(
+        result
+        for result in execution.results
+        if external_source_is_recognized_official(result.source_host)
+    )
+    dropped = len(execution.results) - len(qualified)
+    return replace(
+        execution,
+        results=qualified,
+        response_text=format_external_search_results(
+            execution.provider_name,
+            qualified,
+            query=query,
+        ),
+        source_host_count=len({result.source_host for result in qualified}),
+        dropped_result_count=execution.dropped_result_count + dropped,
+        dropped_source_policy_count=(
+            execution.dropped_source_policy_count + dropped
+        ),
+    )
+
+
+def tag_external_search_stage(
+    execution: ExternalSearchExecution,
+    *,
+    search_stage: str,
+    evidence_role: str = "direct_answer",
+) -> ExternalSearchExecution:
+    if search_stage not in {
+        "official",
+        "media_fallback",
+        "primary",
+        "secondary",
+    }:
+        raise ValueError("external search stage is invalid")
+    if evidence_role not in {
+        "context",
+        "direct_answer",
+        "official_confirmation",
+        "reported_candidate",
+        "recommendation",
+    }:
+        raise ValueError("external search evidence role is invalid")
+    return replace(
+        execution,
+        results=tuple(
+            replace(
+                result,
+                search_stage=search_stage,
+                evidence_role=evidence_role,
+            )
+            for result in execution.results
+        ),
+    )
+
+
+def combine_external_search_stages(
+    official: ExternalSearchExecution,
+    media: ExternalSearchExecution,
+) -> ExternalSearchExecution:
+    if official.provider_name != media.provider_name:
+        raise ValueError("external search stage providers do not match")
+    if official.results:
+        raise ValueError("media fallback requires zero official results")
+    return replace(
+        media,
+        external_request_count=(
+            official.external_request_count + media.external_request_count
+        ),
+        provider_candidate_count=(
+            official.provider_candidate_count + media.provider_candidate_count
+        ),
+        dropped_result_count=(
+            official.dropped_result_count + media.dropped_result_count
+        ),
+        response_truncated=(
+            official.response_truncated or media.response_truncated
+        ),
+        dropped_missing_date_count=(
+            official.dropped_missing_date_count
+            + media.dropped_missing_date_count
+        ),
+        dropped_outside_window_count=(
+            official.dropped_outside_window_count
+            + media.dropped_outside_window_count
+        ),
+        dropped_weak_only_count=(
+            official.dropped_weak_only_count
+            + media.dropped_weak_only_count
+        ),
+        dropped_conflicting_date_count=(
+            official.dropped_conflicting_date_count
+            + media.dropped_conflicting_date_count
+        ),
+        dropped_injection_count=(
+            official.dropped_injection_count
+            + media.dropped_injection_count
+        ),
+        dropped_sanitization_count=(
+            official.dropped_sanitization_count
+            + media.dropped_sanitization_count
+        ),
+        dropped_source_policy_count=(
+            official.dropped_source_policy_count
+            + media.dropped_source_policy_count
+        ),
+    )
+
+
+def combine_external_search_executions(
+    primary: ExternalSearchExecution,
+    secondary: ExternalSearchExecution,
+) -> ExternalSearchExecution:
+    """Combine two independently planned reads without inventing a retry."""
+
+    if primary.provider_name != secondary.provider_name:
+        raise ValueError("external search stage providers do not match")
+    combined = primary.results + secondary.results
+    results_list: list[SanitizedExternalSearchResult] = []
+    seen_urls: set[str] = set()
+    duplicate_count = 0
+    for result in combined:
+        if result.source_url in seen_urls:
+            duplicate_count += 1
+            continue
+        seen_urls.add(result.source_url)
+        results_list.append(result)
+    results = tuple(results_list)
+    return replace(
+        secondary,
+        results=results,
+        external_request_count=(
+            primary.external_request_count + secondary.external_request_count
+        ),
+        source_host_count=len({result.source_host for result in results}),
+        provider_candidate_count=(
+            primary.provider_candidate_count + secondary.provider_candidate_count
+        ),
+        dropped_result_count=(
+            primary.dropped_result_count
+            + secondary.dropped_result_count
+            + duplicate_count
+        ),
+        response_truncated=(
+            primary.response_truncated or secondary.response_truncated
+        ),
+        dropped_missing_date_count=(
+            primary.dropped_missing_date_count
+            + secondary.dropped_missing_date_count
+        ),
+        dropped_outside_window_count=(
+            primary.dropped_outside_window_count
+            + secondary.dropped_outside_window_count
+        ),
+        dropped_weak_only_count=(
+            primary.dropped_weak_only_count
+            + secondary.dropped_weak_only_count
+        ),
+        dropped_conflicting_date_count=(
+            primary.dropped_conflicting_date_count
+            + secondary.dropped_conflicting_date_count
+        ),
+        dropped_injection_count=(
+            primary.dropped_injection_count
+            + secondary.dropped_injection_count
+        ),
+        dropped_sanitization_count=(
+            primary.dropped_sanitization_count
+            + secondary.dropped_sanitization_count
+            + duplicate_count
+        ),
+        dropped_source_policy_count=(
+            primary.dropped_source_policy_count
+            + secondary.dropped_source_policy_count
+        ),
+    )
 
 
 def _validated_provider_name(value: object) -> str:
@@ -327,12 +764,20 @@ def _host_is_or_subdomain(host: str, parent: str) -> bool:
     return host == parent or host.endswith(f".{parent}")
 
 
+def external_source_is_recognized_official(source_host: str) -> bool:
+    host = canonicalize_external_host(source_host)
+    return any(
+        _host_is_or_subdomain(host, item)
+        for item in _OFFICIAL_DOCUMENTATION_HOSTS
+    )
+
+
 def external_source_type_label(source_host: str) -> str:
     """Return a conservative source category without asserting truthfulness."""
     host = canonicalize_external_host(source_host)
     if _host_is_or_subdomain(host, "gov.cn"):
         return "中国政府域名"
-    if any(_host_is_or_subdomain(host, item) for item in _OFFICIAL_DOCUMENTATION_HOSTS):
+    if external_source_is_recognized_official(host):
         return "已识别的官方文档域名"
     if any(_host_is_or_subdomain(host, item) for item in _CENTRAL_MEDIA_HOSTS):
         return "中央媒体域名"
@@ -398,15 +843,31 @@ async def execute_external_search(
     query: str,
     *,
     budget: ExternalReadBudget | None = None,
+    provider_search_options: Mapping[str, str] | None = None,
 ) -> ExternalSearchExecution:
     selected_budget = budget or ExternalReadBudget()
     normalized_query = normalize_external_read_query(query)
     provider_name = _validated_provider_name(getattr(provider, "name", ""))
     try:
+        search_options = dict(provider_search_options or {})
+        if set(search_options) - {
+            "topic",
+            "search_depth",
+            "time_range",
+            "start_date",
+            "end_date",
+        } or any(
+            not isinstance(value, str) for value in search_options.values()
+        ):
+            raise ExternalReadPolicyError(
+                ExternalReadPolicyCategory.INVALID_BUDGET,
+                "external search provider options are invalid",
+            )
         response = await asyncio.wait_for(
             provider.search(
                 normalized_query,
                 max_results=selected_budget.max_results,
+                **search_options,
             ),
             timeout=selected_budget.timeout_seconds,
         )
@@ -458,6 +919,9 @@ async def execute_external_search(
         except ExternalReadPolicyError:
             dropped += 1
             continue
+        if _UNAVAILABLE_PAGE_TITLE_PATTERN.search(result.title.strip()):
+            dropped += 1
+            continue
         dedupe_key = (result.title.casefold(), result.source_host)
         if dedupe_key in seen:
             dropped += 1
@@ -482,4 +946,6 @@ async def execute_external_search(
         source_host_count=len({result.source_host for result in results}),
         dropped_result_count=dropped,
         response_truncated=truncated,
+        provider_candidate_count=len(response.results),
+        dropped_sanitization_count=dropped,
     )

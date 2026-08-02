@@ -752,6 +752,12 @@ describe("DiagnosticsPage", () => {
     render(<DiagnosticsPage />);
 
     await screen.findByLabelText("当前诊断解读");
+    expect(screen.getByLabelText("手动诊断配置状态").textContent).toContain(
+      "手动诊断当前未开放",
+    );
+    expect(screen.getByLabelText("手动诊断配置状态").textContent).toContain(
+      "功能代码和历史结果没有被删除",
+    );
     expect(
       screen.getAllByText("本次快照无结构化观测记录"),
     ).toHaveLength(2);

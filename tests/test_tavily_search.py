@@ -59,11 +59,11 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
             "response_time": 1.5,
         }
 
-    def test_provider_sends_only_fixed_basic_search_contract(self):
+    def test_provider_sends_only_fixed_advanced_evidence_contract(self):
         provider, transport = self.provider(self.response(self.official_shape()))
 
         result = asyncio.run(
-            provider.search("Python 3.14 有哪些主要新特性", max_results=3)
+            provider.search("Python 3.14 有哪些主要新特性", max_results=10)
         )
 
         self.assertEqual(len(transport.calls), 1)
@@ -78,12 +78,14 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
             request["json_body"],
             {
                 "query": "Python 3.14 有哪些主要新特性",
-                "search_depth": "basic",
-                "max_results": 3,
+                "search_depth": "advanced",
+                "chunks_per_source": 2,
+                "max_results": 10,
                 "include_answer": False,
                 "include_raw_content": False,
                 "include_images": False,
                 "auto_parameters": False,
+                "include_usage": True,
             },
         )
         self.assertEqual(request["timeout_seconds"], 10)
@@ -91,11 +93,81 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
         self.assertEqual(len(result.results), 1)
         self.assertEqual(result.results[0].title, "What’s New In Python 3.14")
         self.assertEqual(result.results[0].snippet, "Python 3.14 的主要新特性概览。")
+        self.assertEqual(result.results[0].raw_content, "")
+        self.assertEqual(result.results[0].score, 0.99)
         self.assertEqual(
             result.results[0].source_url,
             "https://docs.python.org/3.14/whatsnew/3.14.html",
         )
         self.assertEqual(result.response_bytes, len(self.response(self.official_shape()).body))
+
+    def test_provider_adds_basic_news_relative_window_to_single_request(self):
+        provider, transport = self.provider(self.response(self.official_shape()))
+
+        asyncio.run(
+            provider.search(
+                "2026-06-28 至 2026-07-28 的模型发布",
+                max_results=10,
+                topic="news",
+                search_depth="basic",
+                time_range="month",
+            )
+        )
+
+        body = transport.calls[0][1]["json_body"]
+        self.assertEqual(body["topic"], "news")
+        self.assertEqual(body["search_depth"], "basic")
+        self.assertEqual(body["time_range"], "month")
+        self.assertNotIn("chunks_per_source", body)
+        self.assertEqual(body["max_results"], 10)
+
+    def test_provider_keeps_absolute_window_for_advanced_search(self):
+        provider, transport = self.provider(self.response(self.official_shape()))
+
+        asyncio.run(
+            provider.search(
+                "2026-06-28 至 2026-07-28 的模型发布",
+                max_results=10,
+                topic="news",
+                search_depth="advanced",
+                start_date="2026-06-28",
+                end_date="2026-07-28",
+            )
+        )
+
+        body = transport.calls[0][1]["json_body"]
+        self.assertEqual(body["start_date"], "2026-06-28")
+        self.assertEqual(body["end_date"], "2026-07-28")
+        self.assertEqual(body["chunks_per_source"], 2)
+
+    def test_provider_rejects_invalid_time_options_before_transport(self):
+        cases = (
+            {"topic": "invalid"},
+            {"search_depth": "deep"},
+            {"time_range": "quarter"},
+            {
+                "time_range": "month",
+                "start_date": "2026-06-28",
+                "end_date": "2026-07-28",
+            },
+            {"start_date": "2026-06-28"},
+            {"end_date": "2026-07-28"},
+            {"start_date": "20260628", "end_date": "2026-07-28"},
+            {"start_date": "2026-06-31", "end_date": "2026-07-28"},
+            {"start_date": "2026-07-29", "end_date": "2026-07-28"},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                provider, transport = self.provider(self.response(self.official_shape()))
+                with self.assertRaises(self.security.ExternalReadPolicyError) as raised:
+                    asyncio.run(
+                        provider.search("公开问题", max_results=10, **options)
+                    )
+                self.assertEqual(
+                    raised.exception.category,
+                    self.security.ExternalReadPolicyCategory.INVALID_BUDGET,
+                )
+                self.assertEqual(transport.calls, [])
 
     def test_provider_output_runs_through_existing_sanitizer_and_formatter(self):
         provider, _transport = self.provider(self.response(self.official_shape()))
@@ -114,12 +186,12 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
         self.assertNotIn("https://", execution.response_text)
         self.assertIn("来源：docs.python.org", execution.response_text)
 
-    def test_provider_ignores_answer_images_raw_content_and_unknown_fields(self):
+    def test_provider_ignores_unrequested_raw_content_and_other_fields(self):
         payload = self.official_shape()
         payload["answer"] = "This must not enter the project response."
         payload["images"] = ["https://example.com/private.png"]
         payload["unknown_future_field"] = "ignored"
-        payload["results"][0]["raw_content"] = "raw content must be ignored"
+        payload["results"][0]["raw_content"] = "用于本次受限证据综合的公开正文"
         provider, _transport = self.provider(self.response(payload))
 
         result = asyncio.run(provider.search("公开问题", max_results=3))
@@ -127,7 +199,8 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
 
         self.assertNotIn("must not enter", serialized)
         self.assertNotIn("private.png", serialized)
-        self.assertNotIn("raw content must be ignored", serialized)
+        self.assertNotIn("用于本次受限证据综合的公开正文", serialized)
+        self.assertEqual(result.results[0].raw_content, "")
         self.assertNotIn("unknown_future_field", serialized)
 
     def test_provider_deterministically_cleans_and_limits_tavily_content(self):
@@ -168,7 +241,7 @@ class TavilyBasicSearchProviderTests(unittest.TestCase):
     def test_provider_rejects_expanded_result_budget_before_transport(self):
         provider, transport = self.provider(self.response(self.official_shape()))
 
-        for value in (0, 4, True, "3"):
+        for value in (0, 11, True, "10"):
             with self.subTest(value=value):
                 with self.assertRaises(self.security.ExternalReadPolicyError) as raised:
                     asyncio.run(provider.search("公开问题", max_results=value))

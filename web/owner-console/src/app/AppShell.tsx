@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   Brain,
   ChartNoAxesCombined,
   ClipboardCheck,
@@ -14,7 +15,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 
 import { ownerConsoleApi } from "../api/ownerConsoleApi";
@@ -29,6 +30,7 @@ import {
   OWNER_CONSOLE_HEALTH_REFRESH_INTERVAL_MS,
   OWNER_CONSOLE_VISIBILITY_RESUME_DELAY_MS,
 } from "./ownerConsoleRefreshPolicy";
+import { buildOwnerConsoleAccessStatus } from "./ownerConsoleAccessStatus";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -143,10 +145,7 @@ export function AppShell() {
     const health = snapshot.health;
     const routes = snapshot.routes;
     const connected = state === "ready" && autoRefresh.lastError === null;
-    const readOnly = health?.read_only === true && routes?.read_only === true;
-    const writeClosed =
-      health?.web_write_enabled === false &&
-      routes?.web_write_enabled === false;
+    const access = buildOwnerConsoleAccessStatus(health, routes);
     const manualDiagnostics =
       health?.manual_diagnostic_actions_enabled === true;
     const schemaVersion =
@@ -155,8 +154,7 @@ export function AppShell() {
 
     return {
       connected,
-      readOnly,
-      writeClosed,
+      access,
       manualDiagnostics,
       schemaVersion,
       routeCount,
@@ -202,38 +200,68 @@ export function AppShell() {
           </div>
 
           <div className="top-status-bar__badges" aria-live="polite">
-            <StatusBadge
-              label="快照读取"
-              value={status.readOnly ? "只读" : "异常"}
-              tone={status.readOnly ? "success" : "danger"}
-            />
-            <StatusBadge
-              label="网页写入"
-              value={status.writeClosed ? "已关闭" : "异常"}
-              tone={status.writeClosed ? "success" : "danger"}
-            />
-            <StatusBadge
-              label="手动诊断"
-              value={status.manualDiagnostics ? "按需开放" : "未开放"}
-              tone={status.manualDiagnostics ? "warning" : "success"}
-            />
-            <StatusBadge
-              label="后端连接"
-              value={
-                state === "loading"
-                  ? "连接中"
-                  : status.connected
-                    ? "已连接"
-                    : "已断开"
-              }
-              tone={
-                state === "loading"
-                  ? "warning"
-                  : status.connected
-                    ? "success"
-                    : "danger"
-              }
-            />
+            <Link
+              className="top-status-link"
+              to={status.access.snapshot.route}
+              title={status.access.snapshot.detail}
+              aria-label={`快照读取：${status.access.snapshot.value}，查看诊断`}
+            >
+              <StatusBadge
+                label="快照读取"
+                value={status.access.snapshot.value}
+                tone={status.access.snapshot.tone}
+              />
+              <ArrowRight aria-hidden="true" size={13} />
+            </Link>
+            <Link
+              className="top-status-link"
+              to={status.access.webWrite.route}
+              title={status.access.webWrite.detail}
+              aria-label={`网页写入：${status.access.webWrite.value}，查看详情`}
+            >
+              <StatusBadge
+                label="网页写入"
+                value={status.access.webWrite.value}
+                tone={status.access.webWrite.tone}
+              />
+              <ArrowRight aria-hidden="true" size={13} />
+            </Link>
+            <Link
+              className="top-status-link"
+              to="/owner-console/diagnostics"
+              aria-label="手动诊断，查看诊断页面"
+            >
+              <StatusBadge
+                label="手动诊断"
+                value={status.manualDiagnostics ? "按需开放" : "未开放"}
+                tone={status.manualDiagnostics ? "warning" : "success"}
+              />
+              <ArrowRight aria-hidden="true" size={13} />
+            </Link>
+            <Link
+              className="top-status-link"
+              to="/owner-console/diagnostics"
+              aria-label={`后端连接：${status.connected ? "已连接" : "未连接"}，查看诊断`}
+            >
+              <StatusBadge
+                label="后端连接"
+                value={
+                  state === "loading"
+                    ? "连接中"
+                    : status.connected
+                      ? "已连接"
+                      : "已断开"
+                }
+                tone={
+                  state === "loading"
+                    ? "warning"
+                    : status.connected
+                      ? "success"
+                      : "danger"
+                }
+              />
+              <ArrowRight aria-hidden="true" size={13} />
+            </Link>
             <StatusBadge label="接口版本" value={status.schemaVersion} />
             <StatusBadge
               label="连接检查"
@@ -267,7 +295,7 @@ export function AppShell() {
         ) : (
           <section className="connection-banner connection-banner--ready">
             <Wifi aria-hidden="true" size={18} />
-            <span>已加载只读接口契约，资源路由 {status.routeCount} 个</span>
+            <span>已加载受控接口合同，资源路由 {status.routeCount} 个</span>
           </section>
         )}
 

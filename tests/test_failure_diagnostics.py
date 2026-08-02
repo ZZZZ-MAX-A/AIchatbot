@@ -40,6 +40,18 @@ class FailureDiagnosticsTests(unittest.TestCase):
                 diagnosis = self.failure.classify_failure(message)
                 self.assertEqual((diagnosis.category.value, diagnosis.code), expected)
 
+    def test_external_read_result_validation_does_not_suggest_database_damage(self):
+        diagnosis = self.failure.classify_failure(
+            "ExternalReadResultValidationError: external_read_report "
+            "result validation failed."
+        )
+
+        self.assertEqual(diagnosis.category.value, "data")
+        self.assertEqual(diagnosis.code, "data_validation_failed")
+        self.assertIn("外部只读", diagnosis.summary)
+        self.assertIn("不等于数据库", diagnosis.action)
+        self.assertNotIn("检查数据库", diagnosis.action)
+
     def test_sanitizes_secrets_and_urls(self):
         text = self.failure.sanitize_failure_text(
             "api_key=sk-real-secret123456 https://api.example.com/v1"

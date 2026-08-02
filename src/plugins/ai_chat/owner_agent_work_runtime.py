@@ -21,10 +21,17 @@ from .development_context_report import (
     redact_development_context_sensitive_text,
 )
 from .external_read_security import (
+    EXTERNAL_READ_SCENES,
+    EXTERNAL_READ_MAX_RESULTS,
     ExternalReadPolicyCategory,
     ExternalReadPolicyError,
+    ExternalReadStagePolicyError,
     normalize_external_read_query,
 )
+from .external_read_ephemeral_details import (
+    remember_external_read_ephemeral_detail,
+)
+from .external_search import safe_external_source_from_url
 from .failure_diagnostics import format_failure_user_message
 from .system_diagnostics_report import (
     STATUS_LABELS,
@@ -68,6 +75,7 @@ EXTERNAL_READ_REPORT_WORK_TYPE = "external_read_report"
 EXTERNAL_READ_REPORT_DISPLAY_NAME = "外部只读查询报告"
 EXTERNAL_READ_REPORT_RISK_LEVEL = "read_external"
 EXTERNAL_READ_REPORT_RESPONSE_LIMIT = 3200
+EXTERNAL_READ_REPORT_DETAIL_LIMIT = 6000
 EXTERNAL_READ_REPORT_QUERY_SUMMARY = "主人显式提供的外部只读查询（原文未持久化）"
 EXTERNAL_READ_REPORT_COMMAND_PREFIX = "执行外部只读查询"
 
@@ -102,6 +110,11 @@ WorkExecutor = Callable[[str], object | Awaitable[object]]
 class SanitizedAgentWorkResult:
     persisted_summary: str
     response_text: str
+    detail_text: str = ""
+
+
+class ExternalReadResultValidationError(ValueError):
+    """Non-content marker for a failed external-read result contract."""
 
 
 @dataclass(frozen=True)
@@ -115,6 +128,31 @@ class ExternalReadReportPayload:
     status_category: str
     error_category: str
     report_text: str
+    detail_text: str = ""
+    provider_request_count: int = 1
+    synthesis_request_count: int = 0
+    synthesis_status: str = "not_configured"
+    synthesis_error_category: str = "none"
+    owner_quality_status: str = "not_applicable"
+    provider_candidate_count: int = 0
+    dropped_missing_date_count: int = 0
+    dropped_outside_window_count: int = 0
+    dropped_weak_only_count: int = 0
+    dropped_conflicting_date_count: int = 0
+    dropped_injection_count: int = 0
+    dropped_sanitization_count: int = 0
+    official_content_strong_count: int = 0
+    dropped_source_policy_count: int = 0
+    search_stage_count: int = 1
+    official_stage_candidate_count: int = 0
+    official_stage_result_count: int = 0
+    media_stage_candidate_count: int = 0
+    media_stage_result_count: int = 0
+    planning_mode: str = "legacy_fixed"
+    scene: str = "general_lookup"
+    primary_source_scope: str = "official"
+    secondary_source_scope: str = ""
+    secondary_mode: str = "none"
 
 
 @dataclass(frozen=True)
@@ -169,9 +207,41 @@ _EXTERNAL_READ_ERROR_REPLIES = {
 
 
 def format_external_read_policy_error(error: ExternalReadPolicyError) -> str:
-    return _EXTERNAL_READ_ERROR_REPLIES.get(
+    base_reply = _EXTERNAL_READ_ERROR_REPLIES.get(
         error.category,
         "外部只读查询未完成：请求未通过本地安全策略。未自动重试或回退其他服务。",
+    )
+    if not isinstance(error, ExternalReadStagePolicyError):
+        return base_reply
+    stage_label = {
+        "official": "官方来源阶段",
+        "media_fallback": "可靠媒体补充阶段",
+        "primary": "MainAgent 规划第一阶段",
+        "secondary": "MainAgent 规划第二阶段",
+    }[error.search_stage]
+    return (
+        f"{base_reply}\n"
+        f"失败阶段：{stage_label}（{error.search_stage}）。\n"
+        f"Provider 请求：{error.provider_request_count} 次；"
+        f"综合请求：{error.synthesis_request_count} 次。"
+    )
+
+
+def _external_read_policy_failure_summary(error: ExternalReadPolicyError) -> str:
+    base_summary = (
+        f"ExternalReadPolicyError: {EXTERNAL_READ_REPORT_WORK_TYPE} "
+        f"execution failed ({error.category.value})."
+    )
+    if not isinstance(error, ExternalReadStagePolicyError):
+        return base_summary
+    request_count = error.provider_request_count
+    return (
+        f"失败检索阶段：{error.search_stage}。"
+        f"检索阶段数：{request_count}。"
+        f"外部请求：{request_count}。"
+        f"Provider请求：{request_count}。"
+        f"综合请求：{error.synthesis_request_count}。"
+        f"{base_summary}"
     )
 
 
@@ -320,29 +390,48 @@ def format_owner_agent_work_execution(execution: OwnerAgentWorkExecution) -> str
     else:
         headline = f"{task_label} #{task.id} 未进入执行。"
 
+    if is_external_read and execution.outcome == "completed":
+        answer = (execution.response_text or execution.result_summary).strip()
+        return "\n".join(
+            (
+                answer,
+                "",
+                f"联网任务 #{task.id}；如需查看主要依据、来源和执行详情："
+                f"/agent 任务详情 {task.id}",
+            )
+        )
+
     boundary = (
         "边界：只执行已注册的确定性系统概览，或主人显式选择的视觉、语音、"
         "记忆与RAG区详情；"
         "未开放深度探针、外部请求、自动重试或修复。"
         if is_system_diagnostics
         else (
-            "边界：只执行已注册的单次固定 provider 外部读取；未自动重试、打开来源页面、"
-            "写入 RAG/记忆或发送额外 QQ。"
+            "边界：MainAgent 最多规划两条且每条不超过50字的检索词，并决定来源范围与第二阶段条件；"
+            "只执行已注册的固定 provider 最多两次外部读取和最多一次零工具隔离综合；"
+            "未自动重试、打开来源页面、写入 RAG/记忆或发送额外 QQ。"
             if is_external_read
             else "边界：只执行已注册的只读研发上下文报告；未开放 shell、文件写入、Web 写操作或自动重试。"
         )
     )
 
-    return "\n".join(
-        [
-            headline,
-            f"状态：{agent_task_status_label(task.status)}",
-            "结果：",
-            execution.response_text or execution.result_summary,
-            f"查看：/agent 任务详情 {task.id}",
-            boundary,
-        ]
-    )
+    lines = [
+        headline,
+        f"状态：{agent_task_status_label(task.status)}",
+        "结果：",
+        execution.response_text or execution.result_summary,
+        f"查看：/agent 任务详情 {task.id}",
+    ]
+    if is_external_read and "主人质量：owner_quality_pending" in execution.result_summary:
+        lines.extend(
+            (
+                "主人质检：",
+                f"/agent 接受联网结果 #{task.id}",
+                f"/agent 拒绝联网结果 #{task.id}",
+            )
+        )
+    lines.append(boundary)
+    return "\n".join(lines)
 
 
 def _normalize_query(query: str) -> str:
@@ -746,7 +835,11 @@ def _validate_external_read_count(
     return value
 
 
-def _sanitize_external_read_response(text: str) -> str:
+def _sanitize_external_read_response(
+    text: str,
+    *,
+    limit: int = EXTERNAL_READ_REPORT_RESPONSE_LIMIT,
+) -> str:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("external read report response must be non-empty")
     normalized_lines: list[str] = []
@@ -755,12 +848,31 @@ def _sanitize_external_read_response(text: str) -> str:
             " " if ord(character) < 32 else character for character in line
         )
         normalized_lines.append(without_controls.rstrip())
-    normalized = redact_development_context_sensitive_text(
-        "\n".join(normalized_lines).strip()
+    source_lines: dict[str, str] = {}
+    protected_lines: list[str] = []
+    source_line_pattern = re.compile(
+        r"^来源 \[(\d{1,2})\]：([a-z0-9.:-]+) — (https?://\S+)$",
+        re.IGNORECASE,
     )
+    for line in normalized_lines:
+        matched = source_line_pattern.fullmatch(line.strip())
+        if matched is None:
+            protected_lines.append(line)
+            continue
+        source_host, source_url = safe_external_source_from_url(matched.group(3))
+        if source_host != matched.group(2).lower() or source_url != matched.group(3):
+            raise ValueError("external read source citation is invalid")
+        marker = f"__EXTERNAL_SOURCE_CITATION_{len(source_lines)}__"
+        source_lines[marker] = line
+        protected_lines.append(marker)
+    normalized = redact_development_context_sensitive_text(
+        "\n".join(protected_lines).strip()
+    )
+    for marker, source_line in source_lines.items():
+        normalized = normalized.replace(marker, source_line)
     if not normalized:
         raise ValueError("external read report response became empty")
-    return normalized[:EXTERNAL_READ_REPORT_RESPONSE_LIMIT].rstrip()
+    return normalized[:limit].rstrip()
 
 
 def _sanitize_external_read_report(
@@ -775,26 +887,166 @@ def _sanitize_external_read_report(
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", provider_name):
         raise ValueError("external read provider name is invalid")
 
+    combined_result_limit = EXTERNAL_READ_MAX_RESULTS * 2
     result_count = _validate_external_read_count(
         raw_result.result_count,
         field_name="result count",
-        maximum=3,
+        maximum=combined_result_limit,
     )
     source_host_count = _validate_external_read_count(
         raw_result.source_host_count,
         field_name="source host count",
-        maximum=3,
+        maximum=combined_result_limit,
     )
     dropped_result_count = _validate_external_read_count(
         raw_result.dropped_result_count,
         field_name="dropped result count",
+        maximum=combined_result_limit,
     )
+    provider_candidate_count = _validate_external_read_count(
+        raw_result.provider_candidate_count,
+        field_name="provider candidate count",
+        maximum=combined_result_limit,
+    )
+    official_content_strong_count = _validate_external_read_count(
+        raw_result.official_content_strong_count,
+        field_name="official content strong count",
+        maximum=combined_result_limit,
+    )
+    drop_reason_counts = {
+        "missing date": _validate_external_read_count(
+            raw_result.dropped_missing_date_count,
+            field_name="missing date drop count",
+            maximum=combined_result_limit,
+        ),
+        "outside window": _validate_external_read_count(
+            raw_result.dropped_outside_window_count,
+            field_name="outside window drop count",
+            maximum=combined_result_limit,
+        ),
+        "weak only": _validate_external_read_count(
+            raw_result.dropped_weak_only_count,
+            field_name="weak only drop count",
+            maximum=combined_result_limit,
+        ),
+        "conflicting date": _validate_external_read_count(
+            raw_result.dropped_conflicting_date_count,
+            field_name="conflicting date drop count",
+            maximum=combined_result_limit,
+        ),
+        "injection": _validate_external_read_count(
+            raw_result.dropped_injection_count,
+            field_name="injection drop count",
+            maximum=combined_result_limit,
+        ),
+        "sanitization": _validate_external_read_count(
+            raw_result.dropped_sanitization_count,
+            field_name="sanitization drop count",
+            maximum=combined_result_limit,
+        ),
+        "source policy": _validate_external_read_count(
+            raw_result.dropped_source_policy_count,
+            field_name="source policy drop count",
+            maximum=combined_result_limit,
+        ),
+    }
+    if sum(drop_reason_counts.values()) != dropped_result_count:
+        raise ValueError("external read drop reason counts do not match dropped results")
+    if provider_candidate_count != result_count + dropped_result_count:
+        raise ValueError("external read provider candidate count is inconsistent")
+    if official_content_strong_count > result_count:
+        raise ValueError("external read official content strong count exceeds results")
     external_request_count = _validate_external_read_count(
         raw_result.external_request_count,
         field_name="external request count",
+        maximum=2,
     )
-    if external_request_count != 1:
-        raise ValueError("external read must use exactly one external request")
+    if external_request_count not in {1, 2}:
+        raise ValueError("external read must use one or two external requests")
+    provider_request_count = _validate_external_read_count(
+        raw_result.provider_request_count,
+        field_name="provider request count",
+        maximum=2,
+    )
+    if provider_request_count != external_request_count:
+        raise ValueError("external read provider request count is inconsistent")
+    search_stage_count = _validate_external_read_count(
+        raw_result.search_stage_count,
+        field_name="search stage count",
+        maximum=2,
+    )
+    if search_stage_count != external_request_count:
+        raise ValueError("external read search stage count is inconsistent")
+    planning_mode = str(raw_result.planning_mode).strip().lower()
+    if planning_mode not in {"main_agent", "legacy_fixed"}:
+        raise ValueError("external read planning mode is invalid")
+    scene = str(raw_result.scene).strip().lower()
+    if scene not in EXTERNAL_READ_SCENES:
+        raise ValueError("external read scene is invalid")
+    primary_source_scope = str(raw_result.primary_source_scope).strip().lower()
+    if primary_source_scope not in {"official", "general", "news"}:
+        raise ValueError("external read primary source scope is invalid")
+    secondary_source_scope = str(raw_result.secondary_source_scope).strip().lower()
+    secondary_mode = str(raw_result.secondary_mode).strip().lower()
+    if (
+        search_stage_count == 2
+        and planning_mode == "legacy_fixed"
+        and not secondary_source_scope
+        and secondary_mode == "none"
+    ):
+        secondary_source_scope = "news"
+        secondary_mode = "if_no_results"
+    if search_stage_count == 1:
+        if secondary_source_scope or secondary_mode != "none":
+            raise ValueError("external read unused secondary plan is invalid")
+    elif (
+        secondary_source_scope not in {"official", "general", "news"}
+        or secondary_mode not in {"if_no_results", "always"}
+    ):
+        raise ValueError("external read secondary plan is invalid")
+    official_stage_candidate_count = _validate_external_read_count(
+        raw_result.official_stage_candidate_count,
+        field_name="official stage candidate count",
+        maximum=EXTERNAL_READ_MAX_RESULTS,
+    )
+    official_stage_result_count = _validate_external_read_count(
+        raw_result.official_stage_result_count,
+        field_name="official stage result count",
+        maximum=EXTERNAL_READ_MAX_RESULTS,
+    )
+    media_stage_candidate_count = _validate_external_read_count(
+        raw_result.media_stage_candidate_count,
+        field_name="media stage candidate count",
+        maximum=EXTERNAL_READ_MAX_RESULTS,
+    )
+    media_stage_result_count = _validate_external_read_count(
+        raw_result.media_stage_result_count,
+        field_name="media stage result count",
+        maximum=EXTERNAL_READ_MAX_RESULTS,
+    )
+    if official_stage_result_count > official_stage_candidate_count:
+        raise ValueError("external read official stage results exceed candidates")
+    if media_stage_result_count > media_stage_candidate_count:
+        raise ValueError("external read media stage results exceed candidates")
+    if search_stage_count == 1:
+        if (
+            official_stage_candidate_count != provider_candidate_count
+            or official_stage_result_count != result_count
+            or media_stage_candidate_count != 0
+            or media_stage_result_count != 0
+        ):
+            raise ValueError("external read one-stage metrics are inconsistent")
+    elif (
+        official_stage_result_count + media_stage_result_count != result_count
+        or official_stage_candidate_count + media_stage_candidate_count
+        != provider_candidate_count
+    ):
+        raise ValueError("external read two-stage metrics are inconsistent")
+    synthesis_request_count = _validate_external_read_count(
+        raw_result.synthesis_request_count,
+        field_name="synthesis request count",
+        maximum=1,
+    )
     if source_host_count > result_count:
         raise ValueError("external read source host count exceeds result count")
     if not isinstance(raw_result.response_truncated, bool):
@@ -803,7 +1055,7 @@ def _sanitize_external_read_report(
     if not isinstance(raw_result.status_category, str):
         raise ValueError("external read status category is invalid")
     status_category = raw_result.status_category.strip().lower()
-    if status_category not in {"completed", "no_results"}:
+    if status_category not in {"completed", "no_results", "synthesis_fallback"}:
         raise ValueError("external read status category is invalid")
     if (result_count == 0) != (status_category == "no_results"):
         raise ValueError("external read status category does not match result count")
@@ -812,8 +1064,87 @@ def _sanitize_external_read_report(
     error_category = raw_result.error_category.strip().lower()
     if error_category != "none":
         raise ValueError("external read successful payload has an invalid error category")
+    synthesis_status = str(raw_result.synthesis_status).strip().lower()
+    allowed_synthesis_statuses = {
+        "completed",
+        "call_failed",
+        "invalid_response",
+        "not_configured",
+        "not_run_no_evidence",
+        "not_run_incomplete_evidence",
+    }
+    if synthesis_status not in allowed_synthesis_statuses:
+        raise ValueError("external read synthesis status is invalid")
+    synthesis_error_category = str(
+        raw_result.synthesis_error_category
+    ).strip().lower()
+    allowed_synthesis_error_categories = {
+        "none",
+        "timeout",
+        "authentication_failed",
+        "rate_limited",
+        "request_rejected",
+        "request_too_large",
+        "content_policy_rejected",
+        "provider_unavailable",
+        "connection_failed",
+        "unexpected_failure",
+        "response_contract_invalid",
+    }
+    if synthesis_error_category not in allowed_synthesis_error_categories:
+        raise ValueError("external read synthesis error category is invalid")
+    if synthesis_status in {"completed", "call_failed", "invalid_response"}:
+        if synthesis_request_count != 1:
+            raise ValueError("external read synthesis request count is invalid")
+    elif synthesis_request_count != 0:
+        raise ValueError("external read synthesis request count is invalid")
+    if synthesis_status == "completed" and synthesis_error_category != "none":
+        raise ValueError("external read completed synthesis cannot have an error")
+    if synthesis_status == "call_failed" and synthesis_error_category in {
+        "none",
+        "response_contract_invalid",
+    }:
+        raise ValueError("external read call failure category is invalid")
+    if (
+        synthesis_status == "invalid_response"
+        and synthesis_error_category != "response_contract_invalid"
+    ):
+        raise ValueError("external read response failure category is invalid")
+    if synthesis_status in {
+        "not_configured",
+        "not_run_no_evidence",
+        "not_run_incomplete_evidence",
+    } and (
+        synthesis_error_category != "none"
+    ):
+        raise ValueError("external read non-call synthesis error is invalid")
+    if status_category == "completed" and synthesis_status != "completed":
+        raise ValueError("external read completed status requires synthesis")
+    if status_category == "synthesis_fallback" and synthesis_status not in {
+        "call_failed",
+        "invalid_response",
+        "not_configured",
+        "not_run_no_evidence",
+        "not_run_incomplete_evidence",
+    }:
+        raise ValueError("external read fallback status is invalid")
+    owner_quality_status = str(raw_result.owner_quality_status).strip().lower()
+    if owner_quality_status not in {"owner_quality_pending", "not_applicable"}:
+        raise ValueError("external read owner quality status is invalid")
+    if status_category == "no_results" and owner_quality_status != "not_applicable":
+        raise ValueError("external read no-result quality status is invalid")
 
     response_text = _sanitize_external_read_response(raw_result.report_text)
+    if not isinstance(raw_result.detail_text, str):
+        raise ValueError("external read report detail must be text")
+    detail_text = (
+        _sanitize_external_read_response(
+            raw_result.detail_text,
+            limit=EXTERNAL_READ_REPORT_DETAIL_LIMIT,
+        )
+        if raw_result.detail_text.strip()
+        else ""
+    )
     persisted_summary = "\n".join(
         [
             "外部只读查询已完成。",
@@ -821,7 +1152,31 @@ def _sanitize_external_read_report(
             f"结果数：{result_count}。",
             f"来源主机数：{source_host_count}。",
             f"丢弃结果数：{dropped_result_count}。",
+            f"Provider候选数：{provider_candidate_count}。",
+            f"官方正文强日期数：{official_content_strong_count}。",
+            f"检索阶段数：{search_stage_count}。",
+            f"规划模式：{planning_mode}。",
+            f"业务场景：{scene}。",
+            f"第一阶段来源：{primary_source_scope}。",
+            f"第二阶段来源：{secondary_source_scope or 'none'}。",
+            f"第二阶段条件：{secondary_mode}。",
+            f"第一阶段候选数：{official_stage_candidate_count}。",
+            f"第一阶段合格数：{official_stage_result_count}。",
+            f"第二阶段候选数：{media_stage_candidate_count}。",
+            f"第二阶段合格数：{media_stage_result_count}。",
+            f"日期缺失丢弃：{drop_reason_counts['missing date']}。",
+            f"窗口外丢弃：{drop_reason_counts['outside window']}。",
+            f"仅弱日期丢弃：{drop_reason_counts['weak only']}。",
+            f"日期冲突丢弃：{drop_reason_counts['conflicting date']}。",
+            f"注入嫌疑丢弃：{drop_reason_counts['injection']}。",
+            f"清洗去重丢弃：{drop_reason_counts['sanitization']}。",
+            f"来源策略丢弃：{drop_reason_counts['source policy']}。",
             f"外部请求：{external_request_count}。",
+            f"Provider请求：{provider_request_count}。",
+            f"综合请求：{synthesis_request_count}。",
+            f"综合状态：{synthesis_status}。",
+            f"综合错误：{synthesis_error_category}。",
+            f"主人质量：{owner_quality_status}。",
             f"响应截断：{'是' if raw_result.response_truncated else '否'}。",
             f"状态类别：{status_category}。",
             f"错误类别：{error_category}。",
@@ -832,6 +1187,7 @@ def _sanitize_external_read_report(
     return SanitizedAgentWorkResult(
         persisted_summary=persisted_summary,
         response_text=response_text,
+        detail_text=detail_text,
     )
 
 
@@ -939,7 +1295,14 @@ class OwnerAgentWorkRuntime:
         try:
             value = spec.executor(normalized_query)
             raw_result = await value if inspect.isawaitable(value) else value
-            sanitized_result = spec.result_sanitizer(raw_result)
+            try:
+                sanitized_result = spec.result_sanitizer(raw_result)
+            except ValueError as exc:
+                if spec.name == EXTERNAL_READ_REPORT_WORK_TYPE:
+                    raise ExternalReadResultValidationError(
+                        "external read result contract validation failed"
+                    ) from exc
+                raise
         except Exception as exc:
             external_policy_error = (
                 exc
@@ -947,10 +1310,18 @@ class OwnerAgentWorkRuntime:
                 and isinstance(exc, ExternalReadPolicyError)
                 else None
             )
+            external_result_validation_error = (
+                spec.name == EXTERNAL_READ_REPORT_WORK_TYPE
+                and isinstance(exc, ExternalReadResultValidationError)
+            )
             safe_error = (
-                f"ExternalReadPolicyError: {spec.name} execution failed "
-                f"({external_policy_error.category.value})."
+                _external_read_policy_failure_summary(external_policy_error)
                 if external_policy_error is not None
+                else (
+                    "ExternalReadResultValidationError: external_read_report "
+                    "result validation failed."
+                )
+                if external_result_validation_error
                 else f"{type(exc).__name__}: {spec.name} execution failed."
             )
             failed_task, _ = fail_agent_task_work(
@@ -968,6 +1339,12 @@ class OwnerAgentWorkRuntime:
                 response_text=(
                     format_external_read_policy_error(external_policy_error)
                     if external_policy_error is not None
+                    else (
+                        "外部只读查询未完成：搜索或综合结果未通过本地结构合同校验；"
+                        "这不等于数据库、文件或索引损坏。"
+                        "本次未自动重试，也未覆盖任何本地数据。"
+                    )
+                    if external_result_validation_error
                     else format_failure_user_message(
                         safe_error,
                         component=spec.display_name,
@@ -983,6 +1360,18 @@ class OwnerAgentWorkRuntime:
             work_type=spec.name,
             result=result_summary,
         )
+        if (
+            completed
+            and completed_task is not None
+            and spec.name == EXTERNAL_READ_REPORT_WORK_TYPE
+            and sanitized_result.detail_text
+        ):
+            remember_external_read_ephemeral_detail(
+                session_key=self.context.session_key,
+                user_id=self.context.user_id,
+                task_id=completed_task.id,
+                detail_text=sanitized_result.detail_text,
+            )
         return OwnerAgentWorkExecution(
             work_type=spec.name,
             task=completed_task,

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Callable, TypeAlias
+from typing import Any, Callable, TypeAlias
 
-from .access_store import AccessStore, merged_access
+from .access_store import AccessStore, load_access_store, merged_access
 from .config import AiChatConfig, load_config
 from .gap_scene_summaries import gap_scene_summary_stats
 from .manual_memory import manual_memory_stats
@@ -54,18 +54,36 @@ def build_owner_console_access_from_config(config: AiChatConfig) -> AccessStore:
 def create_owner_console_http_read_runtime(
     *,
     config_provider: ConfigProvider = load_config,
+    approval_actionability_provider: Callable[[Any], Any] | None = None,
+    task_actions_enabled: bool = False,
+    access_actions_enabled: bool = False,
+    dynamic_access_provider: Callable[[], AccessStore] | None = None,
 ) -> OwnerConsoleReadRuntime:
+    dynamic_provider = dynamic_access_provider or load_access_store
+
+    def effective_access_provider() -> AccessStore:
+        config = config_provider()
+        dynamic = dynamic_provider()
+        return AccessStore(
+            private_whitelist=config.private_whitelist | dynamic.private_whitelist,
+            group_whitelist=config.group_whitelist | dynamic.group_whitelist,
+            user_blacklist=config.user_blacklist | dynamic.user_blacklist,
+            revision=dynamic.revision,
+        )
+
     return OwnerConsoleReadRuntime(
         config_provider=config_provider,
-        access_provider=lambda: build_owner_console_access_from_config(
-            config_provider()
-        ),
+        access_provider=effective_access_provider,
         role_cards_provider=list_role_cards,
         active_role_card_key_provider=_active_owner_console_role_card_key,
         memory_stats_provider=memory_stats,
         manual_memory_stats_provider=manual_memory_stats,
         gap_scene_stats_provider=gap_scene_summary_stats,
         rag_document_stats_provider=rag_document_stats,
+        approval_actionability_provider=approval_actionability_provider,
+        task_actions_enabled=task_actions_enabled,
+        access_actions_enabled=access_actions_enabled,
+        dynamic_access_provider=dynamic_provider,
     )
 
 

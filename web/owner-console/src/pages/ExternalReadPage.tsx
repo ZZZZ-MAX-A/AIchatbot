@@ -61,8 +61,9 @@ export function ExternalReadPage() {
           <section className="metric-grid" aria-label="联网配置概览">
             <article className="metric-tile"><span>功能开关</span><strong>{data.enabled ? "已开启" : "已关闭"}</strong></article>
             <article className="metric-tile"><span>执行器</span><strong>{data.executor_configured ? "已就绪" : "未就绪"}</strong></article>
+            <article className="metric-tile"><span>隔离综合</span><strong>{data.synthesis_configured ? "已配置" : "安全回退"}</strong></article>
             <article className="metric-tile"><span>搜索模式</span><strong>{data.search_depth}</strong></article>
-            <article className="metric-tile"><span>最多结果</span><strong>{data.max_results}</strong></article>
+            <article className="metric-tile"><span>每阶段最多结果</span><strong>{data.max_results}</strong></article>
           </section>
 
           <section className="detail-grid">
@@ -91,7 +92,32 @@ export function ExternalReadPage() {
                   <div><dt>结果数</dt><dd>{safeCount(data.recent_task.result_count)}</dd></div>
                   <div><dt>来源主机数</dt><dd>{safeCount(data.recent_task.source_host_count)}</dd></div>
                   <div><dt>丢弃结果数</dt><dd>{safeCount(data.recent_task.dropped_result_count)}</dd></div>
+                  <div><dt>Provider 候选数</dt><dd>{safeCount(data.recent_task.provider_candidate_count)}</dd></div>
+                  <div><dt>官方正文强日期数</dt><dd>{safeCount(data.recent_task.official_content_strong_count)}</dd></div>
+                  <div><dt>失败检索阶段</dt><dd>{data.recent_task.failed_search_stage || "无"}</dd></div>
+                  <div><dt>检索阶段数</dt><dd>{safeCount(data.recent_task.search_stage_count)}</dd></div>
+                  <div><dt>规划模式</dt><dd>{data.recent_task.planning_mode || "未知"}</dd></div>
+                  <div><dt>业务场景</dt><dd>{data.recent_task.scene || "未知"}</dd></div>
+                  <div><dt>第一阶段来源</dt><dd>{data.recent_task.primary_source_scope || "未知"}</dd></div>
+                  <div><dt>第二阶段来源</dt><dd>{data.recent_task.secondary_source_scope || "none"}</dd></div>
+                  <div><dt>第二阶段条件</dt><dd>{data.recent_task.secondary_mode || "none"}</dd></div>
+                  <div><dt>第一阶段候选数</dt><dd>{safeCount(data.recent_task.official_stage_candidate_count)}</dd></div>
+                  <div><dt>第一阶段合格数</dt><dd>{safeCount(data.recent_task.official_stage_result_count)}</dd></div>
+                  <div><dt>第二阶段候选数</dt><dd>{safeCount(data.recent_task.media_stage_candidate_count)}</dd></div>
+                  <div><dt>第二阶段合格数</dt><dd>{safeCount(data.recent_task.media_stage_result_count)}</dd></div>
+                  <div><dt>日期缺失丢弃</dt><dd>{safeCount(data.recent_task.dropped_missing_date_count)}</dd></div>
+                  <div><dt>窗口外丢弃</dt><dd>{safeCount(data.recent_task.dropped_outside_window_count)}</dd></div>
+                  <div><dt>仅弱日期丢弃</dt><dd>{safeCount(data.recent_task.dropped_weak_only_count)}</dd></div>
+                  <div><dt>日期冲突丢弃</dt><dd>{safeCount(data.recent_task.dropped_conflicting_date_count)}</dd></div>
+                  <div><dt>注入嫌疑丢弃</dt><dd>{safeCount(data.recent_task.dropped_injection_count)}</dd></div>
+                  <div><dt>清洗/去重/预算丢弃</dt><dd>{safeCount(data.recent_task.dropped_sanitization_count)}</dd></div>
+                  <div><dt>来源策略丢弃</dt><dd>{safeCount(data.recent_task.dropped_source_policy_count)}</dd></div>
                   <div><dt>外部请求数</dt><dd>{safeCount(data.recent_task.external_request_count)}</dd></div>
+                  <div><dt>Provider 请求</dt><dd>{safeCount(data.recent_task.provider_request_count)}</dd></div>
+                  <div><dt>综合请求</dt><dd>{safeCount(data.recent_task.synthesis_request_count)}</dd></div>
+                  <div><dt>综合状态</dt><dd>{data.recent_task.synthesis_status || "未知"}</dd></div>
+                  <div><dt>综合错误类别</dt><dd>{data.recent_task.synthesis_error_category || "无"}</dd></div>
+                  <div><dt>主人质量</dt><dd>{data.recent_task.owner_quality_status || "未知"}</dd></div>
                   <div><dt>状态类别</dt><dd>{data.recent_task.status_category || "未知"}</dd></div>
                   <div><dt>错误类别</dt><dd>{data.recent_task.error_category || "无"}</dd></div>
                   <div><dt>更新时间</dt><dd>{data.recent_task.updated_at || "未知"}</dd></div>
@@ -105,17 +131,19 @@ export function ExternalReadPage() {
           <section className="detail-panel">
             <h2>安全边界</h2>
             <div className="boundary-grid">
-              <StatusBadge label="主人私聊严格命令" value={yesNo(data.boundary.owner_private_strict_command_only)} tone="success" />
-              <StatusBadge label="Main LLM 触发" value={data.boundary.main_llm_can_trigger ? "允许" : "禁止"} tone={data.boundary.main_llm_can_trigger ? "danger" : "success"} />
-              <StatusBadge label="普通聊天触发" value={data.boundary.ordinary_chat_can_trigger ? "允许" : "禁止"} tone={data.boundary.ordinary_chat_can_trigger ? "danger" : "success"} />
+              <StatusBadge label="显式 /agent 为唯一入口" value={yesNo(data.boundary.owner_private_strict_command_only)} tone={data.boundary.owner_private_strict_command_only ? "success" : "danger"} />
+              <StatusBadge label="/agent 内 MainAgent 选择联网" value={data.boundary.main_llm_can_trigger ? "允许" : "禁止"} tone={data.boundary.main_llm_can_trigger ? "success" : "warning"} />
+              <StatusBadge label="日常聊天注入 MainAgent" value={data.boundary.ordinary_chat_can_trigger ? "异常" : "禁止"} tone={data.boundary.ordinary_chat_can_trigger ? "danger" : "success"} />
               <StatusBadge label="任意 URL" value={data.boundary.arbitrary_url_fetch_allowed ? "允许" : "禁止"} tone={data.boundary.arbitrary_url_fetch_allowed ? "danger" : "success"} />
-              <StatusBadge label="AI answer / raw / images" value="关闭" tone="success" />
-              <StatusBadge label="retry / fallback" value="关闭" tone="success" />
+              <StatusBadge label="Tavily AI answer / images" value="关闭" tone="success" />
+              <StatusBadge label="Tavily raw content" value={data.boundary.raw_content_enabled ? "启用" : "关闭"} tone={data.boundary.raw_content_enabled ? "danger" : "success"} />
+              <StatusBadge label="零工具隔离综合" value={data.boundary.isolated_synthesis_enabled ? "启用" : "关闭"} tone="success" />
+              <StatusBadge label="retry / provider fallback" value="关闭" tone="success" />
               <StatusBadge label="实时探测" value={data.boundary.live_probe_executed ? "已执行" : "未执行"} tone={data.boundary.live_probe_executed ? "danger" : "success"} />
-              <StatusBadge label="Query / 正文 / URL 暴露" value="否" tone="success" />
+              <StatusBadge label="本状态页暴露 Query / 正文 / URL" value="否" tone="success" />
               <StatusBadge label="凭据值暴露" value={data.boundary.credential_value_exposed ? "是" : "否"} tone={data.boundary.credential_value_exposed ? "danger" : "success"} />
             </div>
-            <p className="panel-note">本页不执行实时网络探测。这里的正常只表示本地配置、依赖兼容性和最近任务元数据符合预期，不能证明 Tavily 此刻可达。</p>
+            <p className="panel-note">本页不执行实时网络探测。MainAgent 先选择业务场景、来源范围、时间和证据角色；运行时仍强制最多两次固定 Tavily 读取、最多一次隔离综合、零自动重试与零 Provider 回退。官方正文强日期仅限固定官方域名、明确发布语义和唯一窗口内完整日期通过本地规则；这里的正常只表示本地配置、依赖兼容性和最近任务元数据符合预期，不能证明 Tavily 此刻可达。</p>
           </section>
         </>
       ) : null}

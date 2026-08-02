@@ -86,6 +86,178 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(actionability.blocked_reason, "")
         self.assertTrue(actionability.future_operation_only)
 
+    def test_task_list_paginates_matching_rows_and_clamps_out_of_range_pages(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_ids = [
+                self.agent_tasks.create_agent_task(
+                    session_key="private:10001",
+                    user_id="10001",
+                    goal=f"pagination task {index}",
+                )
+                for index in range(25)
+            ]
+            stale_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+            with self.database.connect() as connection:
+                connection.executemany(
+                    "UPDATE agent_tasks SET updated_at = ? WHERE id = ?",
+                    [(stale_at, task_id) for task_id in task_ids[:9]],
+                )
+            context = self.owner_console.OwnerConsoleContext(
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+            first = self.owner_console.build_owner_console_task_list(
+                context,
+                page=1,
+                page_size=10,
+            )
+            second = self.owner_console.build_owner_console_task_list(
+                context,
+                page=2,
+                page_size=10,
+            )
+            third = self.owner_console.build_owner_console_task_list(
+                context,
+                page=3,
+                page_size=10,
+            )
+            overflow = self.owner_console.build_owner_console_task_list(
+                context,
+                page=99,
+                page_size=10,
+            )
+            stale_second = self.owner_console.build_owner_console_task_list(
+                context,
+                status="pending",
+                category="stale_residual",
+                page=2,
+                page_size=4,
+            )
+
+        newest_first = list(reversed(task_ids))
+        self.assertEqual([row.task_id for row in first.rows], newest_first[:10])
+        self.assertEqual([row.task_id for row in second.rows], newest_first[10:20])
+        self.assertEqual([row.task_id for row in third.rows], newest_first[20:])
+        self.assertEqual(first.total_matching, 25)
+        self.assertEqual(first.total_pages, 3)
+        self.assertFalse(first.has_previous)
+        self.assertTrue(first.has_next)
+        self.assertTrue(second.has_previous)
+        self.assertTrue(second.has_next)
+        self.assertEqual(third.total_visible, 5)
+        self.assertTrue(third.has_previous)
+        self.assertFalse(third.has_next)
+        self.assertEqual(overflow.page, 3)
+        self.assertEqual([row.task_id for row in overflow.rows], newest_first[20:])
+        self.assertEqual(stale_second.total_matching, 9)
+        self.assertEqual(stale_second.total_pages, 3)
+        self.assertEqual(
+            [row.task_id for row in stale_second.rows],
+            list(reversed(task_ids[:9]))[4:8],
+        )
+
+    def test_pending_tasks_are_classified_and_category_filters_are_actionable(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            stale_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="old residual task",
+            )
+            ordinary_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="fresh ordinary task",
+            )
+            awaiting_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="task waiting approval",
+            )
+            approval_id = self.agent_tasks.create_agent_approval(
+                task_id=awaiting_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="classification test",
+            )
+            stale_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+            with self.database.connect() as connection:
+                connection.execute(
+                    "UPDATE agent_tasks SET updated_at = ? WHERE id = ?",
+                    (stale_at, stale_id),
+                )
+            context = self.owner_console.OwnerConsoleContext(
+                session_key="private:10001",
+                user_id="10001",
+            )
+            runtime = self.owner_console.OwnerConsoleReadRuntime(
+                config_provider=lambda: self.config_module.load_config(),
+                access_provider=lambda: self.access_store.EMPTY_STORE,
+                task_actions_enabled=True,
+            )
+            overview = runtime.build_overview(context, task_limit=10)
+            awaiting = runtime.build_task_list(
+                context,
+                status="pending",
+                category="awaiting_approval",
+            )
+            ordinary = runtime.build_task_list(
+                context,
+                status="pending",
+                category="ordinary_pending",
+            )
+            stale = runtime.build_task_list(
+                context,
+                status="pending",
+                category="stale_residual",
+            )
+
+        self.assertEqual([row.task_id for row in awaiting.rows], [awaiting_id])
+        self.assertEqual(awaiting.rows[0].pending_approval_ids, [approval_id])
+        self.assertFalse(awaiting.rows[0].actionability.can_cancel)
+        self.assertEqual([row.task_id for row in ordinary.rows], [ordinary_id])
+        self.assertTrue(ordinary.rows[0].actionability.can_cancel)
+        self.assertEqual([row.task_id for row in stale.rows], [stale_id])
+        self.assertEqual(stale.rows[0].processing_label, "旧任务残留")
+        self.assertTrue(stale.rows[0].actionability.can_cancel)
+        self.assertEqual(overview.counters.awaiting_approval_tasks, 1)
+        self.assertEqual(overview.counters.ordinary_pending_tasks, 1)
+        self.assertEqual(overview.counters.stale_pending_tasks, 1)
+
+    def test_external_read_snapshot_reports_autonomous_owner_chat_trigger(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_AGENT_WEB": "true",
+                "ENABLE_MAIN_AGENT": "true",
+                "MAIN_AGENT_USE_LLM": "true",
+                "TAVILY_API_KEY": "test-tavily-key",
+                "MAIN_LLM_API_KEY": "test-main-key",
+            },
+            clear=False,
+        ):
+            config = self.config_module.load_config()
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            snapshot = self.owner_console.build_owner_console_external_read_snapshot(
+                config,
+                self.owner_console.OwnerConsoleContext(
+                    session_key="private:10001",
+                    user_id="10001",
+                ),
+                httpx_version="0.28.1",
+                httpcore_version="1.0.9",
+            )
+
+        self.assertTrue(snapshot.executor_configured)
+        self.assertTrue(snapshot.synthesis_configured)
+        self.assertTrue(snapshot.boundary.owner_private_strict_command_only)
+        self.assertTrue(snapshot.boundary.main_llm_can_trigger)
+        self.assertFalse(snapshot.boundary.ordinary_chat_can_trigger)
+
     def test_running_work_task_is_visible_through_read_only_task_models(self):
         temp_dir, patcher = self.temp_database()
         with temp_dir, patcher:
@@ -379,6 +551,8 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
                 "ENABLE_PRIVATE_CHAT": "true",
                 "ENABLE_GROUP_CHAT": "true",
                 "ALLOW_UNKNOWN_PRIVATE_CHAT": "false",
+                "PRIVATE_WHITELIST": "10001",
+                "GROUP_WHITELIST": "90001",
             },
             clear=True,
         ):
@@ -392,19 +566,44 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         snapshot = self.owner_console.build_owner_console_access_control_snapshot(
             config,
             access,
+            dynamic_access=self.access_store.AccessStore(
+                private_whitelist=frozenset({"10001", "20002", "30003"}),
+                group_whitelist=frozenset({"90002"}),
+                user_blacklist=frozenset({"40004"}),
+                revision=3,
+            ),
             item_limit=2,
+            access_actions_enabled=True,
         )
 
         self.assertTrue(snapshot.owner_configured)
         self.assertTrue(snapshot.private_chat_enabled)
         self.assertTrue(snapshot.group_chat_enabled)
         self.assertEqual(snapshot.unknown_private_policy, "deny")
+        self.assertEqual(snapshot.revision, 3)
+        self.assertTrue(snapshot.access_actions_enabled)
         self.assertEqual(snapshot.private_whitelist.count, 3)
-        self.assertEqual(snapshot.private_whitelist.items, ["10001", "20002"])
+        self.assertEqual(
+            [item.value for item in snapshot.private_whitelist.items],
+            ["10001", "20002"],
+        )
         self.assertTrue(snapshot.private_whitelist.truncated)
-        self.assertEqual(snapshot.group_whitelist.items, ["90001", "90002"])
+        self.assertEqual(
+            snapshot.private_whitelist.items[0].source,
+            "environment_and_dynamic",
+        )
+        self.assertTrue(snapshot.private_whitelist.items[0].editable)
+        self.assertEqual(snapshot.private_whitelist.items[1].source, "dynamic")
+        self.assertTrue(snapshot.private_whitelist.items[1].editable)
+        self.assertEqual(
+            [item.value for item in snapshot.group_whitelist.items],
+            ["90001", "90002"],
+        )
         self.assertFalse(snapshot.group_whitelist.truncated)
-        self.assertEqual(snapshot.user_blacklist.items, ["40004"])
+        self.assertEqual(
+            [item.value for item in snapshot.user_blacklist.items],
+            ["40004"],
+        )
         self.assertTrue(snapshot.boundary.owner_write_requires_approval)
 
     def test_settings_snapshot_redacts_urls_and_lists_role_cards(self):
@@ -671,7 +870,10 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIsNotNone(approval_detail)
         assert approval_detail is not None
         self.assertEqual(approval_detail.approval.approval_id, approval_id)
-        self.assertEqual(access_snapshot.private_whitelist.items, ["10001"])
+        self.assertEqual(
+            [item.value for item in access_snapshot.private_whitelist.items],
+            ["10001"],
+        )
         self.assertFalse(access_snapshot.group_chat_enabled)
         self.assertEqual(settings_snapshot.role_cards[0].key, "aike")
         self.assertTrue(settings_snapshot.role_cards[0].active)
@@ -745,7 +947,10 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             any(row.direct_qq_dependency_allowed for row in audit.rows)
         )
         self.assertFalse(any(row.write_side_effect_allowed for row in audit.rows))
-        self.assertEqual(access_snapshot.private_whitelist.items, ["10001"])
+        self.assertEqual(
+            [item.value for item in access_snapshot.private_whitelist.items],
+            ["10001"],
+        )
         self.assertEqual(memory_snapshot.counts.message_count, 12)
         self.assertEqual(
             serialized_audit["data"]["rows"][0]["provider_name"],

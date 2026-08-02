@@ -57,6 +57,12 @@ def can_group_chat(
 def message_length_limit(config: AiChatConfig, event: MessageEvent) -> int:
     if isinstance(event, GroupMessageEvent):
         return config.max_group_message_length
+    if is_owner(config, event):
+        return getattr(
+            config,
+            "owner_max_private_message_length",
+            config.max_private_message_length,
+        )
     return config.max_private_message_length
 
 

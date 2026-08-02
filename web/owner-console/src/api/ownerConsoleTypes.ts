@@ -7,6 +7,9 @@ export type OwnerConsoleHealth = {
   snapshot_read_only: boolean;
   http_api_enabled: boolean;
   web_write_enabled: boolean;
+  approval_actions_enabled: boolean;
+  task_actions_enabled: boolean;
+  access_control_actions_enabled: boolean;
   manual_diagnostic_actions_enabled: boolean;
   automatic_diagnostics_enabled: boolean;
   configuration_write_enabled: boolean;
@@ -38,7 +41,7 @@ export type OwnerConsoleRouteRow = {
   name: string;
   resource: string;
   path: string;
-  method: "GET";
+  method: "GET" | "POST";
   read_page: string;
   runtime_method: string;
   read_model: string;
@@ -51,6 +54,9 @@ export type OwnerConsoleRouteRow = {
   direct_qq_dependency_allowed?: boolean;
   write_side_effect_allowed?: boolean;
   manual_runtime_action_allowed?: boolean;
+  approval_action_allowed?: boolean;
+  task_action_allowed?: boolean;
+  access_action_allowed?: boolean;
 };
 
 export type OwnerConsoleRouteContract = {
@@ -59,6 +65,9 @@ export type OwnerConsoleRouteContract = {
   context_override_allowed: boolean;
   write_routes_enabled: boolean;
   manual_runtime_action_routes_enabled: boolean;
+  approval_action_routes_enabled: boolean;
+  task_action_routes_enabled: boolean;
+  access_action_routes_enabled: boolean;
   route_count: number;
   rows: OwnerConsoleRouteRow[];
   boundary: Record<string, boolean>;
@@ -94,7 +103,18 @@ export type OwnerConsoleTaskRow = {
   latest_event_summary: string;
   pending_approval_ids: number[];
   next_action: string;
+  next_action_code: string;
   work_type: string;
+  processing_category: string;
+  processing_label: string;
+  processing_detail: string;
+  actionability: OwnerConsoleTaskActionability;
+};
+
+export type OwnerConsoleTaskActionability = {
+  can_cancel: boolean;
+  task_actions_enabled: boolean;
+  blocked_reason: string;
 };
 
 export type OwnerConsoleTaskEventRow = {
@@ -146,6 +166,9 @@ export type OwnerConsoleOverviewCounters = {
   pending_approvals: number;
   recent_tasks_visible: number;
   pending_approvals_visible: number;
+  awaiting_approval_tasks: number;
+  ordinary_pending_tasks: number;
+  stale_pending_tasks: number;
 };
 
 export type OwnerConsoleOverview = {
@@ -572,6 +595,94 @@ export type OwnerConsoleActionEnvelope<TData> =
     business_data_write_enabled: false;
   };
 
+export type OwnerConsoleApprovalActionResult = {
+  generated_at: string;
+  approval_id: number;
+  task_id: number;
+  decision: "approved" | "rejected";
+  decision_changed: boolean;
+  resume_attempted: boolean;
+  resume_executed: boolean;
+  task_status: string;
+  outcome: string;
+  code: string;
+  safe_message: string;
+};
+
+export type OwnerConsoleApprovalActionPayload = {
+  action: OwnerConsoleApprovalActionResult;
+  approval_detail: OwnerConsoleApprovalDetail;
+};
+
+export type OwnerConsoleApprovalActionEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleApprovalActionPayload> & {
+    read_only: false;
+    web_write_enabled: true;
+    manual_runtime_action: false;
+    approval_action: true;
+    configuration_write_enabled: false;
+    business_data_write_enabled: true;
+  };
+
+export type OwnerConsoleTaskActionResult = {
+  generated_at: string;
+  task_id: number;
+  previous_status: string;
+  task_status: string;
+  status_changed: boolean;
+  tool_executed: false;
+  approval_resumed: false;
+  outcome: string;
+  code: string;
+  safe_message: string;
+};
+
+export type OwnerConsoleTaskActionPayload = {
+  action: OwnerConsoleTaskActionResult;
+  task_detail: OwnerConsoleTaskDetail;
+};
+
+export type OwnerConsoleTaskActionEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleTaskActionPayload> & {
+    read_only: false;
+    web_write_enabled: true;
+    manual_runtime_action: false;
+    approval_action: false;
+    task_action: true;
+    configuration_write_enabled: false;
+    business_data_write_enabled: true;
+  };
+
+export type OwnerConsoleAccessActionResult = {
+  generated_at: string;
+  list_name: OwnerConsoleAccessListName;
+  operation: "add" | "remove";
+  item: string;
+  changed: true;
+  effective: boolean;
+  revision: number;
+  source_after: string;
+  code: string;
+  safe_message: string;
+};
+
+export type OwnerConsoleAccessActionPayload = {
+  action: OwnerConsoleAccessActionResult;
+  access_control: OwnerConsoleAccessControlSnapshot;
+};
+
+export type OwnerConsoleAccessActionEnvelope =
+  OwnerConsoleEnvelope<OwnerConsoleAccessActionPayload> & {
+    read_only: false;
+    web_write_enabled: true;
+    manual_runtime_action: false;
+    approval_action: false;
+    task_action: false;
+    access_action: true;
+    configuration_write_enabled: false;
+    business_data_write_enabled: true;
+  };
+
 export type OwnerConsoleProjectDocRagProbeEnvelope =
   OwnerConsoleActionEnvelope<OwnerConsoleManualDiagnosticRun>;
 
@@ -671,7 +782,32 @@ export type OwnerConsoleExternalReadTaskSnapshot = {
   result_count: number | null;
   source_host_count: number | null;
   dropped_result_count: number | null;
+  provider_candidate_count: number | null;
+  official_content_strong_count: number | null;
+  failed_search_stage: string;
+  search_stage_count: number | null;
+  official_stage_candidate_count: number | null;
+  official_stage_result_count: number | null;
+  media_stage_candidate_count: number | null;
+  media_stage_result_count: number | null;
+  planning_mode: string;
+  scene: string;
+  primary_source_scope: string;
+  secondary_source_scope: string;
+  secondary_mode: string;
+  dropped_missing_date_count: number | null;
+  dropped_outside_window_count: number | null;
+  dropped_weak_only_count: number | null;
+  dropped_conflicting_date_count: number | null;
+  dropped_injection_count: number | null;
+  dropped_sanitization_count: number | null;
+  dropped_source_policy_count: number | null;
   external_request_count: number | null;
+  provider_request_count: number | null;
+  synthesis_request_count: number | null;
+  synthesis_status: string;
+  synthesis_error_category: string;
+  owner_quality_status: string;
   status_category: string;
   error_category: string;
   updated_at: string;
@@ -684,6 +820,7 @@ export type OwnerConsoleExternalReadBoundary = {
   arbitrary_url_fetch_allowed: boolean;
   ai_answer_enabled: boolean;
   raw_content_enabled: boolean;
+  isolated_synthesis_enabled: boolean;
   images_enabled: boolean;
   retry_enabled: boolean;
   fallback_enabled: boolean;
@@ -700,6 +837,7 @@ export type OwnerConsoleExternalReadSnapshot = {
   enabled: boolean;
   credential_configured: boolean;
   executor_configured: boolean;
+  synthesis_configured: boolean;
   provider_name: string;
   search_depth: string;
   max_results: number;
@@ -783,15 +921,30 @@ export type OwnerConsoleReliabilitySnapshot = {
 export type OwnerConsoleReliabilityEnvelope =
   OwnerConsoleEnvelope<OwnerConsoleReliabilitySnapshot>;
 
+export type OwnerConsoleAccessListName =
+  | "private_whitelist"
+  | "group_whitelist"
+  | "user_blacklist";
+
+export type OwnerConsoleAccessListItem = {
+  value: string;
+  source: "environment" | "dynamic" | "environment_and_dynamic";
+  editable: boolean;
+};
+
 export type OwnerConsoleAccessList = {
   label: string;
   count: number;
-  items: string[];
+  items: OwnerConsoleAccessListItem[];
   truncated: boolean;
+  environment_count: number;
+  dynamic_count: number;
 };
 
 export type OwnerConsoleAccessControlSnapshot = {
   generated_at: string;
+  revision: number;
+  access_actions_enabled: boolean;
   owner_configured: boolean;
   private_chat_enabled: boolean;
   group_chat_enabled: boolean;
@@ -836,7 +989,14 @@ export type OwnerConsoleTaskList = {
   generated_at: string;
   status_filter: string | null;
   work_type_filter: string | null;
+  category_filter: string | null;
   limit: number;
+  page: number;
+  page_size: number;
+  total_matching: number;
+  total_pages: number;
+  has_previous: boolean;
+  has_next: boolean;
   total_visible: number;
   rows: OwnerConsoleTaskRow[];
   boundary: OwnerConsoleRuntimeBoundary;

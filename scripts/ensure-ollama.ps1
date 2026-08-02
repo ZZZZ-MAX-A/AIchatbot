@@ -149,6 +149,22 @@ function Get-MissingModels {
     return $missing
 }
 
+function Test-ConnectionRefusedException {
+    param([System.Exception]$Exception)
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if (
+            $current -is [System.Net.Sockets.SocketException] -and
+            $current.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused
+        ) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
 $enableMemoryRag = Get-BoolConfig "ENABLE_MEMORY_RAG" $false
 $enableProjectDocRag = Get-BoolConfig "ENABLE_PROJECT_DOC_RAG" $false
 $embeddingProvider = (Get-ConfigValue "MEMORY_RAG_EMBEDDING_PROVIDER" "ollama").Trim().ToLowerInvariant()
@@ -175,7 +191,6 @@ $shouldStart = (-not $NoStart) -and $isLocalUrl
 
 Write-Ensure "INFO" "Checking Ollama at $BaseUrl"
 
-$needsRestart = $false
 try {
     $tags = Get-OllamaTags $BaseUrl $TimeoutSec
     $models = Get-ModelNames $tags
@@ -184,15 +199,15 @@ try {
         Write-Ensure "OK" ("Ollama is ready. Required RAG model(s): " + ($requiredModels -join ", "))
         exit 0
     }
-    Write-Ensure "WARN" ("Ollama is reachable, but required model(s) are missing: " + ($missing -join ", "))
-    $needsRestart = $true
+    Write-Ensure "ERR" ("Ollama is reachable, but required model(s) are missing: " + ($missing -join ", "))
+    Write-Ensure "ERR" "A healthy Ollama service will not be restarted for a missing model."
+    exit 1
 } catch {
-    Write-Ensure "WARN" "Ollama API is not reachable: $($_.Exception.Message)"
-    $needsRestart = $true
-}
-
-if (-not $needsRestart) {
-    exit 0
+    if (-not (Test-ConnectionRefusedException $_.Exception)) {
+        Write-Ensure "ERR" "Ollama readiness is ambiguous; refusing to start or restart it: $($_.Exception.Message)"
+        exit 1
+    }
+    Write-Ensure "WARN" "Ollama is explicitly offline (connection refused): $($_.Exception.Message)"
 }
 
 if (-not $shouldStart) {
@@ -211,7 +226,10 @@ if (-not (Test-Path -LiteralPath $startScript)) {
 }
 
 Write-Ensure "INFO" "Starting Ollama with model directory: $ModelDir"
-& $startScript -ModelDir $ModelDir
+& $startScript -ModelDir $ModelDir -KeepExisting
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 $deadline = (Get-Date).AddSeconds($StartupWaitSec)
 do {

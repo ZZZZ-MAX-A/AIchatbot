@@ -38,7 +38,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
     def test_current_state_strategy_is_enabled_only_for_formal_development_report(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")
         formal_start = source.index("async def run_development_context_report_for_event(")
-        formal_end = source.index("\ndef owner_runtime_factory()", formal_start)
+        formal_end = source.index("\ndef owner_runtime_factory(", formal_start)
         generic_start = source.index("async def run_main_agent_qq_command(")
         generic_end = source.index("\n@main_agent_cmd.handle()", generic_start)
 
@@ -78,21 +78,25 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("parse_external_read_report_command", source)
         self.assertIn("prepare_external_read_command", source)
         self.assertIn("factory.external_read_report_for_event is not None", source)
-        self.assertIn("def _configured_external_read_report_for_event():", source)
+        self.assertIn("def _configured_external_read_report_for_event(", source)
         self.assertIn("if not config.enable_agent_web:", source)
         self.assertIn("create_configured_tavily_external_read_executor", source)
         self.assertIn("api_key=config.tavily_api_key", source)
         self.assertIn("timeout_seconds=config.tavily_timeout_seconds", source)
         self.assertIn(
-            "external_read_report_for_event=_configured_external_read_report_for_event()",
+            "external_read_report_for_event=_configured_external_read_report_for_event(",
+            source,
+        )
+        self.assertIn(
+            "trusted_temporal_query=trusted_external_read_temporal_query",
             source,
         )
 
         external_factory_start = source.index(
-            "def _configured_external_read_report_for_event():"
+            "def _configured_external_read_report_for_event("
         )
         owner_factory_start = source.index(
-            "\ndef owner_runtime_factory()",
+            "\ndef owner_runtime_factory(",
             external_factory_start,
         )
         external_factory_source = source[external_factory_start:owner_factory_start]
@@ -147,7 +151,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
             "async def run_system_diagnostics_report_for_event(",
             voice_start,
         )
-        system_end = source.index("\ndef owner_runtime_factory()", system_start)
+        system_end = source.index("\ndef owner_runtime_factory(", system_start)
         system_source = source[system_start:system_end]
         memory_collector_source = source[system_start:vision_start]
         vision_collector_source = source[vision_start:voice_start]

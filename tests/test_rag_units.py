@@ -707,6 +707,48 @@ class RagProviderUnitTests(unittest.TestCase):
 
         self.assertEqual(calls, ["current"])
 
+    def test_ollama_embedding_provider_sends_cpu_only_option(self):
+        provider = self.providers.OllamaEmbeddingProvider(
+            model="bge-m3",
+            expected_dimension=2,
+            num_gpu=0,
+        )
+
+        with patch.object(
+            provider,
+            "_post_json",
+            return_value={"embeddings": [[0.25, 0.75]]},
+        ) as post:
+            vector = provider.embed_once("cpu embedding query")
+
+        self.assertEqual(vector, [0.25, 0.75])
+        post.assert_called_once_with(
+            "/api/embed",
+            {
+                "model": "bge-m3",
+                "input": "cpu embedding query",
+                "options": {"num_gpu": 0},
+            },
+        )
+
+    def test_ollama_embedding_provider_omits_gpu_option_by_default(self):
+        provider = self.providers.OllamaEmbeddingProvider(
+            model="bge-m3",
+            expected_dimension=2,
+        )
+
+        with patch.object(
+            provider,
+            "_post_json",
+            return_value={"embeddings": [[0.25, 0.75]]},
+        ) as post:
+            provider.embed_once("automatic device query")
+
+        post.assert_called_once_with(
+            "/api/embed",
+            {"model": "bge-m3", "input": "automatic device query"},
+        )
+
     def test_check_embedding_provider_uses_capped_timeout_and_reports_dimension(self):
         captured = {}
 

@@ -25,6 +25,7 @@ class AccessRuleTests(unittest.TestCase):
             "allow_unknown_private_chat": False,
             "max_group_message_length": 300,
             "max_private_message_length": 150,
+            "owner_max_private_message_length": 220,
             "group_rate_limit_seconds": 5,
             "private_rate_limit_seconds": 10,
         }
@@ -101,12 +102,14 @@ class AccessRuleTests(unittest.TestCase):
 
     def test_limits_choose_private_or_group_values_by_event_type(self):
         config = self.make_config()
-        private_event = self.events.PrivateMessageEvent(user_id=10001)
+        owner_private_event = self.events.PrivateMessageEvent(user_id=10001)
+        member_private_event = self.events.PrivateMessageEvent(user_id=20002)
         group_event = self.events.GroupMessageEvent(user_id=10001, group_id=42)
 
-        self.assertEqual(self.access.message_length_limit(config, private_event), 150)
+        self.assertEqual(self.access.message_length_limit(config, owner_private_event), 220)
+        self.assertEqual(self.access.message_length_limit(config, member_private_event), 150)
         self.assertEqual(self.access.message_length_limit(config, group_event), 300)
-        self.assertEqual(self.access.rate_limit_seconds(config, private_event), 10)
+        self.assertEqual(self.access.rate_limit_seconds(config, owner_private_event), 10)
         self.assertEqual(self.access.rate_limit_seconds(config, group_event), 5)
 
 
@@ -157,6 +160,64 @@ class AccessStoreTests(unittest.TestCase):
         self.assertEqual(merged.private_whitelist, frozenset({"env-private", "file-private"}))
         self.assertEqual(merged.group_whitelist, frozenset({"env-group", "file-group"}))
         self.assertEqual(merged.user_blacklist, frozenset({"env-blocked", "file-blocked"}))
+
+    def test_access_store_uses_revision_and_rejects_stale_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "access.json"
+            first, changed = self.access_store.update_item(
+                "private_whitelist",
+                "12345",
+                add=True,
+                expected_revision=0,
+                path=path,
+            )
+            self.assertTrue(changed)
+            self.assertEqual(first.revision, 1)
+            with self.assertRaises(self.access_store.AccessStoreRevisionConflict):
+                self.access_store.update_item(
+                    "group_whitelist",
+                    "54321",
+                    add=True,
+                    expected_revision=0,
+                    path=path,
+                )
+            persisted = self.access_store.load_access_store(strict=True, path=path)
+
+        self.assertEqual(persisted.revision, 1)
+        self.assertEqual(persisted.private_whitelist, frozenset({"12345"}))
+        self.assertEqual(persisted.group_whitelist, frozenset())
+
+    def test_corrupt_access_store_is_never_overwritten_by_strict_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "access.json"
+            path.write_text("{broken", encoding="utf-8")
+            with self.assertRaises(self.access_store.AccessStoreCorruptError):
+                self.access_store.update_item(
+                    "user_blacklist",
+                    "12345",
+                    add=True,
+                    expected_revision=0,
+                    path=path,
+                )
+            self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
+
+    def test_atomic_save_leaves_no_temporary_access_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "access.json"
+            self.access_store.save_access_store(
+                self.access_store.AccessStore(
+                    private_whitelist=frozenset({"12345"}),
+                    group_whitelist=frozenset(),
+                    user_blacklist=frozenset(),
+                    revision=7,
+                ),
+                path=path,
+            )
+            leftovers = list(Path(temp_dir).glob(".access.json.*.tmp"))
+            persisted = self.access_store.load_access_store(strict=True, path=path)
+
+        self.assertEqual(leftovers, [])
+        self.assertEqual(persisted.revision, 7)
 
 
 class ReplyDecisionTests(unittest.TestCase):

@@ -14,6 +14,8 @@ MAIN_AGENT_ACTION_SYSTEM_PROMPT = """\
 You are the MainAgent action planner for AIchatbot.
 Return exactly one JSON object and no surrounding prose.
 
+Trusted current date for relative-time planning: {trusted_current_date}.
+
 Allowed actions:
 - final_answer: requires content.
 - tool_request: may only use one of these registered visible tools:
@@ -42,6 +44,74 @@ Tool-selection policy:
 - Choose dev_context only for explicit project-development questions about design,
   architecture, implementation history, development stage, completed or pending
   work, documentation, tests, or future plans.
+- Choose external_read only when the owner explicitly asks to search/check online,
+  or when a reliable answer requires current public web evidence such as news,
+  prices, weather, releases, policies, schedules, or live service documentation.
+  Do not use external_read for casual conversation, creative work, private or
+  personal facts, chat history, memory, local runtime state, development context,
+  or timeless questions that can be answered without current web evidence.
+- For external_read, analyze the owner's actual information need before choosing search
+  terms. Resolve relative state such as "current" or "next" against the trusted date,
+  identify prerequisite facts, and create one focused search-engine query of at most 50
+  characters. A second distinct query is optional and the hard total is two. For each
+  query choose an evidence_role from context, direct_answer, official_confirmation,
+  reported_candidate, or recommendation. For recency-sensitive evidence, choose a
+  time_range from day, week, month, six_months, or year; omit it when no relative
+  window is needed.
+- Choose a scene for every external_read plan: general_lookup for uncategorized factual
+  lookup, official_update for first-party releases, current_status for current/next
+  lifecycle questions, technical_docs for versioned documentation and troubleshooting,
+  news_summary for event reporting, recommendation for local or choice-oriented advice,
+  and comparison for symmetric product or service comparisons.
+- For scene=current_status when the owner asks for the next version, release, roster, or
+  other future state, use two always queries: the first establishes the currently released
+  or already active baseline with evidence_role=context; the second looks for the later
+  announced or reported candidate. Never use an already released item as the answer to
+  "next" merely because it is the newest dated search result. If either baseline or later
+  candidate cannot be established, the answer must say the true next item is unconfirmed.
+- Select source_scope=official only when first-party confirmation materially matters,
+  such as product releases, policies, official schedules, specifications, or documented
+  behavior. Select general for local food, travel, reputation, recommendations, community
+  discussion, or other topics where official documents are unnecessary or unlikely.
+  Select news when current reporting is the intended evidence. Do not force official
+  search merely because web evidence is current.
+- If one query is enough, omit secondary_query, secondary_source_scope, and secondary_mode.
+  If a second query is useful only after zero qualified results, use secondary_mode=
+  if_no_results. If two complementary subquestions are both required, use always. Never
+  make the second query a duplicate except for a deliberate broader-time fallback, and
+  never make it an automatic official-zero media retry. With an
+  always plan, both fixed-provider reads may run concurrently; neither query may depend
+  on observing the other query's result.
+- General scope may still return first-party pages; it simply does not discard reputable
+  non-official evidence. For an upcoming game version, unreleased character, rerun roster,
+  casting decision, or future product where official confirmation may be incomplete, do
+  not require an official-only domain stage. Prefer one short news query using announcement
+  or preview language with evidence_role=official_confirmation and a short week window,
+  plus one direct character/product query with evidence_role=reported_candidate and a
+  month window. The evidence answer must distinguish official confirmation from reporting
+  or prediction even when an official page appears naturally in news results.
+- Example: for "原神下一个版本的角色是谁", use query="原神最新版本角色预告",
+  source_scope=news, time_range=week, evidence_role=official_confirmation; then use
+  secondary_query="原神下一个版本角色", secondary_source_scope=news,
+  secondary_time_range=month, secondary_evidence_role=reported_candidate, and
+  secondary_mode=always.
+- Never include a URL, credential, local path, private data, or a request for retries in
+  any external_read query.
+- Treat vague recency words such as "最近", "近期", "近来", or "recently" without
+  an explicit period as the rolling last month; do not ask the owner to choose a window.
+  Reserve a secondary if_no_results query with time_range=six_months when the topic may
+  update less frequently. For an explicit day, week, or month window, the runtime may use
+  the second and final provider read to broaden up to one rolling six-month window after
+  zero qualified results. When an official primary stage has zero qualified results, the
+  runtime may use general scope and reported_candidate for that conditional second stage;
+  it must preserve official scope when the owner explicitly asks for official-only
+  evidence. The final answer
+  must state that the requested window had no update before presenting the nearest
+  confirmed item from the broader window.
+- Always compare dated evidence with the trusted current date. Do not repeat stale source
+  wording such as "即将上线" when its scheduled date is already past. If evidence proves
+  only an old planned date and not actual availability, say that the planned date has
+  passed and current completion cannot be confirmed from the available evidence.
 - Never use dev_context to answer current runtime health, service availability,
   model loading, active configuration, current errors, process or database state,
   TTS availability, vision availability, or recent execution results.
@@ -166,6 +236,7 @@ def build_main_agent_action_messages(
     context: str = "",
     *,
     tool_registry: ToolRegistry | None = None,
+    trusted_current_date: str = "",
 ) -> tuple[dict[str, str], ...]:
     stripped_query = query.strip()
     if not stripped_query:
@@ -173,7 +244,8 @@ def build_main_agent_action_messages(
 
     context_text = context.strip() or "(no read-only context was provided)"
     system_prompt = MAIN_AGENT_ACTION_SYSTEM_PROMPT.format(
-        tool_contract=render_main_agent_tool_contract(tool_registry)
+        tool_contract=render_main_agent_tool_contract(tool_registry),
+        trusted_current_date=(trusted_current_date.strip() or "not provided"),
     )
     return (
         {
@@ -287,11 +359,13 @@ async def call_main_llm_for_action(
     llm_call: MainAgentLLMCall,
     *,
     tool_registry: ToolRegistry | None = None,
+    trusted_current_date: str = "",
 ) -> str:
     messages = build_main_agent_action_messages(
         query,
         context,
         tool_registry=tool_registry,
+        trusted_current_date=trusted_current_date,
     )
     response = await _maybe_await(llm_call(messages))
     text = extract_main_llm_text(response).strip()
@@ -345,12 +419,17 @@ def create_main_agent_call_handler(
     async def call_main_agent(state: MainAgentState) -> MainAgentState:
         context_value = state.metadata.get(context_metadata_key, "")
         context = context_value if isinstance(context_value, str) else str(context_value)
+        current_date_value = state.metadata.get("trusted_current_date", "")
+        trusted_current_date = (
+            current_date_value if isinstance(current_date_value, str) else ""
+        )
         try:
             state.raw_action_request = await call_main_llm_for_action(
                 state.query,
                 context,
                 llm_call,
                 tool_registry=tool_registry,
+                trusted_current_date=trusted_current_date,
             )
         except Exception as exc:
             notify_result(exc)

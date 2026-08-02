@@ -82,6 +82,12 @@ def append_message(
 
 
 def clear_session(session_key: str) -> None:
+    """Clear transient context while preserving formal session summaries.
+
+    This removes recent raw messages and gap-scene summaries for the session.
+    Rows in ``session_summaries`` are intentionally left unchanged and remain
+    available to ``build_history`` as historical context.
+    """
     ensure_database()
     with connect() as connection:
         connection.execute("DELETE FROM messages WHERE session_key = ?", (session_key,))

@@ -1,11 +1,16 @@
 import {
   OWNER_CONSOLE_API_PREFIX,
   checkOwnerConsoleActionEnvelope,
+  checkOwnerConsoleAccessActionEnvelope,
+  checkOwnerConsoleApprovalActionEnvelope,
+  checkOwnerConsoleTaskActionEnvelope,
   checkOwnerConsoleEnvelope,
 } from "./ownerConsoleEnvelope";
 import type {
   OwnerConsoleAccessControlEnvelope,
+  OwnerConsoleAccessActionEnvelope,
   OwnerConsoleApprovalDetailEnvelope,
+  OwnerConsoleApprovalActionEnvelope,
   OwnerConsoleApprovalListEnvelope,
   OwnerConsoleDiagnosticsEnvelope,
   OwnerConsoleExternalReadEnvelope,
@@ -23,6 +28,7 @@ import type {
   OwnerConsoleCloudVisionEnvelope,
   OwnerConsoleTaskDetailEnvelope,
   OwnerConsoleTaskListEnvelope,
+  OwnerConsoleTaskActionEnvelope,
 } from "./ownerConsoleTypes";
 
 const API_BASE =
@@ -46,6 +52,12 @@ const allowedGetPaths = new Set([
 ]);
 
 const allowedPostPaths = new Set([
+  `${API_BASE}/access-control/private-whitelist/add`,
+  `${API_BASE}/access-control/private-whitelist/remove`,
+  `${API_BASE}/access-control/group-whitelist/add`,
+  `${API_BASE}/access-control/group-whitelist/remove`,
+  `${API_BASE}/access-control/user-blacklist/add`,
+  `${API_BASE}/access-control/user-blacklist/remove`,
   `${API_BASE}/manual-diagnostics/project-doc-rag`,
   `${API_BASE}/manual-diagnostics/memory-rag-consistency`,
   `${API_BASE}/manual-diagnostics/main-llm-contract`,
@@ -56,6 +68,23 @@ const allowedPostPaths = new Set([
   `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept`,
   `${API_BASE}/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject`,
 ]);
+
+function isAllowedPostPath(routePath: string): boolean {
+  if (allowedPostPaths.has(routePath)) {
+    return true;
+  }
+  const taskPrefix = `${API_BASE}/tasks/`;
+  if (routePath.startsWith(taskPrefix)) {
+    const suffix = routePath.slice(taskPrefix.length);
+    return /^[1-9]\d*\/cancel$/.test(suffix);
+  }
+  const approvalPrefix = `${API_BASE}/approvals/`;
+  if (!routePath.startsWith(approvalPrefix)) {
+    return false;
+  }
+  const suffix = routePath.slice(approvalPrefix.length);
+  return /^[1-9]\d*\/(approve|reject)$/.test(suffix);
+}
 
 function isAllowedGetPath(routePath: string): boolean {
   if (allowedGetPaths.has(routePath)) {
@@ -149,7 +178,7 @@ async function postJson<TResponse>(
   signal?: AbortSignal,
 ): Promise<TResponse> {
   const routePath = path.split("?")[0];
-  if (!allowedPostPaths.has(routePath)) {
+  if (!isAllowedPostPath(routePath)) {
     throw new Error("前端手动动作路径不在固定 allowlist 内");
   }
 
@@ -193,6 +222,60 @@ function buildQuery(params: Record<string, string | number | null | undefined>) 
   });
   const rendered = query.toString();
   return rendered ? `?${rendered}` : "";
+}
+
+type AccessRouteName =
+  | "private-whitelist"
+  | "group-whitelist"
+  | "user-blacklist";
+type AccessOperation = "add" | "remove";
+
+const accessActionContracts = {
+  "private-whitelist:add": {
+    confirmation: "add_private_whitelist_item",
+    header: "access-private-whitelist-add-v1",
+  },
+  "private-whitelist:remove": {
+    confirmation: "remove_private_whitelist_item",
+    header: "access-private-whitelist-remove-v1",
+  },
+  "group-whitelist:add": {
+    confirmation: "add_group_whitelist_item",
+    header: "access-group-whitelist-add-v1",
+  },
+  "group-whitelist:remove": {
+    confirmation: "remove_group_whitelist_item",
+    header: "access-group-whitelist-remove-v1",
+  },
+  "user-blacklist:add": {
+    confirmation: "add_user_blacklist_item",
+    header: "access-user-blacklist-add-v1",
+  },
+  "user-blacklist:remove": {
+    confirmation: "remove_user_blacklist_item",
+    header: "access-user-blacklist-remove-v1",
+  },
+} as const;
+
+async function postAccessAction(
+  routeName: AccessRouteName,
+  operation: AccessOperation,
+  item: string,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<OwnerConsoleAccessActionEnvelope> {
+  const contract = accessActionContracts[`${routeName}:${operation}`];
+  const envelope = await postJson<OwnerConsoleAccessActionEnvelope>(
+    `${API_BASE}/access-control/${routeName}/${operation}`,
+    { item, revision, confirmation: contract.confirmation },
+    { "X-Owner-Console-Action": contract.header },
+    signal,
+  );
+  const checked = checkOwnerConsoleAccessActionEnvelope(envelope);
+  if (!checked.ok) {
+    throw new Error(checked.message);
+  }
+  return envelope;
 }
 
 export const ownerConsoleApi = {
@@ -564,6 +647,54 @@ export const ownerConsoleApi = {
     return envelope;
   },
 
+  async addPrivateWhitelistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("private-whitelist", "add", item, revision, signal);
+  },
+
+  async removePrivateWhitelistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("private-whitelist", "remove", item, revision, signal);
+  },
+
+  async addGroupWhitelistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("group-whitelist", "add", item, revision, signal);
+  },
+
+  async removeGroupWhitelistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("group-whitelist", "remove", item, revision, signal);
+  },
+
+  async addUserBlacklistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("user-blacklist", "add", item, revision, signal);
+  },
+
+  async removeUserBlacklistItem(
+    item: string,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleAccessActionEnvelope> {
+    return postAccessAction("user-blacklist", "remove", item, revision, signal);
+  },
+
   async getSettings(signal?: AbortSignal): Promise<OwnerConsoleSettingsEnvelope> {
     const envelope = await getJson<OwnerConsoleSettingsEnvelope>(
       `${API_BASE}/settings`,
@@ -577,7 +708,14 @@ export const ownerConsoleApi = {
   },
 
   async getTasks(
-    params: { status?: string | null; work_type?: string | null; limit: number },
+    params: {
+      status?: string | null;
+      work_type?: string | null;
+      category?: string | null;
+      page?: number;
+      page_size?: number;
+      limit?: number;
+    },
     signal?: AbortSignal,
   ): Promise<OwnerConsoleTaskListEnvelope> {
     const envelope = await getJson<OwnerConsoleTaskListEnvelope>(
@@ -601,6 +739,26 @@ export const ownerConsoleApi = {
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async cancelTask(
+    taskId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleTaskActionEnvelope> {
+    if (!Number.isSafeInteger(taskId) || taskId < 1) {
+      throw new Error("任务 ID 无效");
+    }
+    const envelope = await postJson<OwnerConsoleTaskActionEnvelope>(
+      `${API_BASE}/tasks/${taskId}/cancel`,
+      { confirmation: "cancel_single_pending_task" },
+      { "X-Owner-Console-Action": "task-cancel-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleTaskActionEnvelope(envelope);
     if (!contract.ok) {
       throw new Error(contract.message);
     }
@@ -632,6 +790,40 @@ export const ownerConsoleApi = {
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async approveApproval(
+    approvalId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleApprovalActionEnvelope> {
+    const envelope = await postJson<OwnerConsoleApprovalActionEnvelope>(
+      `${API_BASE}/approvals/${approvalId}/approve`,
+      { confirmation: "approve_registered_pending_approval" },
+      { "X-Owner-Console-Action": "approval-approve-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleApprovalActionEnvelope(envelope);
+    if (!contract.ok) {
+      throw new Error(contract.message);
+    }
+    return envelope;
+  },
+
+  async rejectApproval(
+    approvalId: number,
+    signal?: AbortSignal,
+  ): Promise<OwnerConsoleApprovalActionEnvelope> {
+    const envelope = await postJson<OwnerConsoleApprovalActionEnvelope>(
+      `${API_BASE}/approvals/${approvalId}/reject`,
+      { confirmation: "reject_registered_pending_approval" },
+      { "X-Owner-Console-Action": "approval-reject-v1" },
+      signal,
+    );
+    const contract = checkOwnerConsoleApprovalActionEnvelope(envelope);
     if (!contract.ok) {
       throw new Error(contract.message);
     }

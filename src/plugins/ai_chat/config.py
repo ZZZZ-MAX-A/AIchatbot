@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .local_time import DEFAULT_BOT_TIMEZONE, timezone_for_name
+from .persona_scope import PersonaRoutingSettings, build_persona_routing_settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -59,9 +60,41 @@ def _csv_env(name: str) -> frozenset[str]:
     return frozenset(item for item in items if item)
 
 
+def _trusted_path_roots_env(name: str) -> tuple[Path, ...]:
+    """Load an explicit semicolon-separated local path allowlist.
+
+    Empty or invalid entries are ignored so local-file access fails closed.
+    Environment placeholders such as ``%USERPROFILE%`` are supported without
+    committing machine-specific absolute paths.
+    """
+    raw_value = os.getenv(name, "")
+    roots: list[Path] = []
+    for raw_item in raw_value.split(";"):
+        item = os.path.expandvars(raw_item.strip())
+        if not item or "%" in item:
+            continue
+        candidate = Path(item).expanduser()
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
 def _timezone_env(name: str) -> str:
     value = os.getenv(name, DEFAULT_BOT_TIMEZONE).strip() or DEFAULT_BOT_TIMEZONE
     timezone_for_name(value)
+    return value
+
+
+def _chat_weather_mode_env(name: str, default: str = "off") -> str:
+    value = os.getenv(name, default).strip().lower() or default
+    if value not in {"off", "shadow", "owner_explicit", "owner_auto"}:
+        return "off"
     return value
 
 
@@ -72,6 +105,7 @@ class AiChatConfig:
     bot_owner_qq: str
     bot_owner_public_name: str
     bot_timezone: str
+    persona_routing: PersonaRoutingSettings
     openai_api_key: str = field(repr=False)
     openai_base_url: str
     openai_model: str
@@ -97,6 +131,24 @@ class AiChatConfig:
     chat_llm_base_url: str
     chat_llm_model: str
     chat_llm_timeout_seconds: int
+    enable_persona_llm_routing: bool
+    persona_llm_role_card_keys: frozenset[str]
+    persona_llm_api_key: str = field(repr=False)
+    persona_llm_base_url: str
+    persona_llm_model: str
+    persona_llm_timeout_seconds: int
+    enable_persona_vision_routing: bool
+    persona_vision_role_card_keys: frozenset[str]
+    persona_vision_model: str
+    persona_vision_timeout_seconds: int
+    persona_vision_private_image_wait_seconds: int
+    enable_chat_weather: bool
+    chat_weather_mode: str
+    chat_weather_provider: str
+    chat_weather_default_location: str
+    chat_weather_default_latitude: float
+    chat_weather_default_longitude: float
+    chat_weather_timeout_seconds: float
     enable_chat_graph_runtime: bool
     enable_vision: bool
     vision_ollama_base_url: str
@@ -105,6 +157,7 @@ class AiChatConfig:
     vision_num_ctx: int
     vision_max_images: int
     vision_max_image_bytes: int
+    vision_trusted_local_roots: tuple[Path, ...] = field(repr=False)
     vision_image_cache_ttl_seconds: int
     vision_private_image_wait_seconds: int
     enable_local_stickers: bool
@@ -156,6 +209,7 @@ class AiChatConfig:
     memory_rag_embedding_base_url: str
     memory_rag_embedding_dimension: int
     memory_rag_embedding_timeout_seconds: int
+    memory_rag_embedding_num_gpu: int
     memory_rag_top_k: int
     memory_rag_min_score: float
     memory_rag_max_context_chars: int
@@ -174,6 +228,7 @@ class AiChatConfig:
     private_trial_messages: int
     private_rate_limit_seconds: int
     max_private_message_length: int
+    owner_max_private_message_length: int
     group_whitelist: frozenset[str]
     group_rate_limit_seconds: int
     max_group_message_length: int
@@ -205,12 +260,22 @@ class AiChatConfig:
 
 
 def load_config() -> AiChatConfig:
+    persona_routing = build_persona_routing_settings(
+        routing_v2_enabled=_bool_env("ENABLE_PERSONA_ROUTING_V2", False),
+        memory_v2_enabled=_bool_env("ENABLE_PERSONA_MEMORY_V2", False),
+        routing_v2_bot_ids=_csv_env("PERSONA_ROUTING_V2_BOT_IDS"),
+        memory_v2_bot_ids=_csv_env("PERSONA_MEMORY_V2_BOT_IDS"),
+        legacy_persona_id=os.getenv("LEGACY_PERSONA_ID", "aike"),
+        legacy_role_card_key=os.getenv("LEGACY_ROLE_CARD_KEY", "aike"),
+        raw_bindings=os.getenv("BOT_PERSONA_BINDINGS", ""),
+    )
     return AiChatConfig(
         bot_name=os.getenv("BOT_NAME", "AI Assistant"),
         bot_aliases=_csv_env("BOT_ALIASES"),
         bot_owner_qq=os.getenv("BOT_OWNER_QQ", "").strip(),
         bot_owner_public_name=os.getenv("BOT_OWNER_PUBLIC_NAME", "").strip(),
         bot_timezone=_timezone_env("BOT_TIMEZONE"),
+        persona_routing=persona_routing,
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
         openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
@@ -236,6 +301,59 @@ def load_config() -> AiChatConfig:
         chat_llm_base_url=os.getenv("CHAT_LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
         chat_llm_model=os.getenv("CHAT_LLM_MODEL", os.getenv("OPENAI_MODEL", "deepseek-v4-flash")),
         chat_llm_timeout_seconds=_int_env("CHAT_LLM_TIMEOUT_SECONDS", _int_env("AI_TIMEOUT_SECONDS", 60)),
+        enable_persona_llm_routing=_bool_env("ENABLE_PERSONA_LLM_ROUTING", False),
+        persona_llm_role_card_keys=_csv_env("PERSONA_LLM_ROLE_CARD_KEYS"),
+        persona_llm_api_key=os.getenv("PERSONA_LLM_API_KEY", "").strip(),
+        persona_llm_base_url=os.getenv("PERSONA_LLM_BASE_URL", "").strip(),
+        persona_llm_model=os.getenv("PERSONA_LLM_MODEL", "").strip(),
+        persona_llm_timeout_seconds=_security_int_env(
+            "PERSONA_LLM_TIMEOUT_SECONDS",
+            _int_env("AI_TIMEOUT_SECONDS", 60),
+        ),
+        enable_persona_vision_routing=_bool_env(
+            "ENABLE_PERSONA_VISION_ROUTING",
+            False,
+        ),
+        persona_vision_role_card_keys=_csv_env(
+            "PERSONA_VISION_ROLE_CARD_KEYS"
+        ),
+        persona_vision_model=os.getenv(
+            "PERSONA_VISION_MODEL",
+            os.getenv("PERSONA_LLM_MODEL", ""),
+        ).strip(),
+        persona_vision_timeout_seconds=_security_int_env(
+            "PERSONA_VISION_TIMEOUT_SECONDS",
+            _security_int_env(
+                "PERSONA_LLM_TIMEOUT_SECONDS",
+                _int_env("AI_TIMEOUT_SECONDS", 60),
+            ),
+        ),
+        persona_vision_private_image_wait_seconds=_int_env(
+            "PERSONA_VISION_PRIVATE_IMAGE_WAIT_SECONDS",
+            -1,
+        ),
+        enable_chat_weather=_bool_env("ENABLE_CHAT_WEATHER", False),
+        chat_weather_mode=_chat_weather_mode_env("CHAT_WEATHER_MODE"),
+        chat_weather_provider=os.getenv(
+            "CHAT_WEATHER_PROVIDER",
+            "open_meteo",
+        ).strip().lower(),
+        chat_weather_default_location=os.getenv(
+            "CHAT_WEATHER_DEFAULT_LOCATION",
+            "",
+        ).strip(),
+        chat_weather_default_latitude=_security_float_env(
+            "CHAT_WEATHER_DEFAULT_LATITUDE",
+            0.0,
+        ),
+        chat_weather_default_longitude=_security_float_env(
+            "CHAT_WEATHER_DEFAULT_LONGITUDE",
+            0.0,
+        ),
+        chat_weather_timeout_seconds=_security_float_env(
+            "CHAT_WEATHER_TIMEOUT_SECONDS",
+            5.0,
+        ),
         enable_chat_graph_runtime=_bool_env("ENABLE_CHAT_GRAPH_RUNTIME", False),
         enable_vision=_bool_env("ENABLE_VISION", True),
         vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
@@ -244,6 +362,9 @@ def load_config() -> AiChatConfig:
         vision_num_ctx=_int_env("VISION_NUM_CTX", 16384),
         vision_max_images=_int_env("VISION_MAX_IMAGES", 1),
         vision_max_image_bytes=_int_env("VISION_MAX_IMAGE_BYTES", 5242880),
+        vision_trusted_local_roots=_trusted_path_roots_env(
+            "VISION_TRUSTED_LOCAL_ROOTS"
+        ),
         vision_image_cache_ttl_seconds=_int_env("VISION_IMAGE_CACHE_TTL_SECONDS", 120),
         vision_private_image_wait_seconds=_int_env("VISION_PRIVATE_IMAGE_WAIT_SECONDS", 5),
         enable_local_stickers=_bool_env("ENABLE_LOCAL_STICKERS", False),
@@ -367,6 +488,7 @@ def load_config() -> AiChatConfig:
         memory_rag_embedding_base_url=os.getenv("MEMORY_RAG_EMBEDDING_BASE_URL", "http://127.0.0.1:11434"),
         memory_rag_embedding_dimension=_int_env("MEMORY_RAG_EMBEDDING_DIMENSION", 1024),
         memory_rag_embedding_timeout_seconds=_int_env("MEMORY_RAG_EMBEDDING_TIMEOUT_SECONDS", 60),
+        memory_rag_embedding_num_gpu=_int_env("MEMORY_RAG_EMBEDDING_NUM_GPU", -1),
         memory_rag_top_k=_int_env("MEMORY_RAG_TOP_K", 5),
         memory_rag_min_score=_float_env("MEMORY_RAG_MIN_SCORE", 0.55),
         memory_rag_max_context_chars=_int_env("MEMORY_RAG_MAX_CONTEXT_CHARS", 1600),
@@ -385,6 +507,10 @@ def load_config() -> AiChatConfig:
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
         private_rate_limit_seconds=_int_env("PRIVATE_RATE_LIMIT_SECONDS", 10),
         max_private_message_length=_int_env("MAX_PRIVATE_MESSAGE_LENGTH", 150),
+        owner_max_private_message_length=_int_env(
+            "OWNER_MAX_PRIVATE_MESSAGE_LENGTH",
+            220,
+        ),
         group_whitelist=_csv_env("GROUP_WHITELIST"),
         group_rate_limit_seconds=_int_env("GROUP_RATE_LIMIT_SECONDS", 5),
         max_group_message_length=_int_env("MAX_GROUP_MESSAGE_LENGTH", 300),
@@ -403,7 +529,7 @@ def load_config() -> AiChatConfig:
         tts_voice=os.getenv("TTS_VOICE", "zh_kelin_raw_20260625_222137"),
         tts_emotion=os.getenv("TTS_EMOTION", "affection"),
         tts_timeout_seconds=_int_env("TTS_TIMEOUT_SECONDS", 180),
-        tts_max_chars=_int_env("TTS_MAX_CHARS", 180),
+        tts_max_chars=_int_env("TTS_MAX_CHARS", 260),
         tts_max_total_seconds=_int_env("TTS_MAX_TOTAL_SECONDS", 60),
         tts_cooldown_seconds=_int_env("TTS_COOLDOWN_SECONDS", 20),
         tts_auto_start=_bool_env("TTS_AUTO_START", True),

@@ -456,6 +456,7 @@ def list_agent_tasks(
     status: str | None = None,
     work_type: str | None = None,
     limit: int = 5,
+    offset: int = 0,
 ) -> list[AgentTask]:
     ensure_database()
     clauses: list[str] = []
@@ -486,7 +487,7 @@ def list_agent_tasks(
         )
         params.append(normalized_work_type)
     where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(max(1, limit))
+    params.extend((max(1, limit), max(0, offset)))
 
     with connect() as connection:
         rows = connection.execute(
@@ -495,7 +496,7 @@ def list_agent_tasks(
             FROM agent_tasks
             {where_clause}
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
             tuple(params),
         ).fetchall()
@@ -648,6 +649,19 @@ def create_agent_approval(
     stripped_risk_level = risk_level.strip()
     stripped_reason = reason.strip()
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        task_row = connection.execute(
+            """
+            SELECT status
+            FROM agent_tasks
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise ValueError("agent approval task does not exist")
+        if str(task_row["status"]) != AGENT_TASK_PENDING:
+            raise ValueError("agent approval requires a pending task")
         cursor = connection.execute(
             """
             INSERT INTO agent_approvals (
@@ -696,9 +710,8 @@ def create_agent_approval(
         event_input_json = json.dumps(
             {
                 "approval_id": approval_id,
-                "tool_input": stripped_tool_input_json,
                 "risk_level": stripped_risk_level,
-                "reason": stripped_reason,
+                "tool_input_stored_in_approval_record": True,
             },
             ensure_ascii=False,
         )
@@ -880,14 +893,27 @@ def decide_agent_approval(
         if approval.status != AGENT_APPROVAL_PENDING:
             return approval, False
 
-        connection.execute(
+        update_cursor = connection.execute(
             """
             UPDATE agent_approvals
             SET status = ?, decided_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ?
             """,
-            (next_status, now, approval_id),
+            (next_status, now, approval_id, AGENT_APPROVAL_PENDING),
         )
+        if update_cursor.rowcount != 1:
+            latest_row = connection.execute(
+                """
+                SELECT a.id, a.task_id, t.title AS task_title, a.tool_name,
+                       a.tool_input_json, a.risk_level, a.reason, a.status,
+                       a.created_at, a.expires_at, a.decided_at
+                FROM agent_approvals AS a
+                JOIN agent_tasks AS t ON t.id = a.task_id
+                WHERE a.id = ? AND t.session_key = ? AND t.user_id = ?
+                """,
+                (approval_id, session_key, user_id),
+            ).fetchone()
+            return (_approval_from_row(latest_row) if latest_row else None), False
         connection.execute(
             """
             UPDATE agent_tasks
@@ -909,7 +935,6 @@ def decide_agent_approval(
             {
                 "approval_id": approval.id,
                 "approval_status": next_status,
-                "tool_input": approval.tool_input_json,
             },
             ensure_ascii=False,
         )
@@ -982,13 +1007,14 @@ def resume_agent_approval(
     started_input_json = json.dumps(
         {
             "approval_id": approval.id,
-            "tool_arguments": resume_arguments,
+            "arguments_validated": True,
         },
         ensure_ascii=False,
     )
 
     ensure_database()
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         if _has_agent_task_event(
             connection,
             task_id=approval.task_id,
@@ -998,6 +1024,16 @@ def resume_agent_approval(
         ):
             return approval, False, (
                 f"Agent approval #{approval.id} approval resume was already completed."
+            )
+        if _has_agent_task_event(
+            connection,
+            task_id=approval.task_id,
+            kind="tool_resume_started",
+            tool_name=approval.tool_name,
+            approval_id=approval.id,
+        ):
+            return approval, False, (
+                f"Agent approval #{approval.id} approval resume was already started."
             )
 
         now = utc_now()
@@ -1064,12 +1100,10 @@ def resume_agent_approval(
     with connect() as connection:
         finished_step = _next_agent_task_step(connection, approval.task_id)
         result_text = tool_result.text.strip()
-        result_metadata = dict(tool_result.metadata)
         finished_input_json = json.dumps(
             {
                 "approval_id": approval.id,
-                "tool_arguments": resume_arguments,
-                "tool_result_metadata": result_metadata,
+                "arguments_validated": True,
             },
             ensure_ascii=False,
         )
@@ -1310,6 +1344,27 @@ def claim_agent_task_for_work(
     ensure_database()
     now = utc_now()
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        pending_approval = connection.execute(
+            """
+            SELECT 1
+            FROM agent_approvals
+            WHERE task_id = ? AND status = ?
+            LIMIT 1
+            """,
+            (task_id, AGENT_APPROVAL_PENDING),
+        ).fetchone()
+        if pending_approval is not None:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result,
+                       created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
         cursor = connection.execute(
             """
             UPDATE agent_tasks
@@ -1519,6 +1574,26 @@ def cancel_agent_task(
     ensure_database()
     now = utc_now()
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        pending_approval = connection.execute(
+            """
+            SELECT 1
+            FROM agent_approvals
+            WHERE task_id = ? AND status = ?
+            LIMIT 1
+            """,
+            (task_id, AGENT_APPROVAL_PENDING),
+        ).fetchone()
+        if pending_approval is not None:
+            row = connection.execute(
+                """
+                SELECT id, session_key, user_id, title, goal, status, result, created_at, updated_at
+                FROM agent_tasks
+                WHERE id = ? AND session_key = ? AND user_id = ?
+                """,
+                (task_id, session_key, user_id),
+            ).fetchone()
+            return (_task_from_row(row) if row else None), False
         cursor = connection.execute(
             """
             UPDATE agent_tasks

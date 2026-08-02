@@ -1,20 +1,25 @@
 import asyncio
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import http.client
+import ipaddress
 import json
 from pathlib import Path
 import re
+import socket
+import ssl
 import struct
 from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import ParseResult, urljoin, urlparse, urlunsplit
+from urllib.request import Request, url2pathname, urlopen
 import time
 import zlib
 
 from nonebot.adapters.onebot.v11 import MessageEvent
+from openai import AsyncOpenAI
 
 from .config import AiChatConfig
 from .aliyun_bailian_vision import (
@@ -89,7 +94,9 @@ class VisionError(RuntimeError):
 
 
 DIRECT_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
-IMAGE_REF_FIELDS = ("file", "path", "file_id", "url")
+IMAGE_REF_FIELDS = ("url", "file_id", "file", "path")
+IMAGE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+MAX_IMAGE_REDIRECTS = 3
 LOW_QUALITY_REPEAT_MIN_LENGTH = 12
 LOW_QUALITY_REPEAT_RATIO = 0.75
 VISION_INFERENCE_TEST_TIMEOUT_SECONDS = 45
@@ -100,6 +107,74 @@ _DIAGNOSTIC_IMAGE_BASE64: str | None = None
 class VisionInferenceCheck:
     ok: bool
     detail: str
+
+
+@dataclass(frozen=True)
+class VisionProviderRoute:
+    provider: str
+    api_key: str = field(default="", repr=False)
+    base_url: str = ""
+    model: str = ""
+    timeout_seconds: int = 0
+
+
+def resolve_vision_provider_route(
+    config: AiChatConfig,
+    role_card_key: str = "",
+) -> VisionProviderRoute:
+    normalized_role_card_key = role_card_key.strip()
+    if not (
+        getattr(config, "enable_persona_vision_routing", False)
+        and normalized_role_card_key
+        and normalized_role_card_key
+        in getattr(config, "persona_vision_role_card_keys", frozenset())
+    ):
+        return VisionProviderRoute(provider="aliyun_bailian")
+
+    values = {
+        "PERSONA_LLM_API_KEY": getattr(config, "persona_llm_api_key", "").strip(),
+        "PERSONA_LLM_BASE_URL": getattr(config, "persona_llm_base_url", "").strip(),
+        "PERSONA_VISION_MODEL": getattr(config, "persona_vision_model", "").strip(),
+    }
+    missing = [name for name, value in values.items() if not value]
+    timeout_seconds = int(getattr(config, "persona_vision_timeout_seconds", 0))
+    if timeout_seconds <= 0:
+        missing.append("PERSONA_VISION_TIMEOUT_SECONDS")
+    if missing:
+        raise VisionError(
+            "persona vision route is enabled but incomplete: "
+            + ", ".join(missing)
+        )
+    return VisionProviderRoute(
+        provider="persona_grok",
+        api_key=values["PERSONA_LLM_API_KEY"],
+        base_url=values["PERSONA_LLM_BASE_URL"],
+        model=values["PERSONA_VISION_MODEL"],
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def resolve_private_image_wait_seconds(
+    config: AiChatConfig,
+    role_card_key: str = "",
+) -> int:
+    legacy_wait_seconds = max(
+        int(getattr(config, "vision_private_image_wait_seconds", 0)),
+        0,
+    )
+    normalized_role_card_key = role_card_key.strip()
+    if not (
+        normalized_role_card_key
+        and normalized_role_card_key
+        in getattr(config, "persona_vision_role_card_keys", frozenset())
+    ):
+        return legacy_wait_seconds
+    persona_wait_seconds = int(
+        getattr(config, "persona_vision_private_image_wait_seconds", -1)
+    )
+    if persona_wait_seconds < 0:
+        return legacy_wait_seconds
+    return persona_wait_seconds
 
 
 def _segment_type(segment: Any) -> str:
@@ -284,7 +359,12 @@ def check_vision_inference(config: AiChatConfig) -> VisionInferenceCheck:
     )
 
 
-async def describe_images(config: AiChatConfig, urls: list[str]) -> list[str]:
+async def describe_images(
+    config: AiChatConfig,
+    urls: list[str],
+    *,
+    role_card_key: str = "",
+) -> list[str]:
     if not config.enable_vision or not urls:
         return []
 
@@ -303,8 +383,16 @@ async def describe_images(config: AiChatConfig, urls: list[str]) -> list[str]:
                 url,
                 config.vision_timeout_seconds,
                 config.vision_max_image_bytes,
+                getattr(config, "vision_trusted_local_roots", ()),
             )
-            description = await _describe_image_base64(config, image_base64)
+            if role_card_key.strip():
+                description = await _describe_image_base64(
+                    config,
+                    image_base64,
+                    role_card_key=role_card_key,
+                )
+            else:
+                description = await _describe_image_base64(config, image_base64)
         except VisionError as exc:
             if first_error is None:
                 first_error = exc
@@ -327,11 +415,27 @@ async def describe_images(config: AiChatConfig, urls: list[str]) -> list[str]:
     return descriptions
 
 
-async def _image_url_to_base64(url: str, timeout_seconds: int, max_bytes: int) -> str:
-    return await asyncio.to_thread(_download_image_base64, url, timeout_seconds, max_bytes)
+async def _image_url_to_base64(
+    url: str,
+    timeout_seconds: int,
+    max_bytes: int,
+    trusted_local_roots: tuple[Path, ...] = (),
+) -> str:
+    return await asyncio.to_thread(
+        _download_image_base64,
+        url,
+        timeout_seconds,
+        max_bytes,
+        trusted_local_roots,
+    )
 
 
-def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> str:
+def _download_image_base64(
+    url: str,
+    timeout_seconds: int,
+    max_bytes: int,
+    trusted_local_roots: tuple[Path, ...] = (),
+) -> str:
     url = url.strip()
     if url.startswith("data:image/"):
         try:
@@ -343,32 +447,173 @@ def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> st
             decoded = base64.b64decode(payload, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise VisionError("图片 data URL Base64 无效") from exc
-        if not decoded:
-            raise VisionError("图片内容为空")
-        if len(decoded) > max(max_bytes, 1):
-            raise VisionError("图片超过大小限制")
-        return payload
+        return _validated_image_base64(decoded, max_bytes)
 
     parsed = urlparse(url)
     if parsed.scheme == "file":
-        return _read_local_image_base64(_file_url_to_path(parsed), max_bytes)
+        return _read_local_image_base64(
+            _file_url_to_path(parsed),
+            max_bytes,
+            trusted_local_roots,
+        )
     if _looks_like_local_path(url):
-        return _read_local_image_base64(Path(url), max_bytes)
+        return _read_local_image_base64(Path(url), max_bytes, trusted_local_roots)
     if parsed.scheme not in {"http", "https"}:
-        raise VisionError("图片地址不是 HTTP/HTTPS URL，也不是可读取本地文件")
+        raise VisionError("图片地址不是受支持的 HTTP/HTTPS、data URL 或可信本地文件")
+    return _download_public_http_image(url, timeout_seconds, max_bytes)
 
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "AIchatbot/vision",
-            "Accept": "image/*,*/*;q=0.8",
-        },
-    )
+
+def _validated_image_base64(content: bytes, max_bytes: int) -> str:
+    if not content:
+        raise VisionError("图片内容为空")
+    if len(content) > max(max_bytes, 1):
+        raise VisionError("图片超过大小限制")
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        pass
+    elif content.startswith(b"\xff\xd8\xff"):
+        pass
+    elif content.startswith((b"GIF87a", b"GIF89a")):
+        pass
+    elif content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
+        pass
+    else:
+        raise VisionError("图片格式不受支持")
+    return base64.b64encode(content).decode("ascii")
+
+
+def _public_ip_addresses(host: str, port: int) -> tuple[str, ...]:
+    normalized_host = host.rstrip(".")
+    if not normalized_host or "%" in normalized_host:
+        raise VisionError("图片地址主机无效")
+    try:
+        literal = ipaddress.ip_address(normalized_host)
+        raw_addresses = (str(literal),)
+    except ValueError:
+        try:
+            ascii_host = normalized_host.encode("idna").decode("ascii")
+            resolved = socket.getaddrinfo(
+                ascii_host,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except (UnicodeError, OSError) as exc:
+            raise VisionError("图片地址 DNS 解析失败") from exc
+        raw_addresses = tuple(str(item[4][0]) for item in resolved)
+
+    addresses: list[str] = []
+    for raw_address in raw_addresses:
+        try:
+            address = ipaddress.ip_address(raw_address.split("%", 1)[0])
+        except ValueError as exc:
+            raise VisionError("图片地址 DNS 结果无效") from exc
+        if not address.is_global:
+            raise VisionError("图片地址指向非公网网络，已拒绝")
+        normalized = str(address)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    if not addresses:
+        raise VisionError("图片地址 DNS 没有可用结果")
+    return tuple(addresses)
+
+
+def _validated_http_target(
+    url: str,
+) -> tuple[ParseResult, str, int, tuple[str, ...]]:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise VisionError("图片重定向目标不是 HTTP/HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise VisionError("图片地址不得包含用户名或密码")
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise VisionError("图片地址端口无效") from exc
+    if port < 1 or port > 65535:
+        raise VisionError("图片地址端口无效")
+    addresses = _public_ip_addresses(host, port)
+    return parsed, host.rstrip("."), port, addresses
+
+
+def _open_pinned_image_connection(
+    parsed: ParseResult,
+    host: str,
+    port: int,
+    addresses: tuple[str, ...],
+    timeout: int,
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    last_error: Exception | None = None
+    for address in addresses:
+        raw_socket: socket.socket | None = None
+        connection: http.client.HTTPConnection | None = None
+        try:
+            raw_socket = socket.create_connection((address, port), timeout=timeout)
+            if parsed.scheme == "https":
+                raw_socket = ssl.create_default_context().wrap_socket(
+                    raw_socket,
+                    server_hostname=host,
+                )
+            connection = http.client.HTTPConnection(host, port, timeout=timeout)
+            connection.sock = raw_socket
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            default_port = 443 if parsed.scheme == "https" else 80
+            host_header = f"[{host}]" if ":" in host else host
+            if port != default_port:
+                host_header = f"{host_header}:{port}"
+            connection.putrequest(
+                "GET",
+                target,
+                skip_host=True,
+                skip_accept_encoding=True,
+            )
+            connection.putheader("Host", host_header)
+            connection.putheader("User-Agent", "AIchatbot/vision")
+            connection.putheader("Accept", "image/*,*/*;q=0.8")
+            connection.putheader("Connection", "close")
+            connection.endheaders()
+            return connection, connection.getresponse()
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+            if connection is not None:
+                connection.close()
+            elif raw_socket is not None:
+                raw_socket.close()
+    raise VisionError("图片下载连接失败") from last_error
+
+
+def _download_public_http_image(url: str, timeout_seconds: int, max_bytes: int) -> str:
+    current_url = url
     timeout = max(timeout_seconds, 1)
     limit = max(max_bytes, 1)
-
-    try:
-        with urlopen(request, timeout=timeout) as response:
+    for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
+        parsed, host, port, addresses = _validated_http_target(current_url)
+        connection: http.client.HTTPConnection | None = None
+        try:
+            connection, response = _open_pinned_image_connection(
+                parsed,
+                host,
+                port,
+                addresses,
+                timeout,
+            )
+            if response.status in IMAGE_REDIRECT_STATUSES:
+                location = str(response.getheader("Location") or "").strip()
+                if not location:
+                    raise VisionError("图片重定向缺少目标地址")
+                if redirect_count >= MAX_IMAGE_REDIRECTS:
+                    raise VisionError("图片重定向次数过多")
+                current_url = urljoin(current_url, location)
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise VisionError(f"图片下载失败 HTTP {response.status}")
+            content_length = response.getheader("Content-Length")
+            if content_length:
+                try:
+                    if int(content_length) > limit:
+                        raise VisionError("图片超过大小限制")
+                except ValueError:
+                    pass
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -379,22 +624,17 @@ def _download_image_base64(url: str, timeout_seconds: int, max_bytes: int) -> st
                 if total > limit:
                     raise VisionError("图片超过大小限制")
                 chunks.append(chunk)
-    except HTTPError as exc:
-        raise VisionError(f"下载失败 HTTP {exc.code}") from exc
-    except URLError as exc:
-        raise VisionError(f"下载失败 {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise VisionError("下载超时") from exc
-
-    if not chunks:
-        raise VisionError("图片内容为空")
-    return base64.b64encode(b"".join(chunks)).decode("ascii")
+            return _validated_image_base64(b"".join(chunks), limit)
+        finally:
+            if connection is not None:
+                connection.close()
+    raise VisionError("图片重定向次数过多")
 
 
 def _file_url_to_path(parsed) -> Path:
-    if parsed.netloc and parsed.path:
-        return Path(f"//{parsed.netloc}{unquote(parsed.path)}")
-    return Path(unquote(parsed.path))
+    if parsed.netloc:
+        raise VisionError("不允许通过 file URL 访问网络共享")
+    return Path(url2pathname(parsed.path))
 
 
 def _looks_like_local_path(value: str) -> bool:
@@ -404,14 +644,31 @@ def _looks_like_local_path(value: str) -> bool:
     return path.is_absolute() or path.exists()
 
 
-def _read_local_image_base64(path: Path, max_bytes: int) -> str:
+def _read_local_image_base64(
+    path: Path,
+    max_bytes: int,
+    trusted_local_roots: tuple[Path, ...] = (),
+) -> str:
+    if str(path).startswith(("\\\\", "//")):
+        raise VisionError("不允许访问网络共享图片路径")
     try:
-        resolved = path.expanduser().resolve()
+        resolved = path.expanduser().resolve(strict=True)
     except OSError as exc:
         raise VisionError("本地图片路径无效") from exc
 
     if not resolved.is_file():
         raise VisionError("本地图片文件不存在")
+
+    trusted_roots: list[Path] = []
+    for raw_root in trusted_local_roots:
+        try:
+            root = Path(raw_root).expanduser().resolve(strict=True)
+        except OSError:
+            continue
+        if root.is_dir():
+            trusted_roots.append(root)
+    if not any(resolved.is_relative_to(root) for root in trusted_roots):
+        raise VisionError("本地图片不在可信缓存目录内，已拒绝")
 
     limit = max(max_bytes, 1)
     size = resolved.stat().st_size
@@ -419,11 +676,91 @@ def _read_local_image_base64(path: Path, max_bytes: int) -> str:
         raise VisionError("图片内容为空")
     if size > limit:
         raise VisionError("图片超过大小限制")
-    return base64.b64encode(resolved.read_bytes()).decode("ascii")
+    return _validated_image_base64(resolved.read_bytes(), limit)
 
 
-async def _describe_image_base64(config: AiChatConfig, image_base64: str) -> str:
+async def _describe_image_base64(
+    config: AiChatConfig,
+    image_base64: str,
+    *,
+    role_card_key: str = "",
+) -> str:
+    route = resolve_vision_provider_route(config, role_card_key)
+    if route.provider == "persona_grok":
+        return await _grok_chat_vision(route, image_base64)
     return await asyncio.to_thread(_bailian_chat_vision, config, image_base64)
+
+
+def _image_media_type(image_base64: str) -> str:
+    try:
+        content = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise VisionError("Grok视觉图片Base64无效") from exc
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
+        return "image/webp"
+    raise VisionError("Grok视觉图片格式不受支持")
+
+
+async def _grok_chat_vision(
+    route: VisionProviderRoute,
+    image_base64: str,
+) -> str:
+    media_type = _image_media_type(image_base64)
+    client = AsyncOpenAI(
+        api_key=route.api_key,
+        base_url=route.base_url,
+        timeout=route.timeout_seconds,
+        max_retries=0,
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=route.model,
+            messages=[
+                {"role": "system", "content": VISION_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "请仔细观察图片，并严格按照系统要求输出客观事实摘要。",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    f"data:{media_type};base64,{image_base64}"
+                                ),
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                },
+            ],
+            temperature=0,
+            max_tokens=400,
+        )
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        status_suffix = f"，HTTP {status_code}" if status_code else ""
+        raise VisionError(
+            f"Grok视觉请求失败（{type(exc).__name__}{status_suffix}）"
+        ) from exc
+
+    content = response.choices[0].message.content
+    description = sanitize_vision_description(
+        content if isinstance(content, str) else ""
+    )
+    if not description:
+        raise VisionError("Grok视觉返回空描述")
+    if is_low_quality_vision_description(description):
+        raise VisionError("Grok视觉返回低质量重复内容")
+    return description
 
 
 def _bailian_chat_vision(config: AiChatConfig, image_base64: str) -> str:

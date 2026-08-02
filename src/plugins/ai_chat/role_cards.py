@@ -92,6 +92,22 @@ def active_role_card() -> RoleCard | None:
     return cards[0]
 
 
+def role_card_by_key(key: str) -> RoleCard | None:
+    """Return one exact role card without changing the global active card."""
+
+    target = key.strip()
+    if not target:
+        return None
+    return next((card for card in list_role_cards() if card.key == target), None)
+
+
+def load_role_card_prompt(key: str) -> str:
+    card = role_card_by_key(key)
+    if card is None:
+        return ""
+    return _read_text(card.path)
+
+
 def load_active_role_card_prompt() -> str:
     card = active_role_card()
     if card is None:

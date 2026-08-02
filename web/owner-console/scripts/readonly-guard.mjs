@@ -45,11 +45,20 @@ const expectedApiMethods = [
   "getReliability",
   "getMemory",
   "getAccessControl",
+  "addPrivateWhitelistItem",
+  "removePrivateWhitelistItem",
+  "addGroupWhitelistItem",
+  "removeGroupWhitelistItem",
+  "addUserBlacklistItem",
+  "removeUserBlacklistItem",
   "getSettings",
   "getTasks",
   "getTaskDetail",
+  "cancelTask",
   "getApprovals",
   "getApprovalDetail",
+  "approveApproval",
+  "rejectApproval",
 ];
 
 const expectedPageRoutes = [
@@ -72,11 +81,8 @@ const forbiddenPathFragments = [
 ];
 
 const forbiddenApiNames = [
-  "approveApproval",
-  "rejectApproval",
   "resumeApproval",
   "createTask",
-  "cancelTask",
   "retryTask",
   "saveSettings",
   "switchRoleCard",
@@ -88,6 +94,31 @@ const forbiddenApiNames = [
   "addMemory",
   "deleteMemory",
 ];
+
+const approvalActionApiNames = ["approveApproval", "rejectApproval"];
+const approvalActionAllowedFiles = new Set([
+  "src/api/ownerConsoleApi.ts",
+  "src/pages/ApprovalDetailPage.tsx",
+  "src/pages/ApprovalDetailPage.test.tsx",
+]);
+const taskActionAllowedFiles = new Set([
+  "src/api/ownerConsoleApi.ts",
+  "src/pages/TaskDetailPage.tsx",
+  "src/pages/TaskDetailPage.test.tsx",
+]);
+const accessActionApiNames = [
+  "addPrivateWhitelistItem",
+  "removePrivateWhitelistItem",
+  "addGroupWhitelistItem",
+  "removeGroupWhitelistItem",
+  "addUserBlacklistItem",
+  "removeUserBlacklistItem",
+];
+const accessActionAllowedFiles = new Set([
+  "src/api/ownerConsoleApi.ts",
+  "src/pages/AccessControlPage.tsx",
+  "src/pages/AccessControlPage.test.tsx",
+]);
 
 const failures = [];
 
@@ -194,6 +225,43 @@ for (const file of sourceTexts) {
   }
 }
 
+for (const name of approvalActionApiNames) {
+  const locations = sourceTexts
+    .filter((file) => new RegExp(`\\b${name}\\b`).test(file.text))
+    .map((file) => file.rel);
+  for (const location of locations) {
+    if (!approvalActionAllowedFiles.has(location)) {
+      fail(`${location} references approval action API name ${name} outside the fixed approval detail flow.`);
+    }
+  }
+  if (!locations.includes("src/api/ownerConsoleApi.ts")) {
+    fail(`ownerConsoleApi.ts is missing fixed approval action ${name}().`);
+  }
+}
+
+for (const file of sourceTexts) {
+  if (/\bcancelTask\b/.test(file.text) && !taskActionAllowedFiles.has(file.rel)) {
+    fail(`${file.rel} references cancelTask outside the fixed task detail flow.`);
+  }
+}
+if (!apiText.includes("const taskPrefix = `${API_BASE}/tasks/`;")) {
+  fail("ownerConsoleApi.ts is missing the task action dynamic allowlist prefix.");
+}
+if (!apiText.includes('/^[1-9]\\d*\\/cancel$/.test(suffix)')) {
+  fail("ownerConsoleApi.ts must restrict task POST paths to a positive ID and cancel suffix.");
+}
+
+for (const name of accessActionApiNames) {
+  const locations = sourceTexts
+    .filter((file) => new RegExp(`\\b${name}\\b`).test(file.text))
+    .map((file) => file.rel);
+  for (const location of locations) {
+    if (!accessActionAllowedFiles.has(location)) {
+      fail(`${location} references access action API name ${name} outside the fixed access-control flow.`);
+    }
+  }
+}
+
 if (!apiText.includes("const allowedPostPaths = new Set([")) {
   fail("ownerConsoleApi.ts is missing the fixed manual-action POST allowlist.");
 }
@@ -243,6 +311,12 @@ const postMethodCount = [...apiText.matchAll(/method:\s*"POST"/g)].length;
 if (postMethodCount !== 1) {
   fail(`ownerConsoleApi.ts must contain exactly one POST transport; found ${postMethodCount}.`);
 }
+if (!apiText.includes("const approvalPrefix = `${API_BASE}/approvals/`;")) {
+  fail("ownerConsoleApi.ts is missing the approval action dynamic allowlist prefix.");
+}
+if (!apiText.includes('/^[1-9]\\d*\\/(approve|reject)$/.test(suffix)')) {
+  fail("ownerConsoleApi.ts must restrict approval POST paths to a positive ID and approve/reject suffix.");
+}
 for (const requiredToken of [
   '"X-Owner-Console-Action": "manual-project-doc-rag-probe-v1"',
   'confirmation: "run_registered_project_doc_rag_probe"',
@@ -264,6 +338,24 @@ for (const requiredToken of [
   'confirmation: "accept_latest_cloud_vision_response_quality"',
   '"X-Owner-Console-Action": "manual-cloud-vision-response-quality-reject-v1"',
   'confirmation: "reject_latest_cloud_vision_response_quality"',
+  '"X-Owner-Console-Action": "approval-approve-v1"',
+  'confirmation: "approve_registered_pending_approval"',
+  '"X-Owner-Console-Action": "approval-reject-v1"',
+  'confirmation: "reject_registered_pending_approval"',
+  '"X-Owner-Console-Action": "task-cancel-v1"',
+  'confirmation: "cancel_single_pending_task"',
+  'header: "access-private-whitelist-add-v1"',
+  'header: "access-private-whitelist-remove-v1"',
+  'header: "access-group-whitelist-add-v1"',
+  'header: "access-group-whitelist-remove-v1"',
+  'header: "access-user-blacklist-add-v1"',
+  'header: "access-user-blacklist-remove-v1"',
+  'confirmation: "add_private_whitelist_item"',
+  'confirmation: "remove_private_whitelist_item"',
+  'confirmation: "add_group_whitelist_item"',
+  'confirmation: "remove_group_whitelist_item"',
+  'confirmation: "add_user_blacklist_item"',
+  'confirmation: "remove_user_blacklist_item"',
   '"Content-Type": "application/json"',
 ]) {
   if (!apiText.includes(requiredToken)) {
@@ -330,4 +422,4 @@ if (failures.length > 0) {
 
 console.log("Owner Console frontend boundary guard passed.");
 console.log(`Checked ${sourceFiles.length} TypeScript source files.`);
-console.log("Verified read-only GET paths, protected TTS/cloud-vision previews, nine fixed manual POST actions, controlled timers, page routes, and absence of generic write APIs.");
+console.log("Verified read-only GET paths, protected diagnostic actions, fixed approval/task/access actions, controlled timers, page routes, and absence of generic write APIs.");

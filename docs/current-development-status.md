@@ -4,11 +4,11 @@
 
 | 字段 | 当前值 |
 |---|---|
-| 快照日期 | 2026-07-27（Asia/Shanghai） |
+| 快照日期 | 2026-07-28（Asia/Shanghai） |
 | Git 分支 | `main` |
-| 已提交基线 | `0055dcc Add Owner Console and Main LLM diagnostic articles` |
+| 已提交基线 | `451263f Complete Owner Console diagnostics and Bailian vision rollout` |
 | 远端关系 | 本次只读核对时 `main...origin/main`，无领先或落后 |
-| 工作区 | 有未提交修改；包含主人已批准的 P2.49d、P2.49e、本轮百炼云视觉实现、文档治理修改和主人保留文件 |
+| 工作区 | 有未提交修改；包含主人已批准的 QQ/Owner Console 启动优化、external-read 证据回答与可信时间窗口修订、对应测试与文档记录，以及明确保留的主人文件 |
 | 运行态观测 | 2026-07-27 Owner Console PID 15220 继续监听 8090。Bot 已由主人通过 `scripts/start.ps1` 启动，父/子 PID 24552/15332，监听 8080 并完成 QQ live；主人连续发送两张图片，均得到快速且准确的百炼描述。只读结构化可靠性证据在同一 runtime 记录两次 `vision/infer/operation_succeeded/succeeded`，未读取聊天正文或图片。11434 现有 listener PID 4388 保持在线，7861 无 listener。运行态只代表对应观测时点 |
 | 权威范围 | 当前主人批准方向、阶段完成度、待办优先级、授权与禁止动作 |
 
@@ -31,6 +31,7 @@
 11. `owner_approved`、`configured_privately`、`isolated_live_passed`、`owner_accepted`：主人配置百炼北京地域 OpenAI-compatible URL/Key，并明确批准对同一固定 `owner_private` PNG 做三次逐步提示词实验。最终固定 `qwen3.7-flash`、`enable_thinking=false`、一次请求、零工具、零重试；最佳一次为 1578 ms、input/output/total token 316/98/414，主人接受其对黑白头发、可见眼睛、大小爱心以及爱意/兴奋/撒娇情绪的描述。有限清理只移除完整前导 `<think>…</think>` 或前导孤立 `</think>`。
 12. `owner_approved`、`implemented`、`regression_passed`、`owner_console_loaded`、`ui_smoke_passed`、`bot_loaded`、`qq_live_passed`、`owner_accepted`：主人随后批准把百炼 `qwen3.7-flash` 作为生产 `describe_images()` 的主视觉模型，并原位替换 Owner Console 的本地视觉配置/诊断面板。2026-07-27 Owner Console 页面验收无问题；Bot 加载后主人连续发送两张 QQ 图片，均得到快速且准确的描述，结构化事件记录两次成功。生产云视觉链现已完成 QQ live 验收。
 13. `owner_approved`、`implemented`、`regression_passed`、`next_start_effective`：主人指出 `scripts/start.ps1` 仍因 `ENABLE_VISION=true` 检查本地 `qwen2.5vl:3b`。现已从 `ensure-ollama.ps1` 移除视觉对本地 Ollama 的依赖；未来启动只有启用 MemoryRAG/ProjectDocRAG 且 embedding provider 为 Ollama 时才检查 `bge-m3`。新增 3 项零网络合同测试，全量 Python 737 tests OK（skipped=4）；未重启当前 Bot/Ollama。
+14. `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_effect_verified`：QQ 启动新增实际 `PORT` 监听与项目 Bot 所有权预检；Ollama 在线缺模型时明确失败且不再重启健康服务，只有连接明确被拒绝时才以 `-KeepExisting` 启动。Owner Console 不再为只读 gap-scene 计数导入 OpenAI SDK，并以 200 ms `/healthz` 轮询确认就绪。2026-07-27/28 Bot 与 Owner Console 已加载；正常 Windows 权限下重复启动准确识别既有项目 Bot 并退出 0，受限元数据不可见时保守拒绝重复启动。
 
 方向选择规则：
 
@@ -65,6 +66,17 @@
 | 阿里云百炼隔离真实探测 | `owner_approved`、`configured_privately`、`isolated_live_passed`、`owner_accepted` | 同一固定 `aike_affection_005` owner_private PNG；北京地域 `qwen3.7-flash`；三次主人逐步批准的单次请求。最终 prompt 允许概括可见画面的情绪/感情色彩，最佳回复获主人接受；最后一次 1578 ms，token 316/98/414，没有第四次请求 |
 | 百炼生产视觉与 Owner Console 收口 | `owner_approved`、`implemented`、`regression_passed`、`owner_console_loaded`、`ui_smoke_passed`、`bot_loaded`、`qq_live_passed`、`owner_accepted` | 生产 `describe_images()` 使用百炼且无 Ollama/Plus fallback；Owner Console 原位替换完成。主人确认页面无问题，并在 QQ 连续发送两张图片，均得到快速准确描述；同一 runtime 有两次结构化 vision success |
 | 启动脚本 Ollama 依赖收口 | `owner_approved`、`implemented`、`regression_passed`、`next_start_effective` | `ENABLE_VISION`、`VISION_OLLAMA_BASE_URL`、`VISION_MODEL/qwen2.5vl:3b` 不再参与 `ensure-ollama.ps1`；仅 Ollama-backed MemoryRAG/ProjectDocRAG 检查 embedding URL 与 `bge-m3`。聚焦 3 tests、Python full 737 tests（skipped=4）、PowerShell parse、`git diff --check` 通过 |
+| QQ 与 Owner Console 启动优化 | `owner_approved`、`implemented`、`regression_passed`、`not_loaded` | QQ 先做端口/项目进程所有权预检；`Get-NetTCPConnection` 返回空时以 `netstat -ano -p tcp` 只读兜底，所有权可证明则识别已有 Bot，不可证明则保守拒绝重复启动。健康 Ollama 缺模型不重启，明确离线才安全启动。Owner Console 延迟加载 gap-scene LLM 依赖并以 `/healthz` 高频确认就绪；导入基准稳定均值约 1.10 秒。最终全量 750 tests OK（skipped=4） |
+| external-read 证据回答 v2.1 与真实链路恢复 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_passed` | #52 的单行质检解析缺陷已修复并由主人 QQ 拒绝为 `owner_rejected`；#53 Tavily 10 秒超时后配置提高到既有安全上限 15 秒；#54 搜索成功但旧 Main LLM URL 失效，隔离综合为 `connection_failed`；主人更新 URL 并重启 Bot 后，#55 完成一次 Tavily advanced 和一次隔离综合，`synthesis_status=completed`、`synthesis_error_category=none`，中文回答与引用合同通过。#55 质量枚举仍待主人显式接受/拒绝 |
+| MainAgent 主人普通私聊联网预判 | `implemented_then_loaded`、`live_trigger_passed`、`owner_boundary_rejected`、`removed`、`regression_passed`、`not_reloaded` | 任务 #56 曾证明普通聊天前置 MainAgent 预判能够真实触发联网，但主人随后澄清该解释越界：MainAgent 永远不允许注入日常聊天。现已删除 `run_owner_autonomous_external_read`、`handle_chat` 前置调用和专用 external-read-only 注册器；日常聊天恢复为直接进入原 ChatGraph。历史 #56 只保留为失败经验，不再代表当前入口能力 |
+| external-read 可信时间窗口修订 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_fail_closed_passed` | 前五项及执行绑定收口已加载。任务 #57 在运行环境 2026-07-28 下使用 2026-06-28 至 2026-07-28，Tavily 一次返回 5 个候选，本地全部拒绝，`result_count=0`、`dropped_result_count=5`、`synthesis_request_count=0`、`not_run_no_evidence`；没有把范围外或无可靠日期内容列入回答，证明 fail-closed 生效。该结果不证明召回率良好，也不能从旧任务追溯 5 条各自原因。裸“最近/近期/近来/recently”没有明确周期时仍要求澄清；`max_results=5` 不变，普通聊天仍不调用 MainAgent。 |
+| external-read 日期丢弃原因安全计数 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_observability_passed` | 任务 #59 已证明新计数加载：5 个候选中日期缺失 4、仅弱日期 1，窗口外/冲突/注入/清洗均为 0，综合请求为 0。由此确认主要误杀来自日期格式识别过窄和“正文弱日期必须依附 provider 强日期”，而非窗口外或清洗规则。任务仍只保存安全整数，不保存 query、正文、标题、URL、host 明细或 provider 原始响应。 |
+| external-read 无歧义日期与官方正文强证据 | `owner_approved`、`implemented`、`regression_passed`、`superseded_raw_content_off`、`not_loaded`、`not_live` | 支持完整、无歧义的单双位年首日期、中文年月日、英文月名日期和 RFC 风格日期；不接受无年份、无日或相对日期。`official_content_strong` 仍只允许既有固定官方域名白名单、标题/摘要明确发布语义、标题/摘要合计唯一完整日期且位于窗口内的结果；#64 后已关闭并忽略 Tavily `raw_content`，因此日期只出现在页面深处而不在 provider 日期、标题或搜索摘要中的结果会继续 fail closed。第三方、无发布语义、多日期、窗口外、无日期和注入内容仍拒绝或保持弱证据。 |
+| external-read 官方优先两阶段检索 | `historical`、`superseded_by_main_agent_search_plan` | 任务 #60–#66 使用过固定“官方阶段归零后媒体补充”策略。#65/#66 虽能完成，但暴露出该策略没有理解主人问题：本地生活等主题不需要官方门控，版本类问题也需要先拆解当前版本、下一版本与角色证据。该固定策略仅保留为旧严格命令兼容路径，不再是显式 `/agent` 的主规划合同。 |
+| external-read MainAgent 动态检索规划 | `owner_approved`、`implemented`、`regression_passed`、`previous_revision_loaded`、`live_quality_issue_observed`、`tavily_chat_parity_revision_not_loaded`、`not_live` | 主人显式 `/agent` 后，MainAgent 先依据完整问题和可信当前日期理解意图、实体、相对时间与证据需求，再生成最多两条、每条不超过 50 字的 provider 查询。Tavily 官网 Chat 实测会把“原神下一个版本的角色是谁”拆成两条互补新闻查询，以 `basic + news + week/month` 同批启动；裸 API 对照证明同参数可把《原神》官方 7.0 前瞻排在第一，但外部媒体页也可能随后降序或变成 404。当前实现因此把每条计划扩展为独立 `source_scope/time_range/evidence_role`：news 自动 Basic，general/official 自动 Advanced，每次最多 10 条；`always` 两条并行，跨查询 URL 去重并剔除显式 404/页面不存在结果。综合必须先回答实体，再区分 `official_confirmation`、`reported_candidate` 与失效来源。仍保留 `include_raw_content=false`、256 KiB、最多两次固定 Tavily、零 retry/fallback、最多一次零工具隔离综合、普通聊天不进入 MainAgent和不持久化问题/搜索词/正文/URL。核心 171 tests、状态/Owner Console 47 tests、Python full 797 tests（skipped=4）、前端 33 tests、typecheck、build、只读 guard 通过；本修订尚未重启加载或 live。 |
+| external-read #69 聚合结果合同上限修复 | `live_failure_observed`、`root_contract_mismatch_confirmed`、`implemented`、`regression_passed`、`not_reloaded`、`not_live` | #69 在加载 Tavily Chat 对照修订后以通用 `data_validation_failed` 失败；该文案不证明数据库或文件损坏。代码审计确认单次候选已提高到 10、两查询最多 20，但正式任务 sanitizer 仍限制总结果/候选/丢弃为 10、每阶段候选/结果为 5；任一真实阶段超过旧上限都会触发 ValueError。另有跨查询重复 URL 被正确去重后，阶段结果数仍按去重前统计，可能触发两阶段一致性校验。现总量固定上限为 20、每阶段为 10，阶段合格数按聚合去重后的结果重新统计；结果合同异常使用固定 `ExternalReadResultValidationError`，执行回复和任务详情重新分类均明确提示不等于数据库/文件/索引损坏，不保存原始异常 detail。由于 #69 没有持久化 provider 原始结果，无法确定三个旧校验中最先命中哪一个。聚焦 99 tests、Python full 802 tests（skipped=4）通过；未自动重试 #69。 |
+| external-read #70/#71 live 质量与综合 fallback 收口 | `retrieval_live_passed`、`owner_positive_review_70`、`synthesis_request_rejected_71`、`fallback_revision_implemented`、`regression_passed`、`not_reloaded` | #70 真实使用 `news/basic/week + news/basic/month + always`，召回 `genshin.hoyoverse.com` 官方 7.0 前瞻并谨慎回答官方尚未公布角色名单；主人判断回答基本没有问题，证明 Tavily Chat 对照检索和 #69 计数修复已加载生效。#71 使用 `official/advanced/year + news/basic/year`，20 个 provider 候选中过滤后保留 13 条，但隔离综合一次调用被上游 4xx 拒绝，安全类别为 `request_rejected`；旧 fallback 展开多条各 360 字摘要并列出全部来源，造成原文堆叠。现检索证据仍最多保留 10 条/12000 字符，但单次综合输入独立限制为最多 6 条、总正文 8000 字符、每条 1600 字符；不重试。综合失败时只展示最多 3 条、每条约 180 字的查询相关句，优先 official_confirmation/官方 host，再按比较语义选择；只列对应 3 个来源，其余只报数量，并显示固定综合失败类别。聚焦 68 tests、Python full 804 tests（skipped=4）通过；Owner Console 仍是旧进程，页面的 `advanced/5/raw=true` 是陈旧运行时状态，不代表已重启 Bot 的 #70/#71 实际参数。 |
+| external-read #64 响应预算与阶段失败诊断 | `owner_approved`、`implemented`、`regression_passed`、`not_loaded`、`not_live` | #64 于 2026-07-30 14:19:23–14:19:40 失败，安全类别为 `response_too_large`；任务没有保存原始响应，也无法从旧摘要判断官方或媒体阶段。根因是固定 advanced 请求在每阶段最多 5 条时仍请求 `include_raw_content="text"`，完整页面正文可能在本地截断前突破 262144 字节。现固定 `include_raw_content=false` 并忽略 provider 意外返回的该字段；256 KiB、advanced、`chunks_per_source=2`、每阶段 5 条、两阶段条件、零 retry/fallback 和最多一次综合均不变。阶段策略异常新增 `failed_search_stage`、实际阶段/外部/Provider 请求整数和 `synthesis_request_count=0`，同步任务详情、状态与 Owner Console；不保存 query、正文、URL、host 或异常 detail。Python full 789 tests OK（skipped=4），前端 33 tests、typecheck、build、只读 guard 通过。 |
 | P2.49d ConnectTimeout 最小修复 | `implemented`、`regression_passed`、`reloaded`、`live_effect_verified` | 新增 `ConnectTimeout -> 受管理启动` fake 端到端测试；主人重试时 `service_start_attempted=true`，证明分类修复生效。`ReadTimeout -> 不盲目启动` 继续成立；新的失败发生在受管理启动后的 health 等待 |
 | P2.49d lazy bootstrap 最小修复 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_technical_passed` | `/health` 不导入 torch/IndexTTS 即可就绪；首次 `/tts` 才导入 runtime 和构造模型；第三次 live 的 `runtime_imported_before=false`、`service_started=true`、`tts_called=true` 和有效 WAV 证明修复真实生效 |
 | P2.49d 主人听检门控 | `owner_approved`、`implemented`、`regression_passed`、`loaded`、`live_passed`、`owner_accepted` | 固定文本“这是一次固定语音合成检查。”已由主人真实试听并接受；最终 `succeeded/result_validation/tts_managed_lifecycle_succeeded`。`technical_outcome=succeeded`，听检后预览不可再取、磁盘无 WAV、7861 无 listener。Python 719 tests OK（skipped=4）、TTS 18 tests（skipped=1）、Owner Console 102 tests（skipped=1）、前端 29 tests及全部静态边界通过 |
@@ -101,6 +113,8 @@ database_write_allowed=false
 | 2 条 MemoryRAG 缺失向量 | 是 | 一致性缺口已观测；当前未影响本阶段验收 | DEFERRED | `not_approved` | 保持现状，不补建、不修复 | 否 |
 | Main LLM 任意工具选择评估 | 未建立 | 单次固定问答不能代表通用 planner/policy 正确性 | DEFERRED | `not_approved` | 未来按具体工具与场景分别设计验收 | 否 |
 | external-read 时间线、页面 stale 提示、更多移动端优化 | 是 | 有用但不是当前阻断 | P2 | `not_approved` | 保留候选，不从历史文档自动启动 | 否 |
+| 显式 `/agent` 联网时效复验 | 是 | #56 暴露的相对日期、provider 时间参数和本地日期证据缺陷已完成离线修订；普通聊天预判已撤回，修订只保留在显式 `/agent` 链 | P1 | `revision_implemented_not_loaded` | 由主人手动重启 Bot 后，以 `/agent <相对时效问题>` 验证 MainAgent 是否选择 external-read；开发代理不代发 QQ、不自动触发 Tavily | 否 |
+| external-read #55 主人质量枚举 | 是 | 技术链、中文综合与引用合同已经通过；数据库仍为 `owner_quality_pending` | P1 | `owner_quality_pending` | 主人按实际内容发送接受或拒绝命令；不直接修改数据库 | 否 |
 
 ## 5. 任务优先级
 
@@ -132,6 +146,14 @@ NEEDS_REVALIDATION  只能在重新核对 Git、代码或 live 后引用
 - 按主人批准完成 P2.49e v2 固定正式表情样例、无答案泄露 prompt、实际描述展示和主人质检门控的实现与回归；不自动重载或执行 live。
 - 按主人批准完成 P2.49e 最小自然描述单变量实验：移除严格 JSON Schema、枚举与语义答案比对，保留固定图片、固定模型、单次推理和主人质检；不自动重启或执行 live。
 - 按主人逐步批准完成百炼北京地域 `qwen3.7-flash` 的三次隔离固定图片测试、有限 think 标签清理、生产云视觉主链、Owner Console 原位面板替换、服务加载和两张 QQ 图片 live；不自动重复图片请求或扩大测试范围。
+- 按主人批准完成 QQ 8080/实际 PORT 所有权预检、Ollama 缺模型安全失败、gap-scene LLM 延迟导入和 Owner Console `/healthz` 就绪轮询；完成 fake/临时本地服务与全量回归，不自动重启生产服务。
+- 按主人批准完成 external-read 第一优先质量优化：固定 Tavily Advanced、同次受限正文、一次零工具隔离 Main LLM 综合、编号来源、确定性回退和主人接受/拒绝；自动化只用 fake transport/fake LLM，不自动重启或 live。
+- 按主人在 #52 内容质量拒绝后批准完成 v2.1 最小修订：移除隔离客户端新增的 temperature/max_tokens，增加脱敏失败分类、semantic snippet 优先证据和仅引用来源展示；不自动发起第二次真实请求或重启。
+- 曾按“MainAgent 自主触发联网”实现主人普通私聊前置预判；主人澄清边界后，现已获准并完成撤回。MainAgent 不允许注入任何日常聊天，联网工具只允许在主人显式 `/agent` 会话内由 MainAgent 选择。
+- 按主人批准完成 external-read 时效修订前五项：可信本地日期正规化、MainAgent 绝对日期合同、同次 Tavily 时间参数、本地日期证据硬过滤、证据不足确定性停止；第六项扩大候选数暂不执行。
+- 按主人批准完成可信窗口执行绑定与模糊时间收口：从原始显式 `/agent` 请求得到的 `ExternalReadTemporalQuery` 作为结构化上下文绑定到 Tavily executor；MainAgent 只能决定是否调用，不能通过重述 query 丢失窗口。裸“最近”等无周期表达要求主人澄清，不创建任务、不调用 Tavily/综合模型；绝对日期范围获得同一硬过滤合同。
+- 按主人批准完成 external-read 日期丢弃原因的安全整数计数，并同步正式任务摘要、任务状态/详情与 Owner Console 只读页面；只对后续任务生效，不追溯恢复 #57 内容，不改变搜索或证据资格合同。
+- 按任务 #59 的安全整数诊断和主人批准，扩展完整无歧义日期格式，并仅在既有固定官方域名、明确发布语义、唯一窗口内完整日期同时成立时允许 `official_content_strong`；同步安全计数与 Owner Console，不改搜索请求和普通聊天边界。
 - 撤销未批准的 `core` 命令/scope/运行时/测试，只保留 `connect_read_only()` 安全修正。
 
 持续禁止：
@@ -183,6 +205,8 @@ scripts/switch-codex-staged-build.ps1
 - P2.49c 只证明一次固定 Main LLM 请求能够得到回答；它不验证通用工具选择、MainAgent planner/policy、RAG 索引或 TTS。
 - MemoryRAG 的 2 条缺失向量是已确认事实，但主人未批准修复。
 - 历史 `core` 实验已经按主人决定撤销；旧文档历史条目只说明曾发生，不得据此恢复命令或 scope。保留的 `connect_read_only()` 只加强既有数据库探针，不增加新命令。
+- external-read 会把主人公开 query 发送给 Tavily，并把清洗后的临时证据发送给已配置 Main LLM；Tavily 返回正文和最终安全来源 URL 只用于本次回复，不写任务正文。#55 已证明 v2.1 的中文隔离综合恢复，但通过引用合同仍不等于内容必然正确，事实质量必须由主人接受/拒绝。
+- #56 曾暴露旧版本相对时间失败；#57 证明可信窗口 fail-closed 生效；#59 进一步用安全整数定责为 4 条日期缺失、1 条仅弱日期，窗口外/冲突/注入/清洗均为 0。当前离线修订扩大的是确定性日期格式识别，并新增严格 `official_content_strong`，不是放宽时间窗口。由于任务不保存正文，不能确认 #59 的 4 条是否确实无日期还是使用了旧解析器不认识的英文格式；本轮修订尚未加载或 live。
 - 2026-07-24 本次观察未发现 8080、8090、7861 监听；没有 shutdown、ERROR 或 traceback 证据时不得臆测原因。
 
 ## 8. 唯一下一步
@@ -190,7 +214,11 @@ scripts/switch-codex-staged-build.ps1
 ```text
 P2.49d 已完成 live_passed/owner_accepted。P2.49e 本地视觉的接口与资源收口已经 live 通过，但严格结构化版和最小自然描述版都未通过主人内容质量验收；自然描述版最终为 failed/owner_visual_review/vision_response_quality_rejected。
 
-阿里云百炼固定样本、Owner Console 新页面和 QQ 生产视觉均已通过主人验收。2026-07-27 Bot runtime 对两张主人图片均快速返回准确描述，结构化记录两次 vision success。`scripts/start.ps1` 的陈旧 qwen2.5 检查也已收口：视觉不再触发 Ollama ensure，Ollama-backed RAG 仍保留 `bge-m3` 检查。当前阶段没有自动下一项；后续方向等待主人明确指定。
+任务 #56 曾通过普通聊天前置 MainAgent 预判触发联网，但主人已明确该入口越界并批准撤回。当前代码中日常聊天直接进入原 ChatGraph，不调用 MainAgent、不创建 external-read 任务；只有主人显式输入 `/agent` 后，MainAgent 才能在其受控工具表中选择联网。
+
+可信时间窗口和日期原因计数已由显式 `/agent` 任务 #57/#59 分别证明加载。#59 的 4 条日期缺失和 1 条仅弱日期直接支持本轮最小修订；没有证据支持放宽窗口外、冲突、注入或清洗规则。
+
+#64 证明旧 raw-content 请求会因 256 KiB 上限 fail closed；#65/#66 证明关闭 raw content 后真实读取可继续；#67 证明首版 MainAgent 动态规划已经加载，但 `official + official` 与缺失的《原神》第一方 host 识别共同导致证据归零。当前最小修复已经实现并全量回归通过，唯一下一步是由主人决定是否重载，再用同一条 `/agent 原神下一个版本的角色是谁` 复验。预期规划应为 official 与 general/news 互补，且官方产品站点不再被本地门控误杀；开发代理不自动重启、代发 QQ、调用真实 Tavily/Main LLM、扩大安全预算、增加 retry/fallback 或让普通聊天进入 MainAgent。
 ```
 
 ## 9. 证据入口

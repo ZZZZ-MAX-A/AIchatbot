@@ -1,6 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import {
   OwnerConsoleApiError,
@@ -35,6 +35,14 @@ const statusFilters: Array<{ label: string; value: ApprovalStatusFilter }> = [
   { label: "已过期", value: "expired" },
 ];
 
+function approvalStatusFilterFromSearch(
+  value: string | null,
+): ApprovalStatusFilter {
+  return statusFilters.some((filter) => filter.value === value)
+    ? (value as ApprovalStatusFilter)
+    : "all";
+}
+
 function apiErrorDescription(error: Error): string {
   if (error instanceof OwnerConsoleApiError) {
     if (error.status === 403) {
@@ -68,9 +76,18 @@ function formatActionability(approval: OwnerConsoleApprovalRow): string {
     return "网页只读";
   }
   if (approval.actionability.blocked_reason) {
-    return approval.actionability.blocked_reason;
+    if (approval.actionability.blocked_reason.includes("disabled")) {
+      return "网页审批未开放";
+    }
+    if (approval.actionability.can_reject) {
+      return "仅可拒绝";
+    }
+    return "不可处理";
   }
-  return "仅展示";
+  if (approval.actionability.can_approve && approval.actionability.can_reject) {
+    return "可批准或拒绝";
+  }
+  return "不可处理";
 }
 
 function ApprovalRows({ rows }: { rows: OwnerConsoleApprovalRow[] }) {
@@ -121,7 +138,7 @@ function ApprovalRows({ rows }: { rows: OwnerConsoleApprovalRow[] }) {
               className="table-link"
               to={`/owner-console/approvals/${approval.approval_id}`}
             >
-              查看详情
+              {approval.status === "pending" ? "进入处理" : "查看详情"}
             </Link>
           </span>
         </div>
@@ -131,7 +148,8 @@ function ApprovalRows({ rows }: { rows: OwnerConsoleApprovalRow[] }) {
 }
 
 export function ApprovalsPage() {
-  const [status, setStatus] = useState<ApprovalStatusFilter>("all");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = approvalStatusFilterFromSearch(searchParams.get("status"));
   const [state, setState] = useState<ApprovalsPageState>({
     loading: true,
     approvals: null,
@@ -139,6 +157,19 @@ export function ApprovalsPage() {
   });
 
   const selectedStatus = status === "all" ? null : status;
+
+  const updateStatus = useCallback(
+    (value: ApprovalStatusFilter) => {
+      const next = new URLSearchParams(searchParams);
+      if (value === "all") {
+        next.delete("status");
+      } else {
+        next.set("status", value);
+      }
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -223,7 +254,7 @@ export function ApprovalsPage() {
                   : "filter-tabs__item"
               }
               type="button"
-              onClick={() => setStatus(filter.value)}
+              onClick={() => updateStatus(filter.value)}
             >
               {filter.label}
             </button>

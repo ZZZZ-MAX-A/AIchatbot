@@ -152,6 +152,29 @@ class RoleCardPureUnitTests(unittest.TestCase):
         self.assertIsNotNone(fallback)
         self.assertEqual(fallback.key, "first")
 
+    def test_role_card_by_key_loads_exact_card_without_changing_active_card(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            role_dir, private_dir, _, active_path = self.role_card_paths(root)
+            private_dir.mkdir(parents=True)
+            role_dir.mkdir(parents=True, exist_ok=True)
+            active_path.parent.mkdir(parents=True)
+            (private_dir / "aike.md").write_text("# Aike\nlegacy", encoding="utf-8")
+            (private_dir / "linyin.md").write_text("# Linyin\nisolated", encoding="utf-8")
+            active_path.write_text(json.dumps({"active": "aike"}), encoding="utf-8")
+
+            patches = self.patch_paths(root)
+            with patches[0], patches[1], patches[2], patches[3]:
+                selected = self.role_cards.role_card_by_key("linyin")
+                prompt = self.role_cards.load_role_card_prompt("linyin")
+                active = self.role_cards.active_role_card()
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.key, "linyin")
+        self.assertEqual(prompt, "# Linyin\nisolated")
+        self.assertIsNotNone(active)
+        self.assertEqual(active.key, "aike")
+
     def test_select_role_card_matches_title_and_persists_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

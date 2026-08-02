@@ -4,10 +4,16 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from pure_ai_chat_loader import load_legacy_memory_modules, load_legacy_operation_modules
+from pure_ai_chat_loader import (
+    AI_CHAT_ROOT,
+    load_legacy_memory_modules,
+    load_legacy_operation_modules,
+    load_module,
+)
 
 
 class TempDatabaseMixin:
@@ -93,6 +99,10 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         cls.database = cls.memory_modules["database"]
         cls.agent_tasks = cls.memory_modules["agent_tasks"]
         cls.owner_agent_runtime = cls.memory_modules["owner_agent_runtime"]
+        cls.ephemeral_details = load_module(
+            "src.plugins.ai_chat.external_read_ephemeral_details",
+            AI_CHAT_ROOT / "external_read_ephemeral_details.py",
+        )
         cls.summaries = cls.memory_modules["summaries"]
         cls.manual_memory = cls.memory_modules["manual_memory"]
 
@@ -134,6 +144,29 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("事件：", formatted_detail)
         self.assertIn("关联审批：", formatted_detail)
         self.assertIn("暂无关联审批", formatted_detail)
+
+    def test_agent_task_list_offset_preserves_newest_first_order(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_ids = [
+                self.agent_tasks.create_agent_task(
+                    session_key="private:10001",
+                    user_id="10001",
+                    goal=f"offset task {index}",
+                )
+                for index in range(6)
+            ]
+            tasks = self.agent_tasks.list_agent_tasks(
+                session_key="private:10001",
+                user_id="10001",
+                limit=2,
+                offset=2,
+            )
+
+        self.assertEqual(
+            [task.id for task in tasks],
+            list(reversed(task_ids))[2:4],
+        )
 
     def test_agent_task_detail_card_links_related_approval(self):
         temp_dir, patcher = self.temp_database()
@@ -318,6 +351,7 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn("只读保证", workbench)
 
     def test_owner_agent_runtime_uses_context_without_qq_event(self):
+        self.ephemeral_details.clear_external_read_ephemeral_details_for_tests()
         temp_dir, patcher = self.temp_database()
         with temp_dir, patcher:
             context = self.owner_agent_runtime.OwnerAgentContext(
@@ -335,6 +369,15 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
                 tool_input_json='{"dry_run": true}',
                 risk_level="write_local",
                 reason="验证 service 层不依赖 QQ event",
+            )
+            self.ephemeral_details.remember_external_read_ephemeral_detail(
+                session_key=context.session_key,
+                user_id=context.user_id,
+                task_id=task_id,
+                detail_text=(
+                    "主要依据：人民网页面列出莲花血鸭和搓菜炒粉。\n"
+                    "来源 [1]：jx.people.com.cn — https://jx.people.com.cn/example"
+                ),
             )
             workbench = self.owner_agent_runtime.run_owner_agent_task_command(
                 context,
@@ -356,6 +399,9 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertIn(f"审批 #{approval_id} [待审批]", workbench)
         self.assertIn(f"Agent 任务详情卡 #{task_id}", task_detail)
         self.assertIn(f"/agent 审批详情 {approval_id}", task_detail)
+        self.assertIn("本次 Bot 运行期联网详情", task_detail)
+        self.assertIn("莲花血鸭和搓菜炒粉", task_detail)
+        self.assertIn("https://jx.people.com.cn/example", task_detail)
         self.assertIn(f"Agent 审批详情卡 #{approval_id}", approval_detail)
         self.assertIn(f"/agent 任务详情 {task_id}", approval_detail)
 
@@ -395,6 +441,75 @@ class AgentTaskPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(again_changed)
         self.assertEqual([event.kind for event in events], ["created", "cancelled"])
         self.assertIn("已取消 Agent 任务", formatted)
+
+    def test_agent_task_cancel_blocks_pending_approval_and_cancelled_task_rejects_new_approval(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="审批未决定时不能取消",
+            )
+            self.agent_tasks.create_agent_approval(
+                task_id=task_id,
+                tool_name="dry_run_write_file",
+                tool_input_json='{"dry_run": true}',
+                risk_level="write_local",
+                reason="pending approval blocks cancellation",
+            )
+            blocked_task, blocked_changed = self.agent_tasks.cancel_agent_task(
+                task_id=task_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+
+            cancellable_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="取消后不能创建审批",
+            )
+            cancelled_task, cancelled_changed = self.agent_tasks.cancel_agent_task(
+                task_id=cancellable_id,
+                session_key="private:10001",
+                user_id="10001",
+            )
+            with self.assertRaisesRegex(ValueError, "pending task"):
+                self.agent_tasks.create_agent_approval(
+                    task_id=cancellable_id,
+                    tool_name="dry_run_write_file",
+                    tool_input_json='{"dry_run": true}',
+                    risk_level="write_local",
+                    reason="must be rejected",
+                )
+
+        self.assertIsNotNone(blocked_task)
+        self.assertFalse(blocked_changed)
+        self.assertEqual(blocked_task.status, self.agent_tasks.AGENT_TASK_PENDING)
+        self.assertTrue(cancelled_changed)
+        self.assertEqual(cancelled_task.status, self.agent_tasks.AGENT_TASK_CANCELLED)
+
+    def test_concurrent_agent_task_cancel_succeeds_once_and_records_one_event(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            task_id = self.agent_tasks.create_agent_task(
+                session_key="private:10001",
+                user_id="10001",
+                goal="并发取消只能成功一次",
+            )
+
+            def cancel_once():
+                return self.agent_tasks.cancel_agent_task(
+                    task_id=task_id,
+                    session_key="private:10001",
+                    user_id="10001",
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: cancel_once(), range(2)))
+            events = self.agent_tasks.list_agent_task_events(task_id)
+
+        self.assertEqual(sum(changed for _, changed in results), 1)
+        self.assertEqual([event.kind for event in events].count("cancelled"), 1)
 
     def test_agent_task_work_claim_is_atomic_scoped_and_keeps_approval_tasks_pending(self):
         temp_dir, patcher = self.temp_database()
@@ -1476,6 +1591,8 @@ class MessageHistoryPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         cls.memory_modules = load_legacy_memory_modules()
         cls.database = cls.memory_modules["database"]
         cls.memory = cls.memory_modules["memory"]
+        cls.summaries = cls.memory_modules["summaries"]
+        cls.gap_scene_summaries = cls.memory_modules["gap_scene_summaries"]
 
     def test_messages_append_build_history_count_stats_and_clear(self):
         temp_dir, patcher = self.temp_database()
@@ -1511,6 +1628,67 @@ class MessageHistoryPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(count_after_clear, 0)
         self.assertEqual(stats_after_clear_all["message_count"], 0)
         self.assertEqual(stats_after_clear_all["session_count"], 0)
+
+    def test_clear_session_preserves_formal_summary_unchanged_and_still_in_context(self):
+        temp_dir, patcher = self.temp_database()
+        with temp_dir, patcher:
+            self.memory.append_message(
+                "private:10001",
+                "user",
+                "recent raw message",
+                "private",
+                "10001",
+            )
+            summary_id = self.summaries.add_summary(
+                session_key="private:10001",
+                message_type="private",
+                user_id="10001",
+                group_id=None,
+                summary="formal history that must remain byte-for-byte unchanged",
+                message_start_id=10,
+                message_end_id=20,
+                source_message_count=11,
+            )
+            self.gap_scene_summaries.upsert_gap_scene_summary(
+                session_key="private:10001",
+                slot=1,
+                summary="transient gap summary",
+                message_start_id=21,
+                message_end_id=25,
+                source_message_count=5,
+            )
+            summary_before = self.summaries.get_session_summary(
+                summary_id,
+                "private:10001",
+            )
+
+            self.memory.clear_session("private:10001")
+
+            summary_after = self.summaries.get_session_summary(
+                summary_id,
+                "private:10001",
+            )
+            history_after = self.memory.build_history(
+                "private:10001",
+                max_messages=10,
+                max_summaries=5,
+                max_gap_scene_summaries=2,
+            )
+            remaining_message_count = self.memory.session_message_count("private:10001")
+            remaining_gap_summaries = self.gap_scene_summaries.list_gap_scene_summaries(
+                "private:10001"
+            )
+
+        self.assertIsNotNone(summary_before)
+        self.assertEqual(summary_after, summary_before)
+        self.assertEqual(remaining_message_count, 0)
+        self.assertEqual(remaining_gap_summaries, [])
+        self.assertEqual(len(history_after), 1)
+        self.assertEqual(history_after[0]["role"], "system")
+        self.assertIn(
+            "formal history that must remain byte-for-byte unchanged",
+            history_after[0]["content"],
+        )
 
 
 if __name__ == "__main__":

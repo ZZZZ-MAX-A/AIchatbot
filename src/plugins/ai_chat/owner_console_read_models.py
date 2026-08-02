@@ -48,6 +48,13 @@ class OwnerConsoleApprovalActionability:
 
 
 @dataclass(frozen=True)
+class OwnerConsoleTaskActionability:
+    can_cancel: bool
+    task_actions_enabled: bool
+    blocked_reason: str
+
+
+@dataclass(frozen=True)
 class OwnerConsoleTaskEventRow:
     event_id: int
     task_id: int
@@ -92,7 +99,18 @@ class OwnerConsoleTaskRow:
     latest_event_summary: str
     pending_approval_ids: list[int] = field(default_factory=list)
     next_action: str = ""
+    next_action_code: str = ""
     work_type: str = ""
+    processing_category: str = ""
+    processing_label: str = ""
+    processing_detail: str = ""
+    actionability: OwnerConsoleTaskActionability = field(
+        default_factory=lambda: OwnerConsoleTaskActionability(
+            can_cancel=False,
+            task_actions_enabled=False,
+            blocked_reason="web task actions are disabled",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -100,7 +118,14 @@ class OwnerConsoleTaskList:
     generated_at: str
     status_filter: str | None
     work_type_filter: str | None
+    category_filter: str | None
     limit: int
+    page: int
+    page_size: int
+    total_matching: int
+    total_pages: int
+    has_previous: bool
+    has_next: bool
     total_visible: int
     rows: list[OwnerConsoleTaskRow]
     boundary: OwnerConsoleRuntimeBoundary
@@ -135,6 +160,9 @@ class OwnerConsoleOverviewCounters:
     pending_approvals: int
     recent_tasks_visible: int
     pending_approvals_visible: int
+    awaiting_approval_tasks: int = 0
+    ordinary_pending_tasks: int = 0
+    stale_pending_tasks: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,16 +177,27 @@ class OwnerConsoleOverview:
 
 
 @dataclass(frozen=True)
+class OwnerConsoleAccessListItem:
+    value: str
+    source: str
+    editable: bool
+
+
+@dataclass(frozen=True)
 class OwnerConsoleAccessList:
     label: str
     count: int
-    items: list[str]
+    items: list[OwnerConsoleAccessListItem]
     truncated: bool
+    environment_count: int = 0
+    dynamic_count: int = 0
 
 
 @dataclass(frozen=True)
 class OwnerConsoleAccessControlSnapshot:
     generated_at: str
+    revision: int
+    access_actions_enabled: bool
     owner_configured: bool
     private_chat_enabled: bool
     group_chat_enabled: bool
@@ -311,7 +350,32 @@ class OwnerConsoleExternalReadTaskSnapshot:
     result_count: int | None = None
     source_host_count: int | None = None
     dropped_result_count: int | None = None
+    provider_candidate_count: int | None = None
+    official_content_strong_count: int | None = None
+    failed_search_stage: str = ""
+    search_stage_count: int | None = None
+    official_stage_candidate_count: int | None = None
+    official_stage_result_count: int | None = None
+    media_stage_candidate_count: int | None = None
+    media_stage_result_count: int | None = None
+    planning_mode: str = ""
+    scene: str = ""
+    primary_source_scope: str = ""
+    secondary_source_scope: str = ""
+    secondary_mode: str = ""
+    dropped_missing_date_count: int | None = None
+    dropped_outside_window_count: int | None = None
+    dropped_weak_only_count: int | None = None
+    dropped_conflicting_date_count: int | None = None
+    dropped_injection_count: int | None = None
+    dropped_sanitization_count: int | None = None
+    dropped_source_policy_count: int | None = None
     external_request_count: int | None = None
+    provider_request_count: int | None = None
+    synthesis_request_count: int | None = None
+    synthesis_status: str = ""
+    synthesis_error_category: str = ""
+    owner_quality_status: str = ""
     status_category: str = ""
     error_category: str = ""
     updated_at: str = ""
@@ -325,6 +389,7 @@ class OwnerConsoleExternalReadBoundary:
     arbitrary_url_fetch_allowed: bool = False
     ai_answer_enabled: bool = False
     raw_content_enabled: bool = False
+    isolated_synthesis_enabled: bool = True
     images_enabled: bool = False
     retry_enabled: bool = False
     fallback_enabled: bool = False
@@ -342,6 +407,7 @@ class OwnerConsoleExternalReadSnapshot:
     enabled: bool
     credential_configured: bool
     executor_configured: bool
+    synthesis_configured: bool
     provider_name: str
     search_depth: str
     max_results: int

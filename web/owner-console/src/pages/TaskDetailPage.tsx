@@ -1,4 +1,4 @@
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, RefreshCw, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -20,6 +20,13 @@ type TaskDetailState = {
   loading: boolean;
   detail: OwnerConsoleTaskDetailEnvelope | null;
   error: Error | null;
+};
+
+type TaskActionState = {
+  confirming: boolean;
+  submitting: boolean;
+  error: Error | null;
+  successMessage: string;
 };
 
 function parseTaskId(value: string | undefined): number | null {
@@ -169,12 +176,141 @@ function ApprovalRows({ rows }: { rows: OwnerConsoleApprovalRow[] }) {
               className="table-link"
               to={`/owner-console/approvals/${approval.approval_id}`}
             >
-              查看审批
+              {approval.status === "pending" ? "处理审批" : "查看审批"}
             </Link>
           </span>
         </div>
       ))}
     </div>
+  );
+}
+
+function TaskActionPanel({
+  task,
+  actionState,
+  onBegin,
+  onCancelConfirmation,
+  onConfirm,
+}: {
+  task: OwnerConsoleTaskRow;
+  actionState: TaskActionState;
+  onBegin: () => void;
+  onCancelConfirmation: () => void;
+  onConfirm: () => void;
+}) {
+  if (task.status !== "pending") {
+    return (
+      <section className="detail-panel">
+        <h2>主人处理任务</h2>
+        <p className="detail-text">任务已经收口，仅提供只读复盘，不再显示处理动作。</p>
+        {actionState.successMessage ? (
+          <p className="action-feedback action-feedback--success" role="status">
+            {actionState.successMessage}
+          </p>
+        ) : null}
+      </section>
+    );
+  }
+
+  if (task.processing_category === "awaiting_approval") {
+    const approvalId = task.pending_approval_ids[0];
+    return (
+      <section className="detail-panel">
+        <h2>主人处理任务</h2>
+        <p className="detail-text">
+          {task.processing_detail || "请先处理关联审批；审批未决定前不能取消任务。"}
+        </p>
+        {approvalId ? (
+          <Link className="table-link" to={`/owner-console/approvals/${approvalId}`}>
+            处理审批 #{approvalId}
+          </Link>
+        ) : null}
+      </section>
+    );
+  }
+
+  const stale = task.processing_category === "stale_residual";
+  return (
+    <section className="detail-panel task-action-panel task-action-panel--danger">
+      <header className="task-action-heading">
+        <div className="task-action-heading__title">
+          <AlertTriangle aria-hidden="true" size={22} />
+          <div>
+            <span className="task-action-eyebrow">风险操作</span>
+            <h2>{stale ? "取消并收口旧任务" : "取消待处理任务"}</h2>
+          </div>
+        </div>
+        <StatusBadge label="影响" value="不可撤销" tone="danger" />
+      </header>
+      <p className="detail-text">{task.processing_detail || task.next_action}</p>
+      <div className="task-risk-callout" role="note" aria-label="取消任务风险提示">
+        <AlertTriangle aria-hidden="true" size={18} />
+        <p>
+          <strong>风险提示：</strong>
+          取消后任务状态将永久收口为“已取消”，不能从网页恢复；如仍需处理，必须重新创建任务。
+        </p>
+      </div>
+      {!task.actionability.task_actions_enabled ? (
+        <p className="panel-note">网页任务处理开关未开启，当前只能查看任务证据。</p>
+      ) : null}
+      {task.actionability.can_cancel && !actionState.confirming ? (
+        <button className="danger-action-button" type="button" onClick={onBegin}>
+          <XCircle aria-hidden="true" size={17} />
+          {stale ? "取消并收口" : "取消任务"}
+        </button>
+      ) : null}
+      {actionState.confirming ? (
+        <div
+          className="action-confirmation action-confirmation--danger"
+          role="group"
+          aria-label="取消任务确认"
+        >
+          <div className="action-confirmation__title">
+            <XCircle aria-hidden="true" size={20} />
+            <strong>不可撤销操作</strong>
+          </div>
+          <p className="action-confirmation__question">
+            {stale
+              ? "确认取消并收口这个旧任务？"
+              : "确认取消这个待处理任务？"}
+          </p>
+          <ul className="task-risk-list">
+            <li><strong>任务状态将永久变为“已取消”</strong></li>
+            <li>不会执行原工具</li>
+            <li>不会恢复任何审批</li>
+            <li>不会自动重试</li>
+          </ul>
+          <div className="page-header__actions">
+            <button
+              className="danger-action-button danger-action-button--confirm"
+              type="button"
+              onClick={onConfirm}
+              disabled={actionState.submitting}
+            >
+              <XCircle aria-hidden="true" size={17} />
+              {actionState.submitting
+                ? "正在取消"
+                : stale
+                  ? "确认取消并收口（不可撤销）"
+                  : "确认取消任务（不可撤销）"}
+            </button>
+            <button
+              className="back-link"
+              type="button"
+              onClick={onCancelConfirmation}
+              disabled={actionState.submitting}
+            >
+              返回
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {actionState.error ? (
+        <p className="action-feedback action-feedback--error" role="alert">
+          {apiErrorDescription(actionState.error)}
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -185,6 +321,12 @@ export function TaskDetailPage() {
     loading: true,
     detail: null,
     error: null,
+  });
+  const [actionState, setActionState] = useState<TaskActionState>({
+    confirming: false,
+    submitting: false,
+    error: null,
+    successMessage: "",
   });
 
   const load = useCallback(
@@ -240,6 +382,43 @@ export function TaskDetailPage() {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
+
+  const cancelTask = useCallback(async () => {
+    if (taskId === null) return;
+    setActionState((current) => ({
+      ...current,
+      submitting: true,
+      error: null,
+    }));
+    try {
+      const envelope = await ownerConsoleApi.cancelTask(taskId);
+      if (!envelope.data) {
+        throw new Error("任务取消接口没有返回详情");
+      }
+      setState({
+        loading: false,
+        detail: {
+          ...state.detail!,
+          generated_at: envelope.generated_at,
+          data: envelope.data.task_detail,
+        },
+        error: null,
+      });
+      setActionState({
+        confirming: false,
+        submitting: false,
+        error: null,
+        successMessage: envelope.data.action.safe_message,
+      });
+    } catch (exc) {
+      setActionState({
+        confirming: true,
+        submitting: false,
+        error: exc instanceof Error ? exc : new Error("任务取消失败"),
+        successMessage: "",
+      });
+    }
+  }, [state.detail, taskId]);
 
   const detail = state.detail?.data;
 
@@ -304,6 +483,27 @@ export function TaskDetailPage() {
             <h2>下一步</h2>
             <p className="detail-text">{detail.next_action || "暂无"}</p>
           </section>
+
+          <TaskActionPanel
+            task={detail.task}
+            actionState={actionState}
+            onBegin={() =>
+              setActionState({
+                confirming: true,
+                submitting: false,
+                error: null,
+                successMessage: "",
+              })
+            }
+            onCancelConfirmation={() =>
+              setActionState((current) => ({
+                ...current,
+                confirming: false,
+                error: null,
+              }))
+            }
+            onConfirm={() => void cancelTask()}
+          />
 
           <section className="detail-panel">
             <h2>关联审批</h2>

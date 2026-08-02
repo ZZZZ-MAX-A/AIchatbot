@@ -1273,6 +1273,11 @@ export function DiagnosticsPage() {
 
   const diagnostics = state.diagnostics?.data;
   const manualDiagnostics = state.manualDiagnostics?.data;
+  const manualDiagnosticsUnavailable = Boolean(
+    manualDiagnostics &&
+      (!manualDiagnostics.manual_diagnostic_actions_enabled ||
+        manualDiagnostics.supported_workflows.length === 0),
+  );
   const sections = diagnostics ? diagnosticSections(diagnostics) : [];
   const failedSections = sections.filter((item) => !item.section.ok);
   const readSectionCount = sections.length - failedSections.length;
@@ -1642,6 +1647,28 @@ export function DiagnosticsPage() {
                 : "这里的总体判断只表示快照区块能否读取，不证明外部服务持续健康。"}
             </p>
           </section>
+
+          {manualDiagnosticsUnavailable ? (
+            <section
+              className="manual-diagnostic-panel manual-diagnostic-panel--disabled"
+              aria-label="手动诊断配置状态"
+            >
+              <header>
+                <div>
+                  <p>主人手动动作</p>
+                  <h2>手动诊断当前未开放</h2>
+                </div>
+                <StatusBadge label="当前进程" value="未授权工作流" tone="warning" />
+              </header>
+              <p className="manual-diagnostic-panel__description">
+                手动诊断功能代码和历史结果没有被删除；当前 Owner Console
+                进程没有显式启用已批准的固定工作流，因此不会显示或接受诊断动作。
+              </p>
+              <p className="manual-diagnostic-panel__boundary">
+                普通快照仍保持只读 · 不会自动运行诊断 · 需要按已批准工作流重新启动本地控制台
+              </p>
+            </section>
+          ) : null}
 
           {manualDiagnostics ? (
             <>

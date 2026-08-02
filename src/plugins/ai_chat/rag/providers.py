@@ -32,6 +32,7 @@ class EmbeddingProviderConfig:
     base_url: str
     timeout_seconds: int = 60
     expected_dimension: int = 0
+    num_gpu: int = -1
 
 
 @dataclass(frozen=True)
@@ -74,11 +75,13 @@ class OllamaEmbeddingProvider:
         base_url: str = "http://127.0.0.1:11434",
         timeout_seconds: int = 60,
         expected_dimension: int = 0,
+        num_gpu: int = -1,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.expected_dimension = expected_dimension
+        self.num_gpu = num_gpu
 
     def embed(self, text: str) -> list[float]:
         if not text.strip():
@@ -135,12 +138,18 @@ class OllamaEmbeddingProvider:
         return decoded
 
     def _embed_new_api(self, text: str) -> list[float]:
-        payload = self._post_json("/api/embed", {"model": self.model, "input": text})
-        return parse_ollama_embedding_response(payload)
+        payload: dict[str, object] = {"model": self.model, "input": text}
+        if self.num_gpu >= 0:
+            payload["options"] = {"num_gpu": self.num_gpu}
+        response = self._post_json("/api/embed", payload)
+        return parse_ollama_embedding_response(response)
 
     def _embed_legacy_api(self, text: str) -> list[float]:
-        payload = self._post_json("/api/embeddings", {"model": self.model, "prompt": text})
-        return parse_ollama_embedding_response(payload)
+        payload: dict[str, object] = {"model": self.model, "prompt": text}
+        if self.num_gpu >= 0:
+            payload["options"] = {"num_gpu": self.num_gpu}
+        response = self._post_json("/api/embeddings", payload)
+        return parse_ollama_embedding_response(response)
 
 
 def build_embedding_provider(config: Any) -> EmbeddingProvider:
@@ -151,6 +160,7 @@ def build_embedding_provider(config: Any) -> EmbeddingProvider:
             base_url=str(config.memory_rag_embedding_base_url),
             timeout_seconds=int(config.memory_rag_embedding_timeout_seconds),
             expected_dimension=int(config.memory_rag_embedding_dimension),
+            num_gpu=int(getattr(config, "memory_rag_embedding_num_gpu", -1)),
         )
     raise ValueError(f"Unsupported embedding provider: {provider}")
 
@@ -173,6 +183,7 @@ def check_embedding_provider(
         memory_rag_embedding_base_url=getattr(config, "memory_rag_embedding_base_url", ""),
         memory_rag_embedding_timeout_seconds=timeout_seconds,
         memory_rag_embedding_dimension=getattr(config, "memory_rag_embedding_dimension", 0),
+        memory_rag_embedding_num_gpu=getattr(config, "memory_rag_embedding_num_gpu", -1),
     )
 
     started = time.monotonic()

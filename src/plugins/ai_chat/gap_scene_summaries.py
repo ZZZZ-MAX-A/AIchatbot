@@ -3,7 +3,6 @@ from typing import Any
 
 from .config import AiChatConfig
 from .database import connect, ensure_database, utc_now
-from .llm import summarize_gap_scene_messages
 
 
 GAP_SCENE_SUMMARY_UPDATE_STEP = 20
@@ -278,6 +277,11 @@ async def _ensure_slot(
     if not rows:
         delete_gap_scene_slots(session_key, [slot])
         return
+
+    # The Owner Console imports this module only for read-only summary counts.
+    # Keep the OpenAI SDK out of that backend until the QQ runtime actually
+    # needs to generate a new gap-scene summary.
+    from .llm import summarize_gap_scene_messages
 
     message_text = _format_messages(rows, config.bot_owner_qq)
     summary = await summarize_gap_scene_messages(config, message_text)
