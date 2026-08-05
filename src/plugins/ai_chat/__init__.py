@@ -1,12 +1,13 @@
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
+import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from time import monotonic
 
 import httpx
-from nonebot import get_driver, on_command, on_message
+from nonebot import get_bot, get_driver, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.exception import MatcherException, ProcessException
 from nonebot.matcher import Matcher
@@ -182,6 +183,44 @@ from .llm import (
     ask_llm,
     load_persona_prompt,
 )
+from .media_reliability import observe_image_gen_safely
+from .image_gen import (
+    ImageArtifact,
+    ImageGenError,
+    ImageGenRuntime,
+    edit_image,
+    format_provider_failure_diagnostic,
+    generate_image,
+    image_gen_settings_status,
+    load_image_ref,
+    normalize_image_prompt,
+)
+from .qwen_space_edit import (
+    QwenEditRequest,
+    QwenSpaceEditError,
+    QwenSpaceRuntime,
+    download_qwen_result,
+    prepare_qwen_image,
+    qwen_mode_summary,
+    qwen_space_settings_status,
+    resolve_qwen_edit_request,
+    submit_qwen_edit,
+)
+from .scene_director import SceneDirectorSettings, direct_scene_turn
+from .scene_hub import (
+    SceneActorRequest,
+    SceneHub,
+    SceneHubSettings,
+    SceneTurnResult,
+    build_scene_actor_system_context,
+    build_scene_actor_user_prompt,
+    format_scene_turn_log,
+    is_proactive_chat_command,
+)
+from .scene_actor_profile import (
+    build_scene_actor_profile,
+    format_scene_style_example_log_fields,
+)
 from .local_time import (
     finalize_local_time_chat_reply,
     history_with_trusted_local_time_context,
@@ -248,6 +287,15 @@ from .persona_scope import (
     resolve_conversation_scope,
 )
 from .persona_memory_scope import persona_memory_database_scope
+from .scene_private_context import (
+    ScenePrivateContextLimits,
+    build_scene_private_continuity_context,
+)
+from .persona_behavior_diagnostics import (
+    build_linyin_behavior_diagnostic_system_context,
+    format_linyin_behavior_diagnostic_reply,
+    is_linyin_behavior_diagnostic_scope,
+)
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, select_role_card
 from .summaries import (
     clear_all_summaries,
@@ -272,7 +320,9 @@ from .sticker_selection import (
     StickerSelectionDecision,
     StickerSelectionPolicy,
     StickerSelectionRuntime,
+    StickerSelectionScope,
     current_selection_time,
+    resolve_sticker_selection_scope,
 )
 from .system_diagnostics_report import (
     SYSTEM_DIAGNOSTICS_OVERVIEW_SCOPE,
@@ -332,10 +382,37 @@ __plugin_meta__ = PluginMetadata(
 config = load_config()
 ensure_access_store()
 ensure_database()
+_scene_hub_settings = SceneHubSettings(
+    enabled=config.enable_shared_scene_hub,
+    group_id=config.shared_scene_group_id,
+    owner_id=config.bot_owner_qq,
+    aike_bot_id=config.shared_scene_aike_bot_id,
+    linyin_bot_id=config.shared_scene_linyin_bot_id,
+    max_context_events=config.scene_max_context_events,
+    director_context_events=config.scene_director_context_events,
+    director_circuit_seconds=config.scene_director_circuit_seconds,
+    max_reply_sentences=config.scene_max_reply_sentences,
+    max_reply_chars=config.scene_max_reply_chars,
+    actor_max_tokens=config.scene_actor_max_tokens,
+    member_cache_seconds=config.scene_member_cache_seconds,
+    max_pending_turns=config.scene_max_pending_turns,
+)
+_scene_director_settings = SceneDirectorSettings(
+    enabled=config.enable_shared_scene_hub,
+    provider=config.scene_director_provider,
+    api_key=config.scene_director_api_key,
+    base_url=config.scene_director_base_url,
+    model=config.scene_director_model,
+    timeout_seconds=config.scene_director_timeout_seconds,
+)
+_scene_hub = SceneHub(_scene_hub_settings)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
+SCENE_HUB_LOG_PATH = PROJECT_ROOT / "logs" / "scene_hub.log"
 _session_locks: dict[str, asyncio.Lock] = {}
 _main_agent_session_locks: dict[str, asyncio.Lock] = {}
+_image_gen_runtime = ImageGenRuntime()
+_qwen_space_runtime = QwenSpaceRuntime()
 _last_shadow_chat_snapshot: ShadowChatSnapshot | None = None
 _last_shadow_chat_validation: ShadowChatValidation | None = None
 _last_root_graph_chat_observation: dict[str, object] | None = None
@@ -474,6 +551,17 @@ def log_ai_event_error(exc: Exception, event: MessageEvent) -> None:
         )
 
 
+def log_image_gen_provider_failure(exc: ImageGenError, *, operation: str) -> None:
+    ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cause = exc.__cause__ or exc
+    diagnostic = format_provider_failure_diagnostic(cause)
+    with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(
+            f"{datetime.now().isoformat(timespec='seconds')} "
+            f"component=image_gen operation={operation} {diagnostic}\n"
+        )
+
+
 def log_main_agent_observation(message: str, event: MessageEvent) -> None:
     ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     group = event.group_id if isinstance(event, GroupMessageEvent) else ""
@@ -490,6 +578,25 @@ def log_main_agent_observation(message: str, event: MessageEvent) -> None:
 
 def log_background_error(exc: Exception, event: MessageEvent) -> None:
     log_ai_event_error(exc, event)
+
+
+def log_scene_turn_result(
+    result: SceneTurnResult,
+    *,
+    style_examples_status: str = "not_applicable",
+    style_example_chars: int = 0,
+) -> None:
+    try:
+        SCENE_HUB_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SCENE_HUB_LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(
+                f"{datetime.now().isoformat(timespec='seconds')} "
+                f"{format_scene_turn_log(result)} "
+                f"{format_scene_style_example_log_fields(style_examples_status, style_example_chars)}\n"
+            )
+    except OSError:
+        # Observability must never change whether a scene turn is executed.
+        return
 
 
 async def reject_or_silent(matcher: Matcher, reason: str | None) -> None:
@@ -582,6 +689,16 @@ async def group_rule(event: MessageEvent) -> bool:
     return _is_group_enabled(event)
 
 
+async def shared_scene_hub_rule(event: MessageEvent) -> bool:
+    """Reserve the configured group even when the rest of SceneHub is invalid."""
+    return (
+        config.enable_shared_scene_hub
+        and isinstance(event, GroupMessageEvent)
+        and bool(config.shared_scene_group_id)
+        and str(event.group_id) == config.shared_scene_group_id
+    )
+
+
 async def group_auto_rule(event: MessageEvent) -> bool:
     return config.enable_group_auto_reply and _is_group_enabled(event)
 
@@ -590,6 +707,20 @@ async def group_image_cache_rule(event: MessageEvent) -> bool:
     if not config.enable_vision or not _is_group_enabled(event):
         return False
     return isinstance(event, GroupMessageEvent) and event_has_image(event)
+
+
+def image_task_key(event: MessageEvent) -> str:
+    return f"{getattr(event, 'self_id', '')}:{event.user_id}"
+
+
+async def pending_image_edit_rule(event: MessageEvent) -> bool:
+    return bool(
+        (config.enable_image_gen or config.enable_qwen_space_edit)
+        and isinstance(event, PrivateMessageEvent)
+        and is_owner(config, event)
+        and event_has_image(event)
+        and _image_gen_runtime.pending_edit(image_task_key(event)) is not None
+    )
 
 
 def session_key(event: MessageEvent) -> str:
@@ -668,8 +799,33 @@ def delete_session_summary_for_session(key: str, summary_id: int) -> bool:
     return delete_session_summary(key, summary_id)
 
 
+def tts_route_for_event(event: MessageEvent) -> tuple[str, str] | None:
+    if not config.enable_tts:
+        return None
+    scope = conversation_scope(event)
+    if not scope.routing_v2_active:
+        return config.tts_voice, config.tts_emotion
+    if (
+        scope.role_card_key != "linyin"
+        or not config.enable_linyin_tts
+        or not config.linyin_tts_voice
+        or not config.linyin_tts_emotion
+    ):
+        return None
+    return config.linyin_tts_voice, config.linyin_tts_emotion
+
+
 def tts_enabled_for_event(event: MessageEvent) -> bool:
-    return bool(config.enable_tts and not conversation_scope(event).routing_v2_active)
+    return tts_route_for_event(event) is not None
+
+
+def tts_candidate_scope_key(event: MessageEvent) -> str:
+    return f"tts:{conversation_scope(event).runtime_session_key}"
+
+
+def tts_trailing_noise_cleanup_for_event(event: MessageEvent) -> bool:
+    scope = conversation_scope(event)
+    return bool(scope.routing_v2_active and scope.role_card_key == "linyin")
 
 
 def chat_request_for_event(
@@ -686,7 +842,7 @@ def chat_request_for_event(
         role_card_key=scope.role_card_key if scope.routing_v2_active else "",
         persistent_memory_enabled=not scope.routing_v2_active,
         persona_memory_enabled=scope.memory_v2_active,
-        tts_enabled=bool(config.enable_tts and not scope.routing_v2_active),
+        tts_enabled=tts_enabled_for_event(event),
     )
 
 
@@ -700,6 +856,58 @@ def image_cache_key(event: MessageEvent) -> str:
     if isinstance(event, GroupMessageEvent):
         return f"{prefix}group:{event.group_id}:user:{event.user_id}"
     return f"{prefix}private:{event.user_id}"
+
+
+def resolve_chat_sticker_scope(
+    event: MessageEvent,
+) -> tuple[ConversationScope, StickerSelectionScope]:
+    conversation = conversation_scope(event)
+    legacy_persona_key = ""
+    if not conversation.routing_v2_requested:
+        card = active_role_card()
+        legacy_persona_key = card.key if card is not None else ""
+    return conversation, resolve_sticker_selection_scope(
+        conversation,
+        legacy_persona_key=legacy_persona_key,
+    )
+
+
+def chat_sticker_message_progress(
+    conversation: ConversationScope,
+    sticker_scope: StickerSelectionScope,
+) -> int:
+    if conversation.routing_v2_requested and not conversation.routing_v2_active:
+        return 0
+    if conversation.memory_v2_active:
+        with persona_memory_database_scope(conversation.persona_id):
+            return session_message_progress(sticker_scope.session_key)
+    if conversation.routing_v2_active:
+        return ephemeral_persona_history.message_count(sticker_scope.session_key)
+    return session_message_progress(sticker_scope.session_key)
+
+
+def chat_sticker_selection_context(
+    event: MessageEvent,
+    reply_text: str,
+    *,
+    message_offset: int = 0,
+    resolved_scope: tuple[ConversationScope, StickerSelectionScope] | None = None,
+) -> StickerSelectionContext:
+    conversation, sticker_scope = (
+        resolved_scope or resolve_chat_sticker_scope(event)
+    )
+    return StickerSelectionContext(
+        session_key=sticker_scope.session_key,
+        is_owner=is_owner(config, event),
+        is_private=isinstance(event, PrivateMessageEvent),
+        persona_key=sticker_scope.persona_key,
+        message_index=(
+            chat_sticker_message_progress(conversation, sticker_scope)
+            + message_offset
+        ),
+        reply_text=reply_text,
+        now=current_selection_time(),
+    )
 
 
 def cache_image_urls(event: MessageEvent, urls: list[str]) -> None:
@@ -2748,7 +2956,7 @@ async def run_notification_graph(
 def check_tts_cooldown(event: MessageEvent) -> tuple[bool, str | None]:
     if is_owner(config, event):
         ok, wait_seconds = check_rate_limit(
-            f"tts:owner:{user_id(event)}",
+            f"tts:cooldown:{conversation_scope(event).runtime_session_key}",
             config.tts_cooldown_seconds,
         )
         return (True, None) if ok else (False, f"语音生成冷却中，请等 {wait_seconds} 秒。")
@@ -2775,7 +2983,18 @@ async def send_tts_record(
     max_chars = tts_text_limit(adapted.language)
     if max_chars > 0 and len(adapted.text) > max_chars:
         raise ValueError("text too long")
-    tts_result = await request_tts(config, adapted, refresh_cache=refresh_cache)
+    route = tts_route_for_event(event)
+    if route is None:
+        raise RuntimeError("TTS is disabled for this persona route")
+    voice_id, emotion = route
+    tts_result = await request_tts(
+        config,
+        adapted,
+        voice_id=voice_id,
+        emotion=emotion,
+        trim_trailing_noise=tts_trailing_noise_cleanup_for_event(event),
+        refresh_cache=refresh_cache,
+    )
     if not isinstance(event, PrivateMessageEvent):
         raise RuntimeError("TTS is private only")
     await bot.call_api(
@@ -2804,7 +3023,7 @@ async def handle_direct_or_last_tts(
     if intent.type == VoiceIntentType.DIRECT_TEXT:
         text = intent.text
     elif intent.type == VoiceIntentType.LAST_REPLY:
-        candidate = get_last_tts_candidate()
+        candidate = get_last_tts_candidate(scope_key=tts_candidate_scope_key(event))
         if candidate is None:
             await matcher.finish("我现在没有可朗读的上一条回复。")
         text = candidate.raw_text
@@ -2871,7 +3090,7 @@ async def run_voice_graph_intent(
 
     async def select_text_source(current: VoiceState) -> VoiceState:
         if current.mode == VoiceMode.LAST_REPLY:
-            candidate = get_last_tts_candidate()
+            candidate = get_last_tts_candidate(scope_key=tts_candidate_scope_key(event))
             if candidate is None:
                 return set_error(current, "no_last_reply")
             current.source_text = candidate.raw_text
@@ -3022,7 +3241,18 @@ async def run_voice_graph_intent(
         if adapted is None:
             return set_error(current, "empty_speakable_text")
         try:
-            tts_result = await request_tts(config, adapted, refresh_cache=current.refresh_cache)
+            route = tts_route_for_event(event)
+            if route is None:
+                return set_error(current, "tts_disabled")
+            voice_id, emotion = route
+            tts_result = await request_tts(
+                config,
+                adapted,
+                voice_id=voice_id,
+                emotion=emotion,
+                trim_trailing_noise=tts_trailing_noise_cleanup_for_event(event),
+                refresh_cache=current.refresh_cache,
+            )
         except Exception as exc:
             error_holder["exception"] = exc
             return set_error(current, "tts_failed")
@@ -3305,10 +3535,37 @@ async def require_owner(event: MessageEvent, matcher: Matcher) -> None:
 
 
 private_chat = on_message(rule=Rule(private_rule), priority=20, block=True)
+shared_scene_hub = on_message(
+    rule=Rule(shared_scene_hub_rule), priority=15, block=True
+)
 group_chat = on_message(rule=to_me() & Rule(group_rule), priority=20, block=True)
 group_image_cache = on_message(rule=Rule(group_image_cache_rule), priority=25, block=False)
 group_auto_chat = on_message(rule=Rule(group_auto_rule), priority=30, block=False)
+pending_image_edit = on_message(
+    rule=Rule(pending_image_edit_rule), priority=10, block=True
+)
 reset_cmd = on_command("reset", aliases={"重置", "清空上下文"}, priority=5, block=True)
+generate_image_cmd = on_command(
+    "生成图片", aliases={"画图"}, priority=5, block=True
+)
+edit_image_cmd = on_command(
+    "修改图片", aliases={"改图"}, priority=5, block=True
+)
+cancel_image_edit_cmd = on_command(
+    "取消改图", aliases={"取消修改图片"}, priority=5, block=True
+)
+qwen_space_edit_cmd = on_command(
+    "Qwen改图", aliases={"qwen改图"}, priority=5, block=True
+)
+retrieve_qwen_edit_cmd = on_command(
+    "重取改图", aliases={"重新获取改图"}, priority=5, block=True
+)
+linyin_behavior_diagnostic_cmd = on_command(
+    "凛音行为诊断",
+    aliases={"linyin_behavior_diagnose"},
+    priority=5,
+    block=True,
+)
 status_cmd = on_command("status", aliases={"状态"}, priority=5, block=True)
 diagnostics_cmd = on_command("诊断", aliases={"diagnose"}, priority=5, block=True)
 config_status_cmd = on_command("配置状态", aliases={"config_status"}, priority=5, block=True)
@@ -4326,7 +4583,6 @@ async def evaluate_chat_sticker_intent_shadow(
             eligible_count=0,
         )
         return
-    card = active_role_card()
     policy = StickerSelectionPolicy(
         enabled=True,
         owner_private_only=config.chat_sticker_owner_private_only,
@@ -4336,14 +4592,10 @@ async def evaluate_chat_sticker_intent_shadow(
         max_per_reply=config.chat_sticker_max_per_reply,
         min_confidence=config.chat_sticker_min_intent_confidence,
     )
-    context = StickerSelectionContext(
-        session_key=session_key(event),
-        is_owner=is_owner(config, event),
-        is_private=isinstance(event, PrivateMessageEvent),
-        persona_key=card.key if card is not None else "",
-        message_index=session_message_progress(session_key(event)) + 1,
-        reply_text=result.reply,
-        now=current_selection_time(),
+    context = chat_sticker_selection_context(
+        event,
+        result.reply,
+        message_offset=1,
     )
     decision = _chat_sticker_selection_runtime.decide(
         library,
@@ -4438,6 +4690,10 @@ async def _evaluate_remote_sticker_classifier_result(
     reply_text: str,
     sample_id: int,
     classification: StickerClassifierResult,
+    *,
+    resolved_sticker_scope: (
+        tuple[ConversationScope, StickerSelectionScope] | None
+    ) = None,
 ) -> RemoteStickerClassifierEvaluation:
     intent = classification.intent
     if intent is None:
@@ -4474,7 +4730,6 @@ async def _evaluate_remote_sticker_classifier_result(
                 ),
             )
         )
-    card = active_role_card()
     policy = StickerSelectionPolicy(
         enabled=True,
         owner_private_only=config.chat_sticker_owner_private_only,
@@ -4484,14 +4739,10 @@ async def _evaluate_remote_sticker_classifier_result(
         max_per_reply=config.chat_sticker_max_per_reply,
         min_confidence=config.chat_sticker_min_intent_confidence,
     )
-    context = StickerSelectionContext(
-        session_key=session_key(event),
-        is_owner=is_owner(config, event),
-        is_private=isinstance(event, PrivateMessageEvent),
-        persona_key=card.key if card is not None else "",
-        message_index=session_message_progress(session_key(event)),
-        reply_text=reply_text,
-        now=current_selection_time(),
+    context = chat_sticker_selection_context(
+        event,
+        reply_text,
+        resolved_scope=resolved_sticker_scope,
     )
     decision = _chat_sticker_selection_runtime.decide(
         library,
@@ -4578,6 +4829,8 @@ def schedule_remote_sticker_classifier_shadow(
     if not isinstance(event, PrivateMessageEvent) or not is_owner(config, event):
         return
 
+    resolved_sticker_scope = resolve_chat_sticker_scope(event)
+
     _remote_sticker_classifier_sample_id += 1
     sample_id = _remote_sticker_classifier_sample_id
     if isinstance(user_text, str) and not user_text.strip():
@@ -4623,14 +4876,10 @@ def schedule_remote_sticker_classifier_shadow(
                 max_per_reply=config.chat_sticker_max_per_reply,
                 min_confidence=config.chat_sticker_min_intent_confidence,
             )
-            context = StickerSelectionContext(
-                session_key=session_key(event),
-                is_owner=True,
-                is_private=True,
-                persona_key="",
-                message_index=session_message_progress(session_key(event)),
-                reply_text=reply_text,
-                now=current_selection_time(),
+            context = chat_sticker_selection_context(
+                event,
+                reply_text,
+                resolved_scope=resolved_sticker_scope,
             )
             preflight = _chat_sticker_selection_runtime.preflight(context, policy)
         except Exception:
@@ -4718,6 +4967,7 @@ def schedule_remote_sticker_classifier_shadow(
                 reply_text,
                 sample_id,
                 classification,
+                resolved_sticker_scope=resolved_sticker_scope,
             )
             snapshot = await _maybe_send_remote_sticker_attachment(
                 bot,
@@ -5065,7 +5315,11 @@ async def finalize_chat_result(
     if options.semantic_voice:
         voice_text = result.voice_text if result.voice_text is not None else result.reply
         if tts_candidate_enabled:
-            set_last_tts_candidate(voice_text, force_language="zh")
+            set_last_tts_candidate(
+                voice_text,
+                scope_key=tts_candidate_scope_key(event),
+                force_language="zh",
+            )
             update_chat_commit(
                 state,
                 tts_candidate_updated=True,
@@ -5101,7 +5355,7 @@ async def finalize_chat_result(
         and isinstance(event, PrivateMessageEvent)
         and is_owner(config, event)
     ):
-        set_last_tts_candidate(result.reply)
+        set_last_tts_candidate(result.reply, scope_key=tts_candidate_scope_key(event))
         update_chat_commit(
             state,
             tts_candidate_updated=True,
@@ -5279,14 +5533,18 @@ async def run_chat_graph_session_runtime(
             return
         if options.semantic_voice:
             voice_text = result.voice_text if result.voice_text is not None else result.reply
-            set_last_tts_candidate(voice_text, force_language="zh")
+            set_last_tts_candidate(
+                voice_text,
+                scope_key=tts_candidate_scope_key(event),
+                force_language="zh",
+            )
             update_chat_commit(
                 chat_state,
                 tts_candidate_updated=True,
                 tts_candidate_source="semantic_voice",
             )
         elif isinstance(event, PrivateMessageEvent) and is_owner(config, event):
-            set_last_tts_candidate(result.reply)
+            set_last_tts_candidate(result.reply, scope_key=tts_candidate_scope_key(event))
             update_chat_commit(
                 chat_state,
                 tts_candidate_updated=True,
@@ -5699,6 +5957,187 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
     await handle_chat(bot, event, matcher)
 
 
+def _scene_event_dedupe_id(event: GroupMessageEvent, text: str) -> str:
+    event_time = str(getattr(event, "time", ""))
+    stable = f"{event.group_id}|{event.user_id}|{event_time}|{text}"
+    if not event_time:
+        stable = f"{stable}|{getattr(event, 'message_id', '')}"
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+async def _scene_group_members(bot: Bot, group_id_value: str) -> set[str]:
+    payload = await bot.call_api(
+        "get_group_member_list", group_id=int(group_id_value)
+    )
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        payload = payload["data"]
+    if not isinstance(payload, list):
+        raise RuntimeError("scene_member_list_invalid")
+    members: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict) or "user_id" not in item:
+            raise RuntimeError("scene_member_list_invalid")
+        members.add(str(item["user_id"]).strip())
+    return members
+
+
+@shared_scene_hub.handle()
+async def _(bot: Bot, event: GroupMessageEvent) -> None:
+    # Matching this handler blocks every event in the reserved group from the
+    # ordinary group-chat persistence path, including bot-generated messages.
+    if str(event.user_id) != config.bot_owner_qq:
+        return
+    text = event.get_plaintext().strip()
+    if not text:
+        return
+    try:
+        aike_bot = get_bot(config.shared_scene_aike_bot_id)
+        linyin_bot = get_bot(config.shared_scene_linyin_bot_id)
+    except Exception:
+        # V1 supports two OneBot connections in one NoneBot process only.
+        return
+    target_bots = {"aike": aike_bot, "linyin": linyin_bot}
+    linyin_style_examples_status = "not_applicable"
+    linyin_style_example_chars = 0
+
+    async def member_provider() -> set[str]:
+        return await _scene_group_members(
+            target_bots["aike"], config.shared_scene_group_id
+        )
+
+    async def director(public_context, owner_message):
+        return await direct_scene_turn(
+            _scene_director_settings, public_context, owner_message
+        )
+
+    async def actor(request: SceneActorRequest) -> str:
+        nonlocal linyin_style_examples_status, linyin_style_example_chars
+        private_continuity_context = ""
+        if request.turn_kind != "proactive":
+            try:
+                private_continuity_context = build_scene_private_continuity_context(
+                    getattr(config, "persona_routing", PersonaRoutingSettings()),
+                    speaker=request.speaker,
+                    owner_id=config.bot_owner_qq,
+                    aike_bot_id=config.shared_scene_aike_bot_id,
+                    linyin_bot_id=config.shared_scene_linyin_bot_id,
+                    limits=ScenePrivateContextLimits(
+                        max_messages=config.scene_private_context_max_messages,
+                        max_summaries=config.scene_private_context_max_summaries,
+                        max_gap_summaries=config.scene_private_context_max_gap_summaries,
+                        max_manual_memories=config.scene_private_context_max_manual_memories,
+                        max_chars=config.scene_private_context_max_chars,
+                    ),
+                )
+            except Exception as exc:
+                log_background_error(exc, event)
+        actor_profile = build_scene_actor_profile(request.speaker)
+        if request.speaker == "linyin":
+            linyin_style_examples_status = actor_profile.style_examples.status
+            linyin_style_example_chars = actor_profile.style_examples.char_count
+        return await ask_llm(
+            config,
+            [],
+            build_scene_actor_user_prompt(request),
+            extra_system_context=combine_ephemeral_chat_system_contexts(
+                build_scene_actor_system_context(
+                    request,
+                    max_reply_sentences=config.scene_max_reply_sentences,
+                    max_reply_chars=config.scene_max_reply_chars,
+                ),
+                actor_profile.style_examples.content,
+                private_continuity_context,
+            ),
+            role_card_key=request.speaker,
+            max_tokens=config.scene_actor_max_tokens,
+            max_retries=0,
+            completion_route=actor_profile.completion_route,
+            reasoning_effort=actor_profile.reasoning_effort,
+        )
+
+    async def sender(speaker: str, reply: str) -> bool:
+        target_bot = target_bots.get(speaker)
+        if target_bot is None:
+            return False
+        try:
+            await target_bot.call_api(
+                "send_group_msg",
+                group_id=int(config.shared_scene_group_id),
+                message=reply,
+            )
+        except Exception:
+            return False
+        return True
+
+    def log_result(result: SceneTurnResult) -> None:
+        log_scene_turn_result(
+            result,
+            style_examples_status=linyin_style_examples_status,
+            style_example_chars=linyin_style_example_chars,
+        )
+
+    async def run_idle_chat(idle_event_id: str) -> None:
+        nonlocal linyin_style_examples_status, linyin_style_example_chars
+        linyin_style_examples_status = "not_applicable"
+        linyin_style_example_chars = 0
+        try:
+            target_bots.update(
+                {
+                    "aike": get_bot(config.shared_scene_aike_bot_id),
+                    "linyin": get_bot(config.shared_scene_linyin_bot_id),
+                }
+            )
+        except Exception:
+            log_result(
+                SceneTurnResult(
+                    "bots_unavailable",
+                    director_status="skipped_proactive",
+                    route="proactive_idle",
+                )
+            )
+            return
+        idle_result = await _scene_hub.handle_proactive_chat(
+            trigger="idle",
+            group_id=config.shared_scene_group_id,
+            sender_id=config.bot_owner_qq,
+            source_bot_id=config.shared_scene_aike_bot_id,
+            event_id=idle_event_id,
+            member_provider=member_provider,
+            actor=actor,
+            sender=sender,
+        )
+        log_result(idle_result)
+
+    if is_proactive_chat_command(text):
+        result = await _scene_hub.handle_proactive_chat(
+            trigger="manual",
+            group_id=event.group_id,
+            sender_id=event.user_id,
+            source_bot_id=bot.self_id,
+            event_id=_scene_event_dedupe_id(event, text),
+            member_provider=member_provider,
+            actor=actor,
+            sender=sender,
+        )
+        log_result(result)
+        return
+
+    result = await _scene_hub.handle_message(
+        group_id=event.group_id,
+        sender_id=event.user_id,
+        source_bot_id=bot.self_id,
+        event_id=_scene_event_dedupe_id(event, text),
+        owner_message=text,
+        member_provider=member_provider,
+        director=director,
+        actor=actor,
+        sender=sender,
+    )
+    log_result(result)
+    if result.status == "completed":
+        await _scene_hub.arm_idle_chat(run_idle_chat, delay_seconds=60.0)
+
+
 @group_chat.handle()
 async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
     await handle_chat(bot, event, matcher)
@@ -5709,6 +6148,432 @@ async def _(bot: Bot, event: GroupMessageEvent, matcher: Matcher) -> None:
     if not await should_group_auto_reply(event):
         return
     await handle_chat(bot, event, matcher, silent_limit_rejection=True)
+
+
+def _image_gen_not_ready_text() -> str:
+    if image_gen_settings_status(config) == "disabled":
+        return "图片生成功能当前未开启。"
+    return "图片生成功能配置不完整，请主人检查生图配置。"
+
+
+def _image_gen_error_text(exc: ImageGenError, *, operation: str) -> str:
+    if exc.code == "prompt_too_long":
+        return f"图片描述过长，最多允许 {config.image_gen_max_prompt_chars} 个字符。"
+    if exc.code in {
+        "image_empty",
+        "image_too_large",
+        "image_format_unsupported",
+        "animated_image_unsupported",
+        "image_dimensions_invalid",
+        "image_invalid",
+        "input_image_load_failed",
+    }:
+        return "没有读取到可用于修改的有效静态图片，请重新发送修改命令和一张 PNG、JPEG 或 WebP 图片。"
+    if exc.code == "image_gen_not_ready":
+        return _image_gen_not_ready_text()
+    label = "修改" if operation == "edit" else "生成"
+    return f"图片{label}失败，本次没有自动重试。"
+
+
+def _qwen_space_not_ready_text() -> str:
+    if qwen_space_settings_status(config) == "disabled":
+        return "Qwen改图功能当前未开启。"
+    return "Qwen改图配置不完整或参数无效，请主人检查Qwen Space配置。"
+
+
+def _qwen_space_error_text(exc: ImageGenError) -> str:
+    if exc.code == "qwen_not_ready":
+        return _qwen_space_not_ready_text()
+    if exc.code == "qwen_quota_exceeded":
+        return "Hugging Face ZeroGPU额度暂时不足，请等待额度恢复后再试。"
+    if exc.code in {"qwen_infer_timeout", "qwen_event_incomplete"}:
+        return "Qwen改图排队或推理超时，本次没有自动重新生成。"
+    if exc.code in {
+        "qwen_preprocessed_image_too_large",
+        "image_empty",
+        "image_too_large",
+        "image_format_unsupported",
+        "animated_image_unsupported",
+        "image_dimensions_invalid",
+        "image_invalid",
+        "input_image_load_failed",
+    }:
+        return "没有读取到可用于Qwen改图的有效静态图片，请重新发送PNG、JPEG或WebP图片。"
+    return "Qwen改图失败，本次没有自动重新生成。"
+
+
+def _image_request_rejection_text(status: str, wait_seconds: int) -> str:
+    if status == "hourly_limit":
+        return f"本小时的图片请求次数已达到上限，请约 {wait_seconds} 秒后再试。"
+    return f"图片请求冷却中，请等 {wait_seconds} 秒再试。"
+
+
+def _image_segment_count(event: MessageEvent) -> int:
+    count = 0
+    for segment in event.message:
+        segment_type = getattr(segment, "type", None)
+        if segment_type is None and isinstance(segment, dict):
+            segment_type = segment.get("type")
+        if str(segment_type or "") == "image":
+            count += 1
+    return count
+
+
+async def _send_generated_image(
+    bot: Bot,
+    event: PrivateMessageEvent,
+    artifact: ImageArtifact,
+) -> bool:
+    try:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=int(event.user_id),
+            message=MessageSegment.image(str(artifact.path.resolve())),
+        )
+    except Exception:
+        log_ai_event_error(RuntimeError("image_gen_qq_send_failed"), event)
+        return False
+    return True
+
+
+@generate_image_cmd.handle()
+async def _(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+    arg=CommandArg(),
+) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("图片生成命令只允许主人私聊使用。")
+    if image_gen_settings_status(config) != "ready":
+        await matcher.finish(_image_gen_not_ready_text())
+    try:
+        prompt = normalize_image_prompt(
+            arg.extract_plain_text(),
+            max_chars=config.image_gen_max_prompt_chars,
+        )
+    except ImageGenError as exc:
+        if exc.code == "prompt_empty":
+            await matcher.finish("用法：/生成图片 <图片描述>")
+        await matcher.finish(_image_gen_error_text(exc, operation="generate"))
+
+    key = image_task_key(event)
+    lock = _image_gen_runtime.lock(key)
+    if lock.locked():
+        await matcher.finish("上一张图片仍在处理中，请等待完成后再试。")
+    async with lock:
+        decision = _image_gen_runtime.claim_request(
+            key,
+            cooldown_seconds=config.image_gen_cooldown_seconds,
+            max_requests_per_hour=config.image_gen_max_requests_per_hour,
+        )
+        if not decision.allowed:
+            await matcher.finish(
+                _image_request_rejection_text(
+                    decision.status,
+                    decision.wait_seconds,
+                )
+            )
+        await matcher.send("收到，正在生成图片。本次失败时不会自动重试。")
+        try:
+            artifact = await generate_image(config, prompt)
+        except ImageGenError as exc:
+            observe_image_gen_safely(
+                operation="generate",
+                succeeded=False,
+                error=exc.__cause__ or exc,
+            )
+            log_image_gen_provider_failure(exc, operation="generate")
+            log_ai_event_error(exc, event)
+            await matcher.finish(_image_gen_error_text(exc, operation="generate"))
+        observe_image_gen_safely(operation="generate", succeeded=True)
+        if not await _send_generated_image(bot, event, artifact):
+            await matcher.finish(
+                "图片已经生成，但QQ发送失败；本地结果已保留，本次没有重复生成。"
+            )
+        await matcher.finish()
+
+
+@edit_image_cmd.handle()
+async def _(
+    event: MessageEvent,
+    matcher: Matcher,
+    arg=CommandArg(),
+) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("图片修改命令只允许主人私聊使用。")
+    if image_gen_settings_status(config) != "ready":
+        await matcher.finish(_image_gen_not_ready_text())
+    try:
+        prompt = normalize_image_prompt(
+            arg.extract_plain_text(),
+            max_chars=config.image_gen_max_prompt_chars,
+        )
+    except ImageGenError as exc:
+        if exc.code == "prompt_empty":
+            await matcher.finish("用法：/修改图片 <修改要求>")
+        await matcher.finish(_image_gen_error_text(exc, operation="edit"))
+    key = image_task_key(event)
+    if _image_gen_runtime.lock(key).locked():
+        await matcher.finish("上一张图片仍在处理中，请等待完成后再试。")
+    _image_gen_runtime.begin_edit(
+        key,
+        prompt,
+        ttl_seconds=config.image_gen_pending_edit_seconds,
+    )
+    await matcher.finish(
+        f"修改要求已记录，请在 {config.image_gen_pending_edit_seconds} 秒内"
+        "单独发送一张需要修改的图片。"
+    )
+
+
+@qwen_space_edit_cmd.handle()
+async def _(
+    event: MessageEvent,
+    matcher: Matcher,
+    arg=CommandArg(),
+) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("Qwen改图命令只允许主人私聊使用。")
+    if qwen_space_settings_status(config) != "ready":
+        await matcher.finish(_qwen_space_not_ready_text())
+    try:
+        request = resolve_qwen_edit_request(
+            arg.extract_plain_text(),
+            max_chars=config.image_gen_max_prompt_chars,
+        )
+    except QwenSpaceEditError as exc:
+        if exc.code == "qwen_mode_missing":
+            await matcher.finish(
+                "用法：/Qwen改图 <模式> [额外要求]\n"
+                f"可用模式示例：{qwen_mode_summary()}"
+            )
+        if exc.code == "qwen_mode_unknown":
+            await matcher.finish(
+                f"没有找到这个Qwen改图模式。可用模式示例：{qwen_mode_summary()}"
+            )
+        await matcher.finish(_qwen_space_error_text(exc))
+    key = image_task_key(event)
+    if _image_gen_runtime.lock(key).locked():
+        await matcher.finish("上一张图片仍在处理中，请等待完成后再试。")
+    _image_gen_runtime.begin_edit(
+        key,
+        request.prompt,
+        ttl_seconds=config.image_gen_pending_edit_seconds,
+        provider="qwen_space",
+        lora_adapter=request.lora_adapter,
+    )
+    await matcher.finish(
+        f"Qwen改图模式已记录：{request.lora_adapter}。请在 "
+        f"{config.image_gen_pending_edit_seconds} 秒内单独发送一张图片。"
+    )
+
+
+@cancel_image_edit_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("取消改图命令只允许主人私聊使用。")
+    cancelled = _image_gen_runtime.cancel_edit(image_task_key(event))
+    await matcher.finish(
+        "已取消当前待处理的图片修改任务。"
+        if cancelled
+        else "当前没有等待接收图片的修改任务。"
+    )
+
+
+@retrieve_qwen_edit_cmd.handle()
+async def _(
+    bot: Bot,
+    event: MessageEvent,
+    matcher: Matcher,
+) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("重取改图命令只允许主人私聊使用。")
+    if qwen_space_settings_status(config) != "ready":
+        await matcher.finish(_qwen_space_not_ready_text())
+    key = image_task_key(event)
+    ticket = _qwen_space_runtime.ticket(key)
+    if ticket is None:
+        await matcher.finish("当前没有可重新获取的Qwen改图结果，结果记录只保留30分钟。")
+    lock = _image_gen_runtime.lock(key)
+    if lock.locked():
+        await matcher.finish("当前图片任务仍在处理中，请稍后再试。")
+    async with lock:
+        artifact = ticket.artifact
+        if artifact is None or not artifact.path.is_file():
+            await matcher.send("正在重新下载已经生成的Qwen结果，不会重新调用模型。")
+            try:
+                artifact = await download_qwen_result(config, ticket.remote)
+            except ImageGenError as exc:
+                observe_image_gen_safely(
+                    operation="qwen_download",
+                    succeeded=False,
+                    error=exc.__cause__ or exc,
+                )
+                log_image_gen_provider_failure(exc, operation="qwen_download")
+                log_ai_event_error(exc, event)
+                await matcher.finish("Qwen结果仍然下载失败，没有重复消耗GPU额度。")
+            observe_image_gen_safely(operation="qwen_download", succeeded=True)
+            _qwen_space_runtime.remember_artifact(key, artifact)
+        if not await _send_generated_image(bot, event, artifact):
+            await matcher.finish(
+                "Qwen结果已保存在本地，但QQ发送失败；可以稍后再次发送 /重取改图。"
+            )
+        await matcher.finish(f"Qwen改图结果已重新发送。Seed：{ticket.remote.seed}")
+
+
+@pending_image_edit.handle()
+async def _(bot: Bot, event: PrivateMessageEvent, matcher: Matcher) -> None:
+    key = image_task_key(event)
+    pending = _image_gen_runtime.consume_edit(key)
+    if pending is None:
+        return
+    if _image_segment_count(event) != 1:
+        await matcher.finish(
+            "一次只能修改一张图片，请重新发送改图命令和一张图片。"
+        )
+    refs = image_refs_from_event(event)
+    image_ref = next((ref for ref in refs if is_direct_image_source(ref)), "")
+    if not image_ref and refs:
+        image_ref = refs[0]
+    if not image_ref:
+        await matcher.finish(
+            "没有读取到有效图片地址，请重新发送改图命令和一张图片。"
+        )
+
+    lock = _image_gen_runtime.lock(key)
+    if lock.locked():
+        await matcher.finish("上一张图片仍在处理中，当前图片没有进入修改任务。")
+    async with lock:
+        try:
+            source_image = await load_image_ref(
+                image_ref,
+                timeout_seconds=config.vision_timeout_seconds,
+                max_bytes=config.image_gen_max_input_bytes,
+                trusted_local_roots=config.vision_trusted_local_roots,
+            )
+        except ImageGenError as exc:
+            log_ai_event_error(exc, event)
+            if pending.provider == "qwen_space":
+                await matcher.finish(_qwen_space_error_text(exc))
+            await matcher.finish(_image_gen_error_text(exc, operation="edit"))
+        if pending.provider == "qwen_space":
+            if _qwen_space_runtime.lock.locked():
+                await matcher.finish(
+                    "另一项Qwen改图仍在处理中；当前图片没有提交，请稍后重新发送 /Qwen改图。"
+                )
+            decision = _image_gen_runtime.claim_request(
+                key,
+                cooldown_seconds=config.image_gen_cooldown_seconds,
+                max_requests_per_hour=config.image_gen_max_requests_per_hour,
+            )
+            if not decision.allowed:
+                await matcher.finish(
+                    _image_request_rejection_text(
+                        decision.status,
+                        decision.wait_seconds,
+                    )
+                )
+            await matcher.send(
+                "图片已收到，正在压缩并提交Qwen改图。模型推理失败时不会自动重试。"
+            )
+            try:
+                prepared = await asyncio.to_thread(
+                    prepare_qwen_image,
+                    source_image,
+                    max_input_bytes=config.image_gen_max_input_bytes,
+                    max_side=config.qwen_space_max_side,
+                    jpeg_quality=config.qwen_space_jpeg_quality,
+                )
+                request = QwenEditRequest(
+                    preset_key="runtime",
+                    lora_adapter=pending.lora_adapter,
+                    prompt=pending.prompt,
+                )
+                async with _qwen_space_runtime.lock:
+                    remote = await submit_qwen_edit(config, request, prepared)
+                    observe_image_gen_safely(
+                        operation="qwen_edit",
+                        succeeded=True,
+                    )
+                    _qwen_space_runtime.remember_remote(
+                        key,
+                        remote,
+                        ttl_seconds=config.qwen_space_result_ttl_seconds,
+                    )
+                    await matcher.send(
+                        "Qwen已经生成完成，正在下载结果；下载失败不会重新调用模型。"
+                    )
+                    try:
+                        artifact = await download_qwen_result(config, remote)
+                    except QwenSpaceEditError as exc:
+                        observe_image_gen_safely(
+                            operation="qwen_download",
+                            succeeded=False,
+                            error=exc.__cause__ or exc,
+                        )
+                        log_image_gen_provider_failure(
+                            exc,
+                            operation="qwen_download",
+                        )
+                        log_ai_event_error(exc, event)
+                        await matcher.finish(
+                            "Qwen已经生成成功，但结果下载失败；没有重复消耗GPU额度。"
+                            "请在30分钟内发送 /重取改图。"
+                        )
+            except ImageGenError as exc:
+                observe_image_gen_safely(
+                    operation="qwen_edit",
+                    succeeded=False,
+                    error=exc.__cause__ or exc,
+                )
+                log_image_gen_provider_failure(exc, operation="qwen_edit")
+                log_ai_event_error(exc, event)
+                await matcher.finish(_qwen_space_error_text(exc))
+            _qwen_space_runtime.remember_artifact(key, artifact)
+            observe_image_gen_safely(operation="qwen_download", succeeded=True)
+            if not await _send_generated_image(bot, event, artifact):
+                await matcher.finish(
+                    "Qwen改图已保存在本地，但QQ发送失败；可以稍后发送 /重取改图。"
+                )
+            await matcher.finish(
+                f"Qwen改图完成。模式：{pending.lora_adapter}；Seed：{remote.seed}"
+            )
+        decision = _image_gen_runtime.claim_request(
+            key,
+            cooldown_seconds=config.image_gen_cooldown_seconds,
+            max_requests_per_hour=config.image_gen_max_requests_per_hour,
+        )
+        if not decision.allowed:
+            await matcher.finish(
+                _image_request_rejection_text(
+                    decision.status,
+                    decision.wait_seconds,
+                )
+            )
+        await matcher.send("图片已收到，正在修改。本次失败时不会自动重试。")
+        try:
+            artifact = await edit_image(config, pending.prompt, source_image)
+        except ImageGenError as exc:
+            observe_image_gen_safely(
+                operation="edit",
+                succeeded=False,
+                error=exc.__cause__ or exc,
+            )
+            log_image_gen_provider_failure(exc, operation="edit")
+            log_ai_event_error(exc, event)
+            await matcher.finish(_image_gen_error_text(exc, operation="edit"))
+        observe_image_gen_safely(operation="edit", succeeded=True)
+        if not await _send_generated_image(bot, event, artifact):
+            await matcher.finish(
+                "图片已经修改完成，但QQ发送失败；本地结果已保留，本次没有重复修改。"
+            )
+        await matcher.finish()
 
 
 @reset_cmd.handle()
@@ -5724,6 +6589,55 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await matcher.finish(
         "已清除当前会话的近期原始消息和空窗摘要；"
         "历史会话摘要已保留，并会继续用于后续对话。"
+    )
+
+
+@linyin_behavior_diagnostic_cmd.handle()
+async def _(
+    event: MessageEvent,
+    matcher: Matcher,
+    arg=CommandArg(),
+) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("凛音行为诊断只允许主人私聊使用。")
+        return
+
+    scope = conversation_scope(event)
+    if not is_linyin_behavior_diagnostic_scope(scope, is_private=True):
+        await matcher.finish("凛音行为诊断只适用于已启用 Persona V2 的凛音账号。")
+        return
+
+    test_text = arg.extract_plain_text().strip()
+    if not test_text:
+        await matcher.finish("用法：/凛音行为诊断 <测试消息>")
+        return
+
+    diagnostic_context = build_linyin_behavior_diagnostic_system_context(
+        [
+            language_reset_context(),
+            speaker_identity_context(event),
+            current_message_identity_context(event),
+        ]
+    )
+    try:
+        reply = await ask_llm(
+            config,
+            history=[],
+            user_text=test_text,
+            extra_system_context=diagnostic_context,
+            role_card_key=scope.role_card_key,
+            max_retries=0,
+        )
+    except Exception:
+        await matcher.finish("凛音隔离诊断请求失败，本次测试没有写入普通聊天上下文或记忆。")
+        return
+
+    await matcher.finish(
+        format_linyin_behavior_diagnostic_reply(
+            reply,
+            persona_prompt=load_persona_prompt(scope.role_card_key),
+        )
     )
 
 
@@ -7723,6 +8637,7 @@ async def _(matcher: Matcher) -> None:
                 "/查看长期记忆",
                 "/删除长期记忆 记忆ID",
                 "/查看角色卡",
+                "/凛音行为诊断 测试消息（仅主人和凛音私聊；不写入上下文或记忆）",
                 "/选择角色卡",
                 "/转告主人 内容",
                 "/留言给主人 内容",

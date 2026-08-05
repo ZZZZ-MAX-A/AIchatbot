@@ -64,7 +64,7 @@ class TtsResult:
     segments: tuple[dict[str, Any], ...] = ()
 
 
-_last_tts_candidate: TtsCandidate | None = None
+_last_tts_candidates: dict[str, TtsCandidate] = {}
 
 ACTION_BRACKET_PATTERNS = (
     re.compile(r"（[^（）]*）"),
@@ -252,7 +252,13 @@ def extract_semantic_goal(text: str) -> str:
     return goal or text.strip()
 
 
-def set_last_tts_candidate(raw_text: str, message_id: str = "", *, force_language: str = "") -> TtsCandidate | None:
+def set_last_tts_candidate(
+    raw_text: str,
+    message_id: str = "",
+    *,
+    scope_key: str = "legacy",
+    force_language: str = "",
+) -> TtsCandidate | None:
     adapted = adapt_speech_text(raw_text)
     if not adapted.text:
         return None
@@ -262,13 +268,12 @@ def set_last_tts_candidate(raw_text: str, message_id: str = "", *, force_languag
         created_at=datetime.now(),
         message_id=message_id,
     )
-    global _last_tts_candidate
-    _last_tts_candidate = candidate
+    _last_tts_candidates[scope_key.strip() or "legacy"] = candidate
     return candidate
 
 
-def get_last_tts_candidate() -> TtsCandidate | None:
-    return _last_tts_candidate
+def get_last_tts_candidate(*, scope_key: str = "legacy") -> TtsCandidate | None:
+    return _last_tts_candidates.get(scope_key.strip() or "legacy")
 
 
 def adapt_speech_text(raw_text: str, *, light_stutter: bool = True, force_language: str = "") -> AdaptedSpeech:
@@ -398,7 +403,15 @@ def semantic_voice_user_text(original_text: str, semantic_goal: str, *, preserve
     )
 
 
-async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech, *, refresh_cache: bool = False) -> TtsResult:
+async def request_tts(
+    config: AiChatConfig,
+    adapted: AdaptedSpeech,
+    *,
+    voice_id: str = "",
+    emotion: str = "",
+    trim_trailing_noise: bool = False,
+    refresh_cache: bool = False,
+) -> TtsResult:
     if not adapted.segments:
         raise RuntimeError("empty TTS segments")
 
@@ -408,11 +421,12 @@ async def request_tts(config: AiChatConfig, adapted: AdaptedSpeech, *, refresh_c
         payload: dict[str, Any] = {
             "segments": list(adapted.segments),
             "pauses_ms": list(adapted.pauses_ms),
-            "voice_id": config.tts_voice,
+            "voice_id": voice_id.strip() or config.tts_voice,
             "language": "zh",
-            "emotion": config.tts_emotion,
+            "emotion": emotion.strip() or config.tts_emotion,
             "max_total_seconds": config.tts_max_total_seconds,
             "bypass_cache": refresh_cache,
+            "trim_trailing_noise": trim_trailing_noise,
         }
         async with httpx.AsyncClient(timeout=config.tts_timeout_seconds) as client:
             response = await client.post(f"{config.tts_service_url.rstrip('/')}/tts", json=payload)

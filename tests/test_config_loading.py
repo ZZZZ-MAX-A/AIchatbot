@@ -97,6 +97,34 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.vision_cloud_model, "qwen3.7-flash")
         self.assertEqual(config.aliyun_bailian_base_url, "")
         self.assertEqual(config.aliyun_bailian_api_key, "")
+        self.assertFalse(config.enable_linyin_tts)
+        self.assertEqual(config.linyin_tts_voice, "")
+        self.assertEqual(config.linyin_tts_emotion, "")
+        self.assertFalse(config.enable_image_gen)
+        self.assertEqual(config.image_gen_api_key, "")
+        self.assertEqual(config.image_gen_base_url, "")
+        self.assertEqual(config.image_gen_model, "grok-imagine-1.0")
+        self.assertEqual(config.image_edit_model, "grok-imagine-1.0-edit")
+        self.assertEqual(config.image_gen_timeout_seconds, 120)
+        self.assertEqual(config.image_gen_max_prompt_chars, 1000)
+        self.assertEqual(config.image_gen_max_input_bytes, 10_485_760)
+        self.assertEqual(config.image_gen_max_output_bytes, 10_485_760)
+        self.assertEqual(config.image_gen_pending_edit_seconds, 120)
+        self.assertEqual(config.image_gen_cooldown_seconds, 30)
+        self.assertEqual(config.image_gen_max_requests_per_hour, 10)
+        self.assertFalse(config.enable_qwen_space_edit)
+        self.assertEqual(
+            config.qwen_space_base_url,
+            "https://prithivmlmods-qwen-image-edit-2511-loras-fast.hf.space",
+        )
+        self.assertEqual(config.qwen_space_hf_token, "")
+        self.assertEqual(config.qwen_space_submit_timeout_seconds, 60)
+        self.assertEqual(config.qwen_space_infer_timeout_seconds, 180)
+        self.assertEqual(config.qwen_space_download_timeout_seconds, 300)
+        self.assertEqual(config.qwen_space_download_retries, 2)
+        self.assertEqual(config.qwen_space_result_ttl_seconds, 1800)
+        self.assertEqual(config.qwen_space_max_side, 1024)
+        self.assertEqual(config.qwen_space_jpeg_quality, 90)
         self.assertEqual(config.vision_trusted_local_roots, ())
         self.assertFalse(config.enable_memory_rag)
         self.assertFalse(config.enable_project_doc_rag)
@@ -124,7 +152,29 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.persona_routing.bindings, ())
         self.assertEqual(config.persona_routing.binding_errors, ())
         self.assertEqual(config.max_private_message_length, 150)
-        self.assertEqual(config.owner_max_private_message_length, 220)
+        self.assertEqual(config.owner_max_private_message_length, 0)
+        self.assertFalse(config.enable_shared_scene_hub)
+        self.assertEqual(config.shared_scene_group_id, "")
+        self.assertEqual(config.shared_scene_aike_bot_id, "")
+        self.assertEqual(config.shared_scene_linyin_bot_id, "")
+        self.assertEqual(config.scene_director_provider, "qwen")
+        self.assertEqual(config.scene_director_api_key, "")
+        self.assertEqual(config.scene_director_base_url, "")
+        self.assertEqual(config.scene_director_model, "")
+        self.assertEqual(config.scene_director_timeout_seconds, 15)
+        self.assertEqual(config.scene_director_circuit_seconds, 120)
+        self.assertEqual(config.scene_max_context_events, 20)
+        self.assertEqual(config.scene_director_context_events, 6)
+        self.assertEqual(config.scene_max_reply_sentences, 3)
+        self.assertEqual(config.scene_max_reply_chars, 160)
+        self.assertEqual(config.scene_actor_max_tokens, 256)
+        self.assertEqual(config.scene_private_context_max_messages, 12)
+        self.assertEqual(config.scene_private_context_max_summaries, 2)
+        self.assertEqual(config.scene_private_context_max_gap_summaries, 1)
+        self.assertEqual(config.scene_private_context_max_manual_memories, 8)
+        self.assertEqual(config.scene_private_context_max_chars, 2400)
+        self.assertEqual(config.scene_member_cache_seconds, 30)
+        self.assertEqual(config.scene_max_pending_turns, 1)
         self.assertEqual(config.tts_max_chars, 260)
         self.assertEqual(config.tts_max_total_seconds, 60)
 
@@ -142,6 +192,11 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_llm_base_url, "https://legacy.example/v1")
         self.assertEqual(config.chat_llm_model, "legacy-chat")
         self.assertEqual(config.chat_llm_timeout_seconds, 33)
+
+    def test_owner_private_message_limit_can_be_reenabled_explicitly(self):
+        config = self.load_with_env({"OWNER_MAX_PRIVATE_MESSAGE_LENGTH": "500"})
+
+        self.assertEqual(config.owner_max_private_message_length, 500)
 
     def test_persona_v2_configuration_is_explicit_and_observe_only(self):
         config = self.load_with_env(
@@ -327,6 +382,31 @@ class ConfigLoadingTests(unittest.TestCase):
                 "PRIVATE_WHITELIST": "10001, 10002,10001,,",
                 "GROUP_WHITELIST": "42, 43",
                 "USER_BLACKLIST": "90001,90002",
+                "ENABLE_LINYIN_TTS": "true",
+                "LINYIN_TTS_VOICE": "zh_kelin_raw_20260625",
+                "LINYIN_TTS_EMOTION": "neutral",
+                "ENABLE_IMAGE_GEN": "true",
+                "IMAGE_GEN_API_KEY": "image-secret",
+                "IMAGE_GEN_BASE_URL": "https://image.example/v1/",
+                "IMAGE_GEN_MODEL": "unit-generate",
+                "IMAGE_EDIT_MODEL": "unit-edit",
+                "IMAGE_GEN_TIMEOUT_SECONDS": "95",
+                "IMAGE_GEN_MAX_PROMPT_CHARS": "800",
+                "IMAGE_GEN_MAX_INPUT_BYTES": "5000000",
+                "IMAGE_GEN_MAX_OUTPUT_BYTES": "6000000",
+                "IMAGE_GEN_PENDING_EDIT_SECONDS": "150",
+                "IMAGE_GEN_COOLDOWN_SECONDS": "20",
+                "IMAGE_GEN_MAX_REQUESTS_PER_HOUR": "7",
+                "ENABLE_QWEN_SPACE_EDIT": "true",
+                "QWEN_SPACE_BASE_URL": "https://qwen-space.example",
+                "QWEN_SPACE_HF_TOKEN": "hf-unit-secret",
+                "QWEN_SPACE_SUBMIT_TIMEOUT_SECONDS": "50",
+                "QWEN_SPACE_INFER_TIMEOUT_SECONDS": "170",
+                "QWEN_SPACE_DOWNLOAD_TIMEOUT_SECONDS": "280",
+                "QWEN_SPACE_DOWNLOAD_RETRIES": "1",
+                "QWEN_SPACE_RESULT_TTL_SECONDS": "1200",
+                "QWEN_SPACE_MAX_SIDE": "960",
+                "QWEN_SPACE_JPEG_QUALITY": "88",
             }
         )
 
@@ -391,6 +471,33 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_sticker_max_per_hour, 5)
         self.assertEqual(config.chat_sticker_max_per_reply, 1)
         self.assertEqual(config.chat_sticker_min_intent_confidence, 0.88)
+        self.assertTrue(config.enable_linyin_tts)
+        self.assertEqual(config.linyin_tts_voice, "zh_kelin_raw_20260625")
+        self.assertEqual(config.linyin_tts_emotion, "neutral")
+        self.assertTrue(config.enable_image_gen)
+        self.assertEqual(config.image_gen_api_key, "image-secret")
+        self.assertEqual(config.image_gen_base_url, "https://image.example/v1/")
+        self.assertEqual(config.image_gen_model, "unit-generate")
+        self.assertEqual(config.image_edit_model, "unit-edit")
+        self.assertEqual(config.image_gen_timeout_seconds, 95)
+        self.assertEqual(config.image_gen_max_prompt_chars, 800)
+        self.assertEqual(config.image_gen_max_input_bytes, 5_000_000)
+        self.assertEqual(config.image_gen_max_output_bytes, 6_000_000)
+        self.assertEqual(config.image_gen_pending_edit_seconds, 150)
+        self.assertEqual(config.image_gen_cooldown_seconds, 20)
+        self.assertEqual(config.image_gen_max_requests_per_hour, 7)
+        self.assertNotIn("image-secret", repr(config))
+        self.assertTrue(config.enable_qwen_space_edit)
+        self.assertEqual(config.qwen_space_base_url, "https://qwen-space.example")
+        self.assertEqual(config.qwen_space_hf_token, "hf-unit-secret")
+        self.assertEqual(config.qwen_space_submit_timeout_seconds, 50)
+        self.assertEqual(config.qwen_space_infer_timeout_seconds, 170)
+        self.assertEqual(config.qwen_space_download_timeout_seconds, 280)
+        self.assertEqual(config.qwen_space_download_retries, 1)
+        self.assertEqual(config.qwen_space_result_ttl_seconds, 1200)
+        self.assertEqual(config.qwen_space_max_side, 960)
+        self.assertEqual(config.qwen_space_jpeg_quality, 88)
+        self.assertNotIn("hf-unit-secret", repr(config))
         self.assertTrue(config.enable_chat_weather)
         self.assertEqual(config.chat_weather_mode, "owner_auto")
         self.assertEqual(config.chat_weather_provider, "open_meteo")
@@ -423,6 +530,21 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.private_whitelist, frozenset({"10001", "10002"}))
         self.assertEqual(config.group_whitelist, frozenset({"42", "43"}))
         self.assertEqual(config.user_blacklist, frozenset({"90001", "90002"}))
+
+    def test_image_gen_endpoint_can_explicitly_reuse_persona_channel(self):
+        config = self.load_with_env(
+            {
+                "PERSONA_LLM_API_KEY": "persona-image-secret",
+                "PERSONA_LLM_BASE_URL": "https://persona-image.example/v1",
+            }
+        )
+
+        self.assertEqual(config.image_gen_api_key, "persona-image-secret")
+        self.assertEqual(
+            config.image_gen_base_url,
+            "https://persona-image.example/v1",
+        )
+        self.assertNotIn("persona-image-secret", repr(config))
 
     def test_invalid_local_sticker_limits_fail_closed(self):
         config = self.load_with_env(
@@ -492,6 +614,56 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.chat_weather_default_latitude, 0.0)
         self.assertEqual(config.chat_weather_default_longitude, 0.0)
         self.assertEqual(config.chat_weather_timeout_seconds, 0.0)
+
+    def test_scene_hub_configuration_is_explicit_secret_safe_and_fail_closed(self):
+        config = self.load_with_env(
+            {
+                "ENABLE_SHARED_SCENE_HUB": "true",
+                "SHARED_SCENE_GROUP_ID": "30003",
+                "SHARED_SCENE_AIKE_BOT_ID": "20001",
+                "SHARED_SCENE_LINYIN_BOT_ID": "20002",
+                "SCENE_DIRECTOR_PROVIDER": "DEEPSEEK",
+                "SCENE_DIRECTOR_API_KEY": "director-secret",
+                "SCENE_DIRECTOR_BASE_URL": "https://director.example/v1",
+                "SCENE_DIRECTOR_MODEL": "deepseek-chat",
+                "SCENE_DIRECTOR_TIMEOUT_SECONDS": "invalid",
+                "SCENE_DIRECTOR_CIRCUIT_SECONDS": "invalid",
+                "SCENE_MAX_CONTEXT_EVENTS": "invalid",
+                "SCENE_DIRECTOR_CONTEXT_EVENTS": "invalid",
+                "SCENE_MAX_REPLY_SENTENCES": "invalid",
+                "SCENE_MAX_REPLY_CHARS": "invalid",
+                "SCENE_ACTOR_MAX_TOKENS": "invalid",
+                "SCENE_PRIVATE_CONTEXT_MAX_MESSAGES": "invalid",
+                "SCENE_PRIVATE_CONTEXT_MAX_SUMMARIES": "invalid",
+                "SCENE_PRIVATE_CONTEXT_MAX_GAP_SUMMARIES": "invalid",
+                "SCENE_PRIVATE_CONTEXT_MAX_MANUAL_MEMORIES": "invalid",
+                "SCENE_PRIVATE_CONTEXT_MAX_CHARS": "invalid",
+                "SCENE_MEMBER_CACHE_SECONDS": "invalid",
+                "SCENE_MAX_PENDING_TURNS": "invalid",
+            }
+        )
+
+        self.assertTrue(config.enable_shared_scene_hub)
+        self.assertEqual(config.scene_director_provider, "deepseek")
+        self.assertEqual(config.scene_director_api_key, "director-secret")
+        self.assertNotIn("director-secret", repr(config))
+        self.assertNotIn("30003", repr(config))
+        self.assertNotIn("20001", repr(config))
+        self.assertNotIn("20002", repr(config))
+        self.assertEqual(config.scene_director_timeout_seconds, 0)
+        self.assertEqual(config.scene_director_circuit_seconds, 0)
+        self.assertEqual(config.scene_max_context_events, 0)
+        self.assertEqual(config.scene_director_context_events, 0)
+        self.assertEqual(config.scene_max_reply_sentences, 0)
+        self.assertEqual(config.scene_max_reply_chars, 0)
+        self.assertEqual(config.scene_actor_max_tokens, 0)
+        self.assertEqual(config.scene_private_context_max_messages, 0)
+        self.assertEqual(config.scene_private_context_max_summaries, 0)
+        self.assertEqual(config.scene_private_context_max_gap_summaries, 0)
+        self.assertEqual(config.scene_private_context_max_manual_memories, 0)
+        self.assertEqual(config.scene_private_context_max_chars, 0)
+        self.assertEqual(config.scene_member_cache_seconds, 0)
+        self.assertEqual(config.scene_max_pending_turns, 0)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ class AccessRuleTests(unittest.TestCase):
             "allow_unknown_private_chat": False,
             "max_group_message_length": 300,
             "max_private_message_length": 150,
-            "owner_max_private_message_length": 220,
+            "owner_max_private_message_length": 0,
             "group_rate_limit_seconds": 5,
             "private_rate_limit_seconds": 10,
         }
@@ -106,11 +106,20 @@ class AccessRuleTests(unittest.TestCase):
         member_private_event = self.events.PrivateMessageEvent(user_id=20002)
         group_event = self.events.GroupMessageEvent(user_id=10001, group_id=42)
 
-        self.assertEqual(self.access.message_length_limit(config, owner_private_event), 220)
+        self.assertEqual(self.access.message_length_limit(config, owner_private_event), 0)
         self.assertEqual(self.access.message_length_limit(config, member_private_event), 150)
         self.assertEqual(self.access.message_length_limit(config, group_event), 300)
         self.assertEqual(self.access.rate_limit_seconds(config, owner_private_event), 10)
         self.assertEqual(self.access.rate_limit_seconds(config, group_event), 5)
+
+    def test_owner_private_limit_can_still_be_reenabled(self):
+        config = self.make_config(owner_max_private_message_length=500)
+        owner_private_event = self.events.PrivateMessageEvent(user_id=10001)
+
+        self.assertEqual(
+            self.access.message_length_limit(config, owner_private_event),
+            500,
+        )
 
 
 class AccessStoreTests(unittest.TestCase):

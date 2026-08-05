@@ -35,6 +35,16 @@ prompts/persona-cards/**
 !prompts/persona-cards/private/
 !prompts/persona-cards/private/.gitkeep
 
+# Shared world cards: local relationship facts must never be committed.
+prompts/world-cards/**
+!prompts/world-cards/README.md
+!prompts/world-cards/private/
+!prompts/world-cards/private/.gitkeep
+
+# Private style examples may contain persona-specific language and must never
+# be committed. SceneHub loads them locally at runtime only.
+prompts/style-examples/**
+
 # Local tools
 tools/
 

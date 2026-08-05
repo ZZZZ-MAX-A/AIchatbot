@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from array import array
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+import wave
 
 from pure_ai_chat_loader import AI_CHAT_ROOT, ensure_ai_chat_packages, load_module
 
@@ -163,6 +167,65 @@ class TtsServiceBootstrapTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertFalse(state.loaded())
         self.assertIsNone(state.runtime)
+
+    def test_trailing_low_energy_noise_is_trimmed_with_safe_silence(self) -> None:
+        sample_rate = 22_050
+        active_frames = int(sample_rate * 0.60)
+        weak_tail_frames = int(sample_rate * 0.30)
+        samples = array("h", [5_000] * active_frames)
+        samples.extend([180] * weak_tail_frames)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "segment.wav"
+            with wave.open(str(path), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(sample_rate)
+                writer.writeframes(samples.tobytes())
+
+            changed = self.service.trim_trailing_low_energy_noise(path)
+
+            with wave.open(str(path), "rb") as reader:
+                duration = reader.getnframes() / reader.getframerate()
+                output = array("h")
+                output.frombytes(reader.readframes(reader.getnframes()))
+
+        self.assertTrue(changed)
+        self.assertAlmostEqual(duration, 0.74, delta=0.03)
+        self.assertTrue(all(value == 0 for value in output[-int(sample_rate * 0.08) :]))
+
+    def test_short_natural_tail_is_not_rewritten(self) -> None:
+        sample_rate = 22_050
+        active_frames = int(sample_rate * 0.60)
+        short_tail_frames = int(sample_rate * 0.06)
+        samples = array("h", [5_000] * active_frames)
+        samples.extend([180] * short_tail_frames)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "segment.wav"
+            with wave.open(str(path), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(sample_rate)
+                writer.writeframes(samples.tobytes())
+            before = path.read_bytes()
+
+            changed = self.service.trim_trailing_low_energy_noise(path)
+
+            after = path.read_bytes()
+
+        self.assertFalse(changed)
+        self.assertEqual(after, before)
+
+    def test_tail_cleanup_request_flag_defaults_off(self) -> None:
+        default_request = self.service.TtsRequest(segments=["test"])
+        enabled_request = self.service.TtsRequest(
+            segments=["test"],
+            trim_trailing_noise=True,
+        )
+
+        self.assertFalse(default_request.trim_trailing_noise)
+        self.assertTrue(enabled_request.trim_trailing_noise)
 
 
 if __name__ == "__main__":

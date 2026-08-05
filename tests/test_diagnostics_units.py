@@ -89,6 +89,28 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
             "vision_max_image_bytes": 5242880,
             "vision_image_cache_ttl_seconds": 120,
             "vision_private_image_wait_seconds": 5,
+            "enable_image_gen": True,
+            "image_gen_api_key": "sk-image-secret-value",
+            "image_gen_base_url": "https://name:password@image.example.com/v1?token=secret",
+            "image_gen_model": "grok-imagine-1.0",
+            "image_edit_model": "grok-imagine-1.0-edit",
+            "image_gen_timeout_seconds": 120,
+            "image_gen_max_prompt_chars": 1000,
+            "image_gen_max_input_bytes": 10485760,
+            "image_gen_max_output_bytes": 10485760,
+            "image_gen_pending_edit_seconds": 120,
+            "image_gen_cooldown_seconds": 30,
+            "image_gen_max_requests_per_hour": 10,
+            "enable_qwen_space_edit": True,
+            "qwen_space_base_url": "https://qwen-space.example/?token=secret",
+            "qwen_space_hf_token": "hf-secret-value",
+            "qwen_space_submit_timeout_seconds": 60,
+            "qwen_space_infer_timeout_seconds": 180,
+            "qwen_space_download_timeout_seconds": 300,
+            "qwen_space_download_retries": 2,
+            "qwen_space_result_ttl_seconds": 1800,
+            "qwen_space_max_side": 1024,
+            "qwen_space_jpeg_quality": 90,
             "enable_tts": True,
             "tts_service_url": "http://127.0.0.1:9880/?token=secret",
             "tts_auto_start": True,
@@ -116,6 +138,8 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
             "MainAgent：",
             "记忆与 RAG：",
             "视觉：",
+            "图片生成：",
+            "Qwen Space 改图：",
             "语音：",
             "MainAgent 高风险边界：",
         ):
@@ -126,13 +150,24 @@ class DiagnosticsPureUnitTests(unittest.TestCase):
         self.assertIn("MemoryRAG：开启", reply)
         self.assertIn("ProjectDocRAG：开启", reply)
         self.assertIn("单图上限：5 MiB", reply)
+        self.assertIn("文生图模型：grok-imagine-1.0", reply)
+        self.assertIn("改图模型：grok-imagine-1.0-edit", reply)
+        self.assertIn("接口：https://image.example.com/v1", reply)
         self.assertIn("地址范围：本机 loopback", reply)
         self.assertIn("主人管理写：审批门控", reply)
         self.assertIn("不代表服务在线、模型已加载或端到端功能已经验证", reply)
         self.assertIn("https://chat.example.com/v1", reply)
         self.assertIn("https://main.example.com/v1", reply)
         self.assertNotIn("legacy-chat", reply)
-        for secret in ("sk-chat", "sk-main", "password", "token=", "user:pass"):
+        for secret in (
+            "sk-chat",
+            "sk-main",
+            "sk-image",
+            "hf-secret",
+            "password",
+            "token=",
+            "user:pass",
+        ):
             self.assertNotIn(secret, reply)
 
     def test_format_config_status_uses_legacy_chat_fields_when_graph_is_disabled(self):

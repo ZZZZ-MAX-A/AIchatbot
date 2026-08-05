@@ -8,7 +8,9 @@ import sys
 import time
 import uuid
 import wave
+from array import array
 from dataclasses import dataclass
+from math import sqrt
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +36,12 @@ EMOTION_PRESETS = {
 IDLE_UNLOAD_SECONDS = 600
 DEFAULT_MAX_MEL_TOKENS = 700
 DEFAULT_SILENCE_MS = 550
+TAIL_NOISE_WINDOW_MS = 20
+TAIL_NOISE_THRESHOLD = 0.01
+TAIL_NOISE_SAFETY_MS = 60
+TAIL_NOISE_FADE_MS = 20
+TAIL_NOISE_OUTPUT_SILENCE_MS = 80
+TAIL_NOISE_MIN_TRIM_MS = 80
 LIFECYCLE_OWNER_TOKEN = os.getenv("TTS_LIFECYCLE_OWNER_TOKEN", "")
 LIFECYCLE_OWNER_FINGERPRINT = (
     hashlib.sha256(LIFECYCLE_OWNER_TOKEN.encode("utf-8")).hexdigest()
@@ -91,6 +99,7 @@ class TtsRequest(BaseModel):
     emotion: str = "affection"
     max_total_seconds: int = 60
     bypass_cache: bool = False
+    trim_trailing_noise: bool = False
 
 
 class ModelState:
@@ -160,6 +169,73 @@ def emotion_preset(emotion: str) -> dict[str, float]:
         "emo_last": float(selected["emo_last"]),
         "emo_alpha": float(selected["emo_alpha"]),
     }
+
+
+def trim_trailing_low_energy_noise(path: Path) -> bool:
+    with wave.open(str(path), "rb") as reader:
+        params = reader.getparams()
+        channels = reader.getnchannels()
+        sample_width = reader.getsampwidth()
+        frame_rate = reader.getframerate()
+        frame_count = reader.getnframes()
+        raw_frames = reader.readframes(frame_count)
+
+    if sample_width != 2 or channels <= 0 or frame_rate <= 0 or frame_count <= 0:
+        return False
+
+    samples = array("h")
+    samples.frombytes(raw_frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    window_frames = max(int(frame_rate * TAIL_NOISE_WINDOW_MS / 1000), 1)
+    window_samples = window_frames * channels
+    last_active_frame = 0
+    for start in range(0, len(samples) - window_samples + 1, window_samples):
+        block = samples[start : start + window_samples]
+        rms = sqrt(sum(value * value for value in block) / len(block)) / 32768.0
+        if rms >= TAIL_NOISE_THRESHOLD:
+            last_active_frame = min(start // channels + window_frames, frame_count)
+
+    if last_active_frame <= 0:
+        return False
+
+    safety_frames = int(frame_rate * TAIL_NOISE_SAFETY_MS / 1000)
+    retained_frames = min(last_active_frame + safety_frames, frame_count)
+    trim_frames = frame_count - retained_frames
+    minimum_trim_frames = int(frame_rate * TAIL_NOISE_MIN_TRIM_MS / 1000)
+    if trim_frames < minimum_trim_frames:
+        return False
+
+    retained = array("h", samples[: retained_frames * channels])
+    fade_frames = min(
+        int(frame_rate * TAIL_NOISE_FADE_MS / 1000),
+        retained_frames,
+    )
+    fade_start = retained_frames - fade_frames
+    for frame_index in range(fade_frames):
+        gain = (fade_frames - frame_index - 1) / max(fade_frames, 1)
+        sample_start = (fade_start + frame_index) * channels
+        for channel_index in range(channels):
+            index = sample_start + channel_index
+            retained[index] = int(retained[index] * gain)
+
+    output_silence_frames = int(
+        frame_rate * TAIL_NOISE_OUTPUT_SILENCE_MS / 1000
+    )
+    retained.extend([0] * output_silence_frames * channels)
+
+    if sys.byteorder != "little":
+        retained.byteswap()
+    temporary = path.with_suffix(".tail-clean.tmp.wav")
+    try:
+        with wave.open(str(temporary), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(retained.tobytes())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def concat_wavs(paths: list[Path], output_path: Path, pauses_ms: list[int]) -> float:
@@ -272,6 +348,9 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
                 num_beams=1,
                 verbose=False,
             )
+            tail_trimmed = False
+            if request.trim_trailing_noise:
+                tail_trimmed = trim_trailing_low_energy_noise(segment_path)
             generated.append(segment_path)
             results.append(
                 {
@@ -280,6 +359,7 @@ async def tts(request: TtsRequest) -> dict[str, Any]:
                     "max_mel_tokens": ENGINE_CONFIG.max_mel_tokens,
                     "seconds": round(time.perf_counter() - infer_started, 3),
                     "bytes": segment_path.stat().st_size,
+                    "tail_trimmed": tail_trimmed,
                 }
             )
 

@@ -367,6 +367,53 @@ def load_sticker_classifier_module():
     )
 
 
+def load_scene_hub_modules():
+    ensure_ai_chat_packages()
+    install_openai_stub()
+    director = load_module(
+        "src.plugins.ai_chat.scene_director",
+        AI_CHAT_ROOT / "scene_director.py",
+    )
+    hub = load_module(
+        "src.plugins.ai_chat.scene_hub",
+        AI_CHAT_ROOT / "scene_hub.py",
+    )
+    return {"director": director, "hub": hub}
+
+
+def load_scene_private_context_module():
+    ensure_ai_chat_packages()
+    return load_module(
+        "src.plugins.ai_chat.scene_private_context",
+        AI_CHAT_ROOT / "scene_private_context.py",
+    )
+
+
+def load_image_gen_module():
+    ensure_ai_chat_packages()
+    install_openai_stub()
+    load_module(
+        "src.plugins.ai_chat.persona_scope",
+        AI_CHAT_ROOT / "persona_scope.py",
+    )
+    load_module(
+        "src.plugins.ai_chat.config",
+        AI_CHAT_ROOT / "config.py",
+    )
+    return load_module(
+        "src.plugins.ai_chat.image_gen",
+        AI_CHAT_ROOT / "image_gen.py",
+    )
+
+
+def load_qwen_space_edit_module():
+    load_image_gen_module()
+    return load_module(
+        "src.plugins.ai_chat.qwen_space_edit",
+        AI_CHAT_ROOT / "qwen_space_edit.py",
+    )
+
+
 def load_sticker_selection_module():
     load_sticker_intent_module()
     return load_module(

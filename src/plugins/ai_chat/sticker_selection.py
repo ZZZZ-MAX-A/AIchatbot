@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import random
 import time
 
+from .persona_scope import ConversationScope
 from .sticker_intent import StickerIntent
 from .sticker_library import StickerLibrary
 
@@ -51,6 +52,34 @@ class StickerSelectionContext:
 
 
 @dataclass(frozen=True)
+class StickerSelectionScope:
+    session_key: str
+    persona_key: str
+
+
+def resolve_sticker_selection_scope(
+    conversation: ConversationScope,
+    *,
+    legacy_persona_key: str,
+) -> StickerSelectionScope:
+    """Resolve sticker state without falling back across persona boundaries."""
+    if conversation.routing_v2_requested:
+        persona_key = (
+            conversation.role_card_key.strip()
+            if conversation.routing_v2_active
+            else ""
+        )
+        return StickerSelectionScope(
+            session_key=conversation.runtime_session_key.strip(),
+            persona_key=persona_key,
+        )
+    return StickerSelectionScope(
+        session_key=conversation.legacy_session_key.strip(),
+        persona_key=legacy_persona_key.strip(),
+    )
+
+
+@dataclass(frozen=True)
 class StickerSelectionDecision:
     selected_sticker_id: str | None
     reason: str
@@ -89,6 +118,8 @@ class StickerSelectionRuntime:
             return "disabled"
         if not context.session_key or not context.reply_text.strip():
             return "reply_unavailable"
+        if not context.persona_key.strip():
+            return "persona_unavailable"
         if policy.owner_private_only and not (context.is_owner and context.is_private):
             return "scope_denied"
         return None

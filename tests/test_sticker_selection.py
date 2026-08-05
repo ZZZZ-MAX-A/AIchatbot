@@ -87,6 +87,27 @@ class StickerSelectionTests(unittest.TestCase):
             now,
         )
 
+    def conversation_scope(self, **overrides):
+        values = {
+            "bot_self_id": "2700318954",
+            "persona_id": "aike",
+            "role_card_key": "aike",
+            "chat_type": "private",
+            "peer_id": "owner",
+            "group_id": "",
+            "legacy_session_key": "private:owner",
+            "runtime_session_key": "private:owner",
+            "binding_source": "legacy",
+            "runtime_mode": "legacy",
+            "routing_v2_requested": False,
+            "routing_v2_active": False,
+            "memory_v2_requested": False,
+            "memory_v2_active": False,
+            "configuration_error": "",
+        }
+        values.update(overrides)
+        return self.module.ConversationScope(**values)
+
     def policy(self, **overrides):
         values = {
             "enabled": True,
@@ -131,6 +152,12 @@ class StickerSelectionTests(unittest.TestCase):
             (self.policy(), self.intent(), self.context(is_owner=False), "scope_denied"),
             (self.policy(), self.intent(), self.context(is_private=False), "scope_denied"),
             (self.policy(), self.intent(), self.context(reply_text=""), "reply_unavailable"),
+            (
+                self.policy(),
+                self.intent(),
+                self.context(persona_key=""),
+                "persona_unavailable",
+            ),
             (self.policy(max_per_reply=2), self.intent(), self.context(), "policy_invalid"),
         )
         for policy, intent, context, expected in cases:
@@ -139,6 +166,94 @@ class StickerSelectionTests(unittest.TestCase):
                 decision = runtime.decide(library, intent, context, policy)
                 self.assertFalse(decision.selected)
                 self.assertEqual(decision.reason, expected)
+
+    def test_scope_resolution_preserves_aike_and_isolates_routed_persona(self):
+        legacy = self.module.resolve_sticker_selection_scope(
+            self.conversation_scope(),
+            legacy_persona_key="aike",
+        )
+        linyin = self.module.resolve_sticker_selection_scope(
+            self.conversation_scope(
+                bot_self_id="2993614760",
+                persona_id="linyin",
+                role_card_key="linyin",
+                runtime_session_key="persona:linyin:private:owner",
+                binding_source="binding",
+                runtime_mode="persona_v2_persistent",
+                routing_v2_requested=True,
+                routing_v2_active=True,
+                memory_v2_requested=True,
+                memory_v2_active=True,
+            ),
+            legacy_persona_key="aike",
+        )
+
+        self.assertEqual(legacy.session_key, "private:owner")
+        self.assertEqual(legacy.persona_key, "aike")
+        self.assertEqual(linyin.session_key, "persona:linyin:private:owner")
+        self.assertEqual(linyin.persona_key, "linyin")
+        self.assertNotEqual(legacy.session_key, linyin.session_key)
+
+    def test_requested_but_invalid_persona_scope_never_falls_back_to_aike(self):
+        invalid = self.module.resolve_sticker_selection_scope(
+            self.conversation_scope(
+                bot_self_id="2993614760",
+                persona_id="linyin",
+                role_card_key="linyin",
+                binding_source="binding",
+                routing_v2_requested=True,
+                routing_v2_active=False,
+                configuration_error="missing_role_card",
+            ),
+            legacy_persona_key="aike",
+        )
+
+        self.assertEqual(invalid.session_key, "private:owner")
+        self.assertEqual(invalid.persona_key, "")
+        decision = self.module.StickerSelectionRuntime().decide(
+            self.library((self.asset("aike_only"),)),
+            self.intent(),
+            self.context(
+                session_key=invalid.session_key,
+                persona_key=invalid.persona_key,
+            ),
+            self.policy(),
+        )
+        self.assertFalse(decision.selected)
+        self.assertEqual(decision.reason, "persona_unavailable")
+
+    def test_aike_assets_and_frequency_state_do_not_cross_into_linyin(self):
+        runtime = self.module.StickerSelectionRuntime(rng=random.Random(11))
+        library = self.library(
+            (
+                self.asset("aike_only", persona_key="aike"),
+                self.asset("linyin_only", persona_key="linyin"),
+            )
+        )
+        aike_context = self.context(
+            session_key="private:owner",
+            persona_key="aike",
+            message_index=10,
+            now=1_000.0,
+        )
+        aike = runtime.decide(library, self.intent(), aike_context, self.policy())
+        runtime.commit_sent(aike, aike_context)
+
+        linyin = runtime.decide(
+            library,
+            self.intent(),
+            self.context(
+                session_key="persona:linyin:private:owner",
+                persona_key="linyin",
+                message_index=10,
+                now=1_010.0,
+            ),
+            self.policy(),
+        )
+
+        self.assertEqual(aike.selected_sticker_id, "aike_only")
+        self.assertEqual(linyin.selected_sticker_id, "linyin_only")
+        self.assertEqual(linyin.reason, "selected")
 
     def test_invalid_library_and_no_match_do_not_select(self):
         runtime = self.module.StickerSelectionRuntime(rng=random.Random(3))

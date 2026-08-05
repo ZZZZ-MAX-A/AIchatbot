@@ -163,6 +163,64 @@ def tts_failure_code(error: object) -> str:
     return "unexpected_runtime_state"
 
 
+def image_gen_failure_code(error: object) -> str:
+    text = _safe_error_text(error)
+    if any(marker in text for marker in ("401", "403", "unauthorized", "forbidden")):
+        return "authorization_failed"
+    if any(marker in text for marker in ("timeout", "timed out", "超时")):
+        return "request_timeout"
+    if any(marker in text for marker in ("429", "rate limit", "quota")):
+        return "model_rate_limited"
+    if any(marker in text for marker in ("model not found", "model_not_found", "404")):
+        return "model_not_found"
+    if any(
+        marker in text
+        for marker in (
+            "connection",
+            "connecterror",
+            "service unavailable",
+            "502",
+            "503",
+            "504",
+        )
+    ):
+        return "connection_failed"
+    if any(
+        marker in text
+        for marker in (
+            "not_ready",
+            "api_key_missing",
+            "base_url_missing",
+            "model_missing",
+            "invalid_limits",
+        )
+    ):
+        return "invalid_configuration"
+    if any(
+        marker in text
+        for marker in (
+            "image_invalid",
+            "image_empty",
+            "image_too_large",
+            "image_format_unsupported",
+            "image_dimensions_invalid",
+            "image_base64_invalid",
+            "input_image_load_failed",
+        )
+    ):
+        return "data_validation_failed"
+    if any(
+        marker in text
+        for marker in (
+            "provider_response_empty",
+            "provider_image_missing",
+            "provider_image_download_failed",
+        )
+    ):
+        return "invalid_model_response"
+    return "unexpected_runtime_state"
+
+
 def observe_vision_infer_safely(
     *,
     attempted_count: int,
@@ -203,6 +261,29 @@ def observe_tts_synthesis_safely(
             component="tts",
             operation="synthesize",
             code="operation_succeeded" if succeeded else tts_failure_code(error),
+            outcome=(
+                ReliabilityOutcome.SUCCEEDED
+                if succeeded
+                else ReliabilityOutcome.FAILED
+            ),
+        )
+    except Exception:
+        return False
+
+
+def observe_image_gen_safely(
+    *,
+    operation: str,
+    succeeded: bool,
+    error: object | None = None,
+) -> bool:
+    try:
+        if operation not in {"generate", "edit", "qwen_edit", "qwen_download"}:
+            return False
+        return record_result_safely(
+            component="image_gen",
+            operation=operation,
+            code="operation_succeeded" if succeeded else image_gen_failure_code(error),
             outcome=(
                 ReliabilityOutcome.SUCCEEDED
                 if succeeded

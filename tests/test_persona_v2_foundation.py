@@ -295,12 +295,13 @@ class PersonaPhaseTwoIsolationContractTests(unittest.TestCase):
         self.assertIn("async with session_lock(request.key):", self.plugin_source)
         self.assertIn("legacy_session_key=session_key(event)", self.plugin_source)
 
-    def test_routed_persona_uses_ephemeral_memory_and_disables_tts_candidate(self):
+    def test_routed_persona_uses_ephemeral_memory_and_resolves_tts_per_persona(self):
         self.assertIn("ephemeral_persona_history.build_history", self.plugin_source)
         self.assertIn("ephemeral_persona_history.append_turn", self.plugin_source)
         self.assertIn("persistent_memory_enabled=not scope.routing_v2_active", self.plugin_source)
         self.assertIn("persona_memory_enabled=scope.memory_v2_active", self.plugin_source)
-        self.assertIn("tts_enabled=bool(config.enable_tts and not scope.routing_v2_active)", self.plugin_source)
+        self.assertIn("tts_enabled=tts_enabled_for_event(event)", self.plugin_source)
+        self.assertIn("def tts_route_for_event", self.plugin_source)
         self.assertNotIn(".database", self.ephemeral_source)
         self.assertNotIn("Path(", self.ephemeral_source)
 
@@ -308,6 +309,55 @@ class PersonaPhaseTwoIsolationContractTests(unittest.TestCase):
         self.assertIn('SCHEMA_VERSION = "7"', self.database_source)
         self.assertNotIn("persona_id", self.database_source)
         self.assertNotIn("persona_messages", self.database_source)
+
+    def test_sticker_integration_uses_one_persona_scope_without_legacy_fallback(self):
+        helper_start = self.plugin_source.index("def resolve_chat_sticker_scope(")
+        helper_end = self.plugin_source.index("def cache_image_urls(", helper_start)
+        helper = self.plugin_source[helper_start:helper_end]
+        self.assertIn("if not conversation.routing_v2_requested:", helper)
+        self.assertIn("resolve_sticker_selection_scope(", helper)
+        self.assertIn("persona_memory_database_scope(conversation.persona_id)", helper)
+        self.assertIn("ephemeral_persona_history.message_count", helper)
+        self.assertIn("return 0", helper)
+
+        shadow_start = self.plugin_source.index(
+            "async def evaluate_chat_sticker_intent_shadow("
+        )
+        shadow_end = self.plugin_source.index(
+            "def remote_sticker_classifier_settings(", shadow_start
+        )
+        shadow = self.plugin_source[shadow_start:shadow_end]
+        self.assertIn("chat_sticker_selection_context(", shadow)
+        self.assertNotIn("active_role_card()", shadow)
+        self.assertNotIn("session_key=session_key(event)", shadow)
+
+        evaluation_start = self.plugin_source.index(
+            "async def _evaluate_remote_sticker_classifier_result("
+        )
+        evaluation_end = self.plugin_source.index(
+            "async def _maybe_send_remote_sticker_attachment(", evaluation_start
+        )
+        evaluation = self.plugin_source[evaluation_start:evaluation_end]
+        self.assertIn("resolved_sticker_scope", evaluation)
+        self.assertIn("chat_sticker_selection_context(", evaluation)
+        self.assertNotIn("active_role_card()", evaluation)
+        self.assertNotIn("session_key=session_key(event)", evaluation)
+
+        scheduler_start = self.plugin_source.index(
+            "def schedule_remote_sticker_classifier_shadow("
+        )
+        scheduler_end = self.plugin_source.index(
+            "async def generate_chat_text_response(", scheduler_start
+        )
+        scheduler = self.plugin_source[scheduler_start:scheduler_end]
+        self.assertIn(
+            "resolved_sticker_scope = resolve_chat_sticker_scope(event)",
+            scheduler,
+        )
+        self.assertIn("resolved_scope=resolved_sticker_scope", scheduler)
+        self.assertIn("resolved_sticker_scope=resolved_sticker_scope", scheduler)
+        self.assertNotIn("persona_key=\"\"", scheduler)
+        self.assertNotIn("session_key=session_key(event)", scheduler)
 
 
 if __name__ == "__main__":

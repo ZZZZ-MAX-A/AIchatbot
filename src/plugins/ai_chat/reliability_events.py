@@ -50,6 +50,7 @@ COMPONENT_OPERATIONS: dict[str, frozenset[str]] = {
     "project_doc_rag": frozenset({"rebuild_index", "retrieve"}),
     "memory_rag": frozenset({"retrieve"}),
     "vision": frozenset({"infer"}),
+    "image_gen": frozenset({"generate", "edit"}),
     "tts": frozenset({"synthesize"}),
     "qq_adapter": frozenset({"send_message"}),
     "database": frozenset({"read", "write"}),

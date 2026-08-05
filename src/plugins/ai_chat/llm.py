@@ -10,6 +10,7 @@ from .role_cards import (
     load_active_role_card_prompt,
     load_role_card_prompt,
 )
+from .world_cards import load_world_card_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -149,21 +150,43 @@ async def ask_llm(
     *,
     extra_system_context: str = "",
     role_card_key: str = "",
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    max_retries: int | None = None,
+    completion_route: str = "auto",
+    reasoning_effort: str | None = None,
 ) -> str:
-    route = resolve_chat_completion_route(config, role_card_key)
+    if completion_route not in {"auto", "legacy"}:
+        raise ValueError("completion_route must be 'auto' or 'legacy'")
+    if reasoning_effort not in {None, "low", "high", "max"}:
+        raise ValueError("reasoning_effort must be low, high, max, or None")
+    route = resolve_chat_completion_route(
+        config,
+        "" if completion_route == "legacy" else role_card_key,
+    )
     if not route.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    if max_retries is not None and max_retries < 0:
+        raise ValueError("max_retries must not be negative")
 
-    client = AsyncOpenAI(
+    client_options = dict(
         api_key=route.api_key,
         base_url=route.base_url,
         timeout=route.timeout_seconds,
     )
+    if max_retries is not None:
+        client_options["max_retries"] = max_retries
+    client = AsyncOpenAI(**client_options)
 
     messages = [{"role": "system", "content": load_system_prompt()}]
     base_prompt = load_base_chat_prompt()
     if base_prompt:
         messages.append({"role": "system", "content": base_prompt})
+    world_prompt = load_world_card_prompt(role_card_key)
+    if world_prompt:
+        messages.append({"role": "system", "content": world_prompt})
     persona_prompt = load_persona_prompt(role_card_key)
     if role_card_key.strip() and not persona_prompt:
         raise RuntimeError(f"configured role card is unavailable: {role_card_key}")
@@ -174,11 +197,16 @@ async def ask_llm(
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
-    response = await client.chat.completions.create(
+    completion_options = dict(
         model=route.model,
         messages=messages,
-        temperature=config.ai_temperature,
+        temperature=config.ai_temperature if temperature is None else temperature,
     )
+    if max_tokens is not None:
+        completion_options["max_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        completion_options["reasoning_effort"] = reasoning_effort
+    response = await client.chat.completions.create(**completion_options)
     content = response.choices[0].message.content
     return content.strip() if content else ""
 

@@ -100,6 +100,63 @@ class MediaReliabilityTests(unittest.TestCase):
         self.assertNotIn("qq_adapter", repr(recorder.call_args))
         self.assertNotIn("send_message", repr(recorder.call_args))
 
+    def test_image_gen_observer_is_separate_from_vision_and_qq_delivery(self):
+        with patch.object(
+            self.media,
+            "record_result_safely",
+            return_value=True,
+        ) as recorder:
+            generated = self.media.observe_image_gen_safely(
+                operation="generate",
+                succeeded=True,
+            )
+
+        self.assertTrue(generated)
+        recorder.assert_called_once_with(
+            component="image_gen",
+            operation="generate",
+            code="operation_succeeded",
+            outcome=self.media.ReliabilityOutcome.SUCCEEDED,
+        )
+        self.assertNotIn("vision", repr(recorder.call_args))
+        self.assertNotIn("qq_adapter", repr(recorder.call_args))
+
+        with patch.object(
+            self.media,
+            "record_result_safely",
+            return_value=True,
+        ) as recorder:
+            edited = self.media.observe_image_gen_safely(
+                operation="edit",
+                succeeded=False,
+                error=RuntimeError("HTTP 403 forbidden"),
+            )
+
+        self.assertTrue(edited)
+        with patch.object(
+            self.media,
+            "record_result_safely",
+            return_value=True,
+        ) as qwen_recorder:
+            qwen_edited = self.media.observe_image_gen_safely(
+                operation="qwen_edit",
+                succeeded=True,
+            )
+            qwen_downloaded = self.media.observe_image_gen_safely(
+                operation="qwen_download",
+                succeeded=False,
+                error=TimeoutError("download timed out"),
+            )
+        self.assertTrue(qwen_edited)
+        self.assertTrue(qwen_downloaded)
+        self.assertEqual(qwen_recorder.call_count, 2)
+        recorder.assert_called_once_with(
+            component="image_gen",
+            operation="edit",
+            code="authorization_failed",
+            outcome=self.media.ReliabilityOutcome.FAILED,
+        )
+
     def test_observers_are_fail_open(self):
         with patch.object(
             self.media,

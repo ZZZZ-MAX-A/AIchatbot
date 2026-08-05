@@ -188,6 +188,28 @@ class AiChatConfig:
     chat_sticker_min_intent_confidence: float
     enable_private_chat: bool
     enable_group_chat: bool
+    enable_shared_scene_hub: bool
+    shared_scene_group_id: str = field(repr=False)
+    shared_scene_aike_bot_id: str = field(repr=False)
+    shared_scene_linyin_bot_id: str = field(repr=False)
+    scene_director_provider: str
+    scene_director_api_key: str = field(repr=False)
+    scene_director_base_url: str
+    scene_director_model: str
+    scene_director_timeout_seconds: int
+    scene_director_circuit_seconds: int
+    scene_max_context_events: int
+    scene_director_context_events: int
+    scene_max_reply_sentences: int
+    scene_max_reply_chars: int
+    scene_actor_max_tokens: int
+    scene_private_context_max_messages: int
+    scene_private_context_max_summaries: int
+    scene_private_context_max_gap_summaries: int
+    scene_private_context_max_manual_memories: int
+    scene_private_context_max_chars: int
+    scene_member_cache_seconds: int
+    scene_max_pending_turns: int
     max_context_messages: int
     enable_memory_compression: bool
     max_stored_messages_per_session: int
@@ -257,6 +279,33 @@ class AiChatConfig:
     vision_cloud_model: str = "qwen3.7-flash"
     aliyun_bailian_base_url: str = field(default="", repr=False)
     aliyun_bailian_api_key: str = field(default="", repr=False)
+    enable_linyin_tts: bool = False
+    linyin_tts_voice: str = field(default="", repr=False)
+    linyin_tts_emotion: str = field(default="", repr=False)
+    enable_image_gen: bool = False
+    image_gen_api_key: str = field(default="", repr=False)
+    image_gen_base_url: str = field(default="", repr=False)
+    image_gen_model: str = "grok-imagine-1.0"
+    image_edit_model: str = "grok-imagine-1.0-edit"
+    image_gen_timeout_seconds: int = 120
+    image_gen_max_prompt_chars: int = 1000
+    image_gen_max_input_bytes: int = 10_485_760
+    image_gen_max_output_bytes: int = 10_485_760
+    image_gen_pending_edit_seconds: int = 120
+    image_gen_cooldown_seconds: int = 30
+    image_gen_max_requests_per_hour: int = 10
+    enable_qwen_space_edit: bool = False
+    qwen_space_base_url: str = (
+        "https://prithivmlmods-qwen-image-edit-2511-loras-fast.hf.space"
+    )
+    qwen_space_hf_token: str = field(default="", repr=False)
+    qwen_space_submit_timeout_seconds: int = 60
+    qwen_space_infer_timeout_seconds: int = 180
+    qwen_space_download_timeout_seconds: int = 300
+    qwen_space_download_retries: int = 2
+    qwen_space_result_ttl_seconds: int = 1800
+    qwen_space_max_side: int = 1024
+    qwen_space_jpeg_quality: int = 90
 
 
 def load_config() -> AiChatConfig:
@@ -467,6 +516,64 @@ def load_config() -> AiChatConfig:
         ),
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
+        enable_shared_scene_hub=_bool_env("ENABLE_SHARED_SCENE_HUB", False),
+        shared_scene_group_id=os.getenv("SHARED_SCENE_GROUP_ID", "").strip(),
+        shared_scene_aike_bot_id=os.getenv(
+            "SHARED_SCENE_AIKE_BOT_ID", ""
+        ).strip(),
+        shared_scene_linyin_bot_id=os.getenv(
+            "SHARED_SCENE_LINYIN_BOT_ID", ""
+        ).strip(),
+        scene_director_provider=os.getenv(
+            "SCENE_DIRECTOR_PROVIDER", "qwen"
+        ).strip().lower(),
+        scene_director_api_key=os.getenv(
+            "SCENE_DIRECTOR_API_KEY", ""
+        ).strip(),
+        scene_director_base_url=os.getenv(
+            "SCENE_DIRECTOR_BASE_URL", ""
+        ).strip(),
+        scene_director_model=os.getenv("SCENE_DIRECTOR_MODEL", "").strip(),
+        scene_director_timeout_seconds=_security_int_env(
+            "SCENE_DIRECTOR_TIMEOUT_SECONDS", 15
+        ),
+        scene_director_circuit_seconds=_security_int_env(
+            "SCENE_DIRECTOR_CIRCUIT_SECONDS", 120
+        ),
+        scene_max_context_events=_security_int_env(
+            "SCENE_MAX_CONTEXT_EVENTS", 20
+        ),
+        scene_director_context_events=_security_int_env(
+            "SCENE_DIRECTOR_CONTEXT_EVENTS", 6
+        ),
+        scene_max_reply_sentences=_security_int_env(
+            "SCENE_MAX_REPLY_SENTENCES", 3
+        ),
+        scene_max_reply_chars=_security_int_env("SCENE_MAX_REPLY_CHARS", 160),
+        scene_actor_max_tokens=_security_int_env(
+            "SCENE_ACTOR_MAX_TOKENS", 256
+        ),
+        scene_private_context_max_messages=_security_int_env(
+            "SCENE_PRIVATE_CONTEXT_MAX_MESSAGES", 12
+        ),
+        scene_private_context_max_summaries=_security_int_env(
+            "SCENE_PRIVATE_CONTEXT_MAX_SUMMARIES", 2
+        ),
+        scene_private_context_max_gap_summaries=_security_int_env(
+            "SCENE_PRIVATE_CONTEXT_MAX_GAP_SUMMARIES", 1
+        ),
+        scene_private_context_max_manual_memories=_security_int_env(
+            "SCENE_PRIVATE_CONTEXT_MAX_MANUAL_MEMORIES", 8
+        ),
+        scene_private_context_max_chars=_security_int_env(
+            "SCENE_PRIVATE_CONTEXT_MAX_CHARS", 2400
+        ),
+        scene_member_cache_seconds=_security_int_env(
+            "SCENE_MEMBER_CACHE_SECONDS", 30
+        ),
+        scene_max_pending_turns=_security_int_env(
+            "SCENE_MAX_PENDING_TURNS", 1
+        ),
         max_context_messages=_int_env("MAX_CONTEXT_MESSAGES", 40),
         enable_memory_compression=_bool_env("ENABLE_MEMORY_COMPRESSION", True),
         max_stored_messages_per_session=_int_env("MAX_STORED_MESSAGES_PER_SESSION", 120),
@@ -509,7 +616,7 @@ def load_config() -> AiChatConfig:
         max_private_message_length=_int_env("MAX_PRIVATE_MESSAGE_LENGTH", 150),
         owner_max_private_message_length=_int_env(
             "OWNER_MAX_PRIVATE_MESSAGE_LENGTH",
-            220,
+            0,
         ),
         group_whitelist=_csv_env("GROUP_WHITELIST"),
         group_rate_limit_seconds=_int_env("GROUP_RATE_LIMIT_SECONDS", 5),
@@ -545,4 +652,68 @@ def load_config() -> AiChatConfig:
             "ALIYUN_BAILIAN_API_KEY",
             "",
         ).strip(),
+        enable_linyin_tts=_bool_env("ENABLE_LINYIN_TTS", False),
+        linyin_tts_voice=os.getenv("LINYIN_TTS_VOICE", "").strip(),
+        linyin_tts_emotion=os.getenv("LINYIN_TTS_EMOTION", "").strip(),
+        enable_image_gen=_bool_env("ENABLE_IMAGE_GEN", False),
+        image_gen_api_key=os.getenv(
+            "IMAGE_GEN_API_KEY",
+            os.getenv("PERSONA_LLM_API_KEY", ""),
+        ).strip(),
+        image_gen_base_url=os.getenv(
+            "IMAGE_GEN_BASE_URL",
+            os.getenv("PERSONA_LLM_BASE_URL", ""),
+        ).strip(),
+        image_gen_model=os.getenv(
+            "IMAGE_GEN_MODEL", "grok-imagine-1.0"
+        ).strip(),
+        image_edit_model=os.getenv(
+            "IMAGE_EDIT_MODEL", "grok-imagine-1.0-edit"
+        ).strip(),
+        image_gen_timeout_seconds=_security_int_env(
+            "IMAGE_GEN_TIMEOUT_SECONDS", 120
+        ),
+        image_gen_max_prompt_chars=_security_int_env(
+            "IMAGE_GEN_MAX_PROMPT_CHARS", 1000
+        ),
+        image_gen_max_input_bytes=_security_int_env(
+            "IMAGE_GEN_MAX_INPUT_BYTES", 10_485_760
+        ),
+        image_gen_max_output_bytes=_security_int_env(
+            "IMAGE_GEN_MAX_OUTPUT_BYTES", 10_485_760
+        ),
+        image_gen_pending_edit_seconds=_security_int_env(
+            "IMAGE_GEN_PENDING_EDIT_SECONDS", 120
+        ),
+        image_gen_cooldown_seconds=_security_int_env(
+            "IMAGE_GEN_COOLDOWN_SECONDS", 30
+        ),
+        image_gen_max_requests_per_hour=_security_int_env(
+            "IMAGE_GEN_MAX_REQUESTS_PER_HOUR", 10
+        ),
+        enable_qwen_space_edit=_bool_env("ENABLE_QWEN_SPACE_EDIT", False),
+        qwen_space_base_url=os.getenv(
+            "QWEN_SPACE_BASE_URL",
+            "https://prithivmlmods-qwen-image-edit-2511-loras-fast.hf.space",
+        ).strip(),
+        qwen_space_hf_token=os.getenv("QWEN_SPACE_HF_TOKEN", "").strip(),
+        qwen_space_submit_timeout_seconds=_security_int_env(
+            "QWEN_SPACE_SUBMIT_TIMEOUT_SECONDS", 60
+        ),
+        qwen_space_infer_timeout_seconds=_security_int_env(
+            "QWEN_SPACE_INFER_TIMEOUT_SECONDS", 180
+        ),
+        qwen_space_download_timeout_seconds=_security_int_env(
+            "QWEN_SPACE_DOWNLOAD_TIMEOUT_SECONDS", 300
+        ),
+        qwen_space_download_retries=_security_int_env(
+            "QWEN_SPACE_DOWNLOAD_RETRIES", 2
+        ),
+        qwen_space_result_ttl_seconds=_security_int_env(
+            "QWEN_SPACE_RESULT_TTL_SECONDS", 1800
+        ),
+        qwen_space_max_side=_security_int_env("QWEN_SPACE_MAX_SIDE", 1024),
+        qwen_space_jpeg_quality=_security_int_env(
+            "QWEN_SPACE_JPEG_QUALITY", 90
+        ),
     )

@@ -770,13 +770,43 @@ class VoicePureUnitTests(unittest.TestCase):
 
     def test_set_last_tts_candidate_ignores_empty_speakable_text(self):
         empty = self.voice.set_last_tts_candidate("(aside) [stage] *smile*")
-        candidate = self.voice.set_last_tts_candidate("hello", message_id="m1")
+        candidate = self.voice.set_last_tts_candidate(
+            "hello",
+            message_id="m1",
+            scope_key="persona:linyin:private:owner",
+        )
 
         self.assertIsNone(empty)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.speakable_text, "hello")
         self.assertEqual(candidate.message_id, "m1")
-        self.assertEqual(self.voice.get_last_tts_candidate(), candidate)
+        self.assertEqual(
+            self.voice.get_last_tts_candidate(
+                scope_key="persona:linyin:private:owner"
+            ),
+            candidate,
+        )
+
+    def test_last_tts_candidate_is_isolated_by_persona_session(self):
+        self.voice.set_last_tts_candidate(
+            "aike reply",
+            scope_key="private:owner",
+        )
+        linyin = self.voice.set_last_tts_candidate(
+            "linyin reply",
+            scope_key="persona:linyin:private:owner",
+        )
+
+        self.assertEqual(
+            self.voice.get_last_tts_candidate(scope_key="private:owner").raw_text,
+            "aike reply",
+        )
+        self.assertEqual(
+            self.voice.get_last_tts_candidate(
+                scope_key="persona:linyin:private:owner"
+            ),
+            linyin,
+        )
 
     def test_normalize_whitespace_trims_lines_and_drops_blanks(self):
         text = "  hello   world  \n\n\t next\tline  "
@@ -869,6 +899,62 @@ class VoicePureUnitTests(unittest.TestCase):
 
         self.assertEqual(result.duration_seconds, 1.25)
         observer.assert_called_once_with(succeeded=True)
+
+    def test_request_tts_allows_persona_voice_and_emotion_overrides(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "ok": True,
+                    "audio_path": str(audio_path),
+                    "duration_seconds": 1.25,
+                    "language": "zh",
+                    "segments": [],
+                }
+
+        class Client:
+            def __init__(self):
+                self.payload = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def post(self, url, json):
+                self.payload = json
+                return Response()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF-valid-audio")
+            client = Client()
+            adapted = self.voice.AdaptedSpeech(
+                text="你好",
+                segments=("你好",),
+                pauses_ms=(),
+            )
+            with (
+                patch.object(self.voice, "ensure_tts_service", AsyncMock()),
+                patch.object(self.voice.httpx, "AsyncClient", return_value=client),
+                patch.object(self.voice, "observe_tts_synthesis_safely"),
+            ):
+                asyncio.run(
+                    self.voice.request_tts(
+                        self.tts_config(),
+                        adapted,
+                        voice_id="zh_kelin_raw_20260625",
+                        emotion="affection",
+                        trim_trailing_noise=True,
+                    )
+                )
+
+        self.assertEqual(client.payload["voice_id"], "zh_kelin_raw_20260625")
+        self.assertEqual(client.payload["emotion"], "affection")
+        self.assertTrue(client.payload["trim_trailing_noise"])
 
     def test_request_tts_records_failure_when_generation_boundary_raises(self):
         adapted = self.voice.AdaptedSpeech(
