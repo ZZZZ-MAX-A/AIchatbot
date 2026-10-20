@@ -1,5 +1,5 @@
 param(
-    [string]$ModelDir = "D:\OllamaModels",
+    [string]$ModelDir = "",
     [string]$BaseUrl = "",
     [int]$TimeoutSec = 5,
     [int]$StartupWaitSec = 20,
@@ -8,6 +8,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ModelDir)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:OLLAMA_MODELS)) {
+        $ModelDir = $env:OLLAMA_MODELS
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $ModelDir = Join-Path $env:USERPROFILE ".ollama\models"
+    } else {
+        $ModelDir = "D:\OllamaModels"
+    }
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $dotEnvPath = Join-Path $repoRoot ".env"

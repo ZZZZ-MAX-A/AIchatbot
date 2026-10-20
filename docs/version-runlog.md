@@ -20,6 +20,16 @@
   docs/project-rag-usage.md 保留为本地 RAG / DevContextGraph / Codex 恢复上下文手册。
 ```
 
+## 2026-10-20 核心部署下载与必需向量模型
+
+按部署文档更新要求，新增 Windows 核心和 Owner Console 前端的独立下载脚本。核心通过 partial clone / sparse checkout 排除前端，复制环境变量样例，并必须下载或复用 Ollama `bge-m3`，通过一次 1024 维 CPU embedding 检查后才报告完成；其他模型权重不下载。
+
+根目录 `.env.example` 增加中文必填注释，默认开启 `ENABLE_MEMORY_RAG` 和 `MEMORY_RAG_INJECT_IN_CHAT`，关闭未配置的视觉功能；`CHAT_LLM_*` 默认保持注释以沿用 `OPENAI_*`。同步 `config/.env.example`，消除旧模板中重复 RAG 开关与过期字段的分歧。现有部署的私人 `.env` 不修改。
+
+部署入门文档补齐一行下载、必需/可选组件、配置样例、依赖安装、QQ 接入、初始空索引说明和独立前端运行步骤，并保留人格资料隐私说明及功能到文件的映射。命令明确指向本次审查分支，不声称 `main` 已包含新增脚本。Ollama 启动脚本优先采用 `OLLAMA_MODELS` 或用户默认模型目录；Python 安装脚本增加失败检查。
+
+验证：新增 10 项隔离安装测试、既有 5 项 Ollama 启动合同、14 项配置加载测试、22 项 RAG 单元测试全部通过，共 51 项。另检查 PowerShell 语法、模板键唯一性及一致性、更新文档链接和 Git 空白错误。安装测试使用临时 Git 仓库和模拟 Ollama，不下载真实模型、不重启现有服务；没有进行新部署的真实 QQ/API 验收。
+
 ## 2026-07-11 MainAgent external-read 安全设计
 
 状态：设计和前三刀本地合同已建立，未新增阶段编号；未启用任何真实联网工具。

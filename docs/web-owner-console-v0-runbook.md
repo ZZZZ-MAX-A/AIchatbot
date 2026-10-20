@@ -1,5 +1,7 @@
 # Web Owner Console v0 runbook
 
+核心精简下载不包含本前端。需要独立取得前端源码并连接核心 API 时，先按 [本地部署入门：独立前端](getting-started-local-deployment.md#31-单独下载前端) 操作；本文中的同目录构建命令适用于完整检出布局。
+
 本文记录 Web Owner Console 的本地使用手册和启动排障流程。它把 FastAPI 业务只读 HTTP adapter、Vite 前端、固定手动诊断例外、前端边界 guard 和后端 HTTP contract 测试串成一套日常开发验证步骤。
 
 当前 runbook 只覆盖 loopback 本地开发、只读查看和主人显式启用的固定手动诊断，不是公网部署手册。

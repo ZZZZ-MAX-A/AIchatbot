@@ -1,10 +1,20 @@
 param(
-    [string]$ModelDir = "D:\OllamaModels",
+    [string]$ModelDir = "",
     [switch]$KeepExisting,
     [switch]$PersistUserEnv
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ModelDir)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:OLLAMA_MODELS)) {
+        $ModelDir = $env:OLLAMA_MODELS
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $ModelDir = Join-Path $env:USERPROFILE ".ollama\models"
+    } else {
+        $ModelDir = "D:\OllamaModels"
+    }
+}
 
 $resolvedModelDir = (Resolve-Path -LiteralPath $ModelDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $resolvedModelDir "blobs"))) {

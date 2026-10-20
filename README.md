@@ -45,41 +45,38 @@ GitHub 仓库：
 - 群聊主动回复规则评分，默认关闭
 - 角色卡专属主动回复别名和触发词
 - 主人转告通知，固定模板私聊给主人
-- 本地 Ollama 视觉识图，图片只作为受限事实参考
+- 可选云端视觉识图，图片只作为受限事实参考
 - 私聊图片短等待合并追问，群聊图片短期缓存后由同一用户 @ 触发识别
 - `/状态` 查看机器人状态
 - `/记忆状态` 查看记忆数据库状态
 - `/权限帮助` 查看管理命令
 
-## 启动
+## 下载与启动
 
-首次安装依赖：
+Windows 核心部署需要 Git、Python 3.12+ 和 Ollama。核心一行下载会准备必需的 `bge-m3` 向量模型，默认启用普通聊天 MemoryRAG；不检出前端，不拉取其他模型权重。
 
 ```powershell
-cd D:\AIchatbot
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ZZZZ-MAX-A/AIchatbot/codex/docs-neutral-persona/scripts/install-core.ps1').Content)) -Ref 'codex/docs-neutral-persona'
+cd .\AIchatbot
+notepad .env
+# 填好 OPENAI_API_KEY，核对 OPENAI_BASE_URL / OPENAI_MODEL，填写 BOT_OWNER_QQ
 .\scripts\setup.ps1
-```
-
-启动 NoneBot2 后端：
-
-```powershell
-cd D:\AIchatbot
+.\scripts\rebuild-rag-index.ps1 -Memory
 .\scripts\start.ps1
 ```
 
-另开一个 PowerShell，启动 NapCatQQ：
+以上下载命令指向本次审查分支；合并后再同时切换脚本地址与 `-Ref` 到 `main`。已有目录不会被覆盖。完整配置见 [`.env.example`](.env.example)。
 
-```powershell
-cd D:\AIchatbot
-.\scripts\start-napcat-shell.ps1 2700318954
-```
+通过 QQ 使用时，单独安装并登录 NapCatQQ，将 OneBot v11 反向 WebSocket 配为 `ws://127.0.0.1:8080/onebot/v11/ws`；如启用 Token，须与 `.env` 一致。
+
+详细步骤、RAG 验证、**前端独立下载命令**、可选模型与功能到文件的对应表，见 [本地部署入门](docs/getting-started-local-deployment.md)。核心 Bot 无需 Node.js 或前端。
 
 ## 测试
 
 运行纯本地单元测试：
 
 ```powershell
-cd D:\AIchatbot
+# 在项目根目录执行
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
