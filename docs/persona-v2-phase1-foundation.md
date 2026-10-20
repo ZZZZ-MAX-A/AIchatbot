@@ -7,7 +7,7 @@ scope metadata without changing the production chat route.
 
 The following invariants are mandatory while Phase 1 is deployed:
 
-- Aike continues to load the existing globally active role card.
+- The default chat route continues to load the existing globally active role card.
 - Private and group chat keep the existing `session_key(event)` values.
 - Message persistence, formal summaries, gap-scene summaries, manual memory,
   MemoryRAG, image cache, sticker state, and TTS candidates keep their current
@@ -86,6 +86,8 @@ available:
 - an explicit decision on whether the second account starts without TTS and
   persistent memory (recommended).
 
-Phase 2 should route only the second account. Aike remains on the legacy path
-until the new account has passed isolation, ordering, failure, and rollback
-tests.
+Phase 2 should route only the second account. The default persona remains on
+the legacy path until the new account has passed isolation, ordering, failure,
+and rollback tests. The values shown in the two `LEGACY_*` settings are stable runtime
+identifiers for backward compatibility, not public persona names or card
+content.

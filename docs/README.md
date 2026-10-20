@@ -6,6 +6,7 @@
 
 | 目的 | 首选文档 | 说明 |
 |---|---|---|
+| 下载、部署和定位源码 | [getting-started-local-deployment.md](getting-started-local-deployment.md) | 项目下载、可选依赖、人格资料隐私和主要功能源码入口 |
 | 查看当前阶段 | [current-development-status.md](current-development-status.md) | 唯一权威快照：主人批准方向、完成度、待办优先级、授权边界和唯一下一步；带时间的运行态不替代实时核对 |
 | 查看实际完成记录 | [version-runlog.md](version-runlog.md) | 按日期记录实现、测试、live 验收和补丁；历史“当前/下一步”不是当前授权 |
 | 启动和维护 Bot | [runbook.md](runbook.md) | 环境、启动、诊断、维护和常见故障 |

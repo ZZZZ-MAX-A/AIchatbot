@@ -153,6 +153,7 @@ cd D:\AIchatbot
 
 ## 文档
 
+- [本地部署入门：下载、按需安装与源码导航](docs/getting-started-local-deployment.md)
 - [文档导航与命名规范](docs/README.md)
 - [版本运行日志](docs/version-runlog.md)
 - [运行维护手册](docs/runbook.md)

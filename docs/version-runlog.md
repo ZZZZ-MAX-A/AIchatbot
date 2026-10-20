@@ -289,7 +289,7 @@ owner_write_command executor 统一复用命令参数校验，缺 target/content
 owner_read_command 在只读路由前先识别写意图，避免“使用角色卡”等写请求被误判成查看角色卡。
 任务/审批边界文案更新为“不执行任意 shell、任意真实写文件或未注册数据库写入”，和已审批注册写工具的真实执行能力保持一致。
 修复角色卡列表枚举：`README.md` 和 `*.example.md` 这类说明/模板文件不再作为可选角色卡展示，也不能被 `/选择角色卡` 选中。
-本地验证当前 `prompts/persona-cards/` 只展示 `aike`、`moyan` 两张真实角色卡。
+本地验证当前 `prompts/persona-cards/` 有两张本地真实角色卡；卡片名称与正文不进入公开运行日志。
 QQ live 已验证：/agent 删除摘要 <ID> -> /agent 确认 最新 -> 当前会话摘要实际删除成功。
 ```
 
@@ -7023,19 +7023,19 @@ ChatRuntimeResult 新增可选 StickerIntent，并在 legacy/graph/semantic voic
 新增 /表情意图状态 主人私聊只读命令，仅显示 marker 状态、有限意图、置信度、本地决策原因、匹配数量和安全 sticker ID；不保存或显示用户原文、回复正文、路径、哈希或文件名。
 .env 已设置 ENABLE_CHAT_STICKER_INTENT_SHADOW=true 与 ENABLE_CHAT_STICKER_ATTACHMENTS=false，均唯一；普通聊天仍没有 MessageSegment.image 或 send_private_msg 接入。
 意图/config/选择定向 20 tests OK；全量回归 562 tests OK（skipped=2）；Python AST 143 files OK；pip check 和 git diff --check 通过。
-推荐 QQ shadow live：先普通事实问题后查 /表情意图状态，确认不建议/不匹配且无图片；再发“爱可卖个萌给我看看”后查状态，观察是否为 playful/medium/acting_cute 并 shadow 选中 aike_act_cute_001。两轮均不得发图。
+推荐 QQ shadow live：先普通事实问题后查 /表情意图状态，确认不建议/不匹配且无图片；再发一条明确表达卖萌意图的请求后查状态，观察是否为 playful/medium/acting_cute 并 shadow 选中 aike_act_cute_001。两轮均不得发图。
 Bot 于 21:33 重启，ai_chat 插件、8080 和 OneBot 重连正常，stderr 为空；shadow=true、attachments=false 均为唯一有效配置。
 
-主人首轮 QQ shadow 依次发送“爱可记得今天几号吗”和“爱可给我卖萌”。两次文本均正常回复且没有图片，但 `/表情意图状态` 都显示 `marker_absent / intent_absent`。21:41 与 21:57 日志确认消息进入同一普通聊天 matcher 且正常完成，stderr 为空。
+主人首轮 QQ shadow 依次发送普通日期问题和明确卖萌请求。两次文本均正常回复且没有图片，但 `/表情意图状态` 都显示 `marker_absent / intent_absent`。21:41 与 21:57 日志确认消息进入同一普通聊天 matcher 且正常完成，stderr 为空。
 使用完整正式 ChatAgent prompt 的无隐私最小探针复现 marker 缺失；简短独立 prompt 可以输出 marker，说明不是解析器、开关、QQ handler 或 DeepSeek 完全不支持该字符格式，而是完整系统/基础/角色组合下的输出合同不稳定。将 system 消息简单合并仍有缺失或错误标签，不能作为修复。
-当前 DeepSeek 接口 3/3 支持 `json_object`，但 `json_schema` 返回 HTTP 400，因此曾把 B1 改为同一次 LLM 调用的严格 JSON envelope。最小探针连续三次得到 requested，并不代表真实长会话稳定；22:34 左右主人连续发送“爱可给我卖萌”时，Bot 一直返回固定“没有组织好回答”兜底。该句来自结构解析后可见 reply 为空触发的本地兜底，不是角色卡正常回复。虽然之后用同一近期历史的独立 JSON 探针又能返回完整结构，但这进一步证明输出具有随机不稳定性，不能靠放宽校验修复。
+当前 DeepSeek 接口 3/3 支持 `json_object`，但 `json_schema` 返回 HTTP 400，因此曾把 B1 改为同一次 LLM 调用的严格 JSON envelope。最小探针连续三次得到 requested，并不代表真实长会话稳定；22:34 左右主人连续发送明确卖萌请求时，Bot 一直返回固定“没有组织好回答”兜底。该句来自结构解析后可见 reply 为空触发的本地兜底，不是角色卡正常回复。虽然之后用同一近期历史的独立 JSON 探针又能返回完整结构，但这进一步证明输出具有随机不稳定性，不能靠放宽校验修复。
 为恢复“聊天优先”，22:37 先把 `.env` 的 shadow 改为 false 并重启；随后从 ChatAgent 主链完整撤销 JSON response_format、system 合并和结构 envelope 解析，恢复普通文本 + 可选末尾 marker 的安全形态。marker 缺失只会丢弃表情建议，正文原样保留。使用同一近期历史的普通模式探针得到 275 字非 JSON、非固定兜底回复；回退后全量 `562 tests OK（skipped=2）`，git diff --check 通过。Bot 于 22:47 再次重启，shadow=false、attachments=false；普通聊天恢复尚待主人 QQ 复验。正式库、Agent #43 和 Tavily 状态未因该回退改变。
-主人随后确认 QQ 中“爱可给我卖萌”已恢复正常角色回复，并选择新增第二个 DeepSeek API Key 做解耦分类。新 Key 只保存在 `.env` 的 `STICKER_CLASSIFIER_API_KEY`，检查时仅确认非空，没有输出内容；Base URL 固定 `https://api.deepseek.com`，模型为 `deepseek-v4-flash`。新增 `sticker_classifier.py`、独立配置和正文发送后的 owner-private 异步调度；分类器不回退使用 ChatAgent Key，不读取历史/记忆/RAG/图片/文件，不写数据库，不重试，也不发送图片。假 transport 覆盖禁用、错误配置、输入预算、严格字段、额外 ID、超时和调用次数；源码审计确认 legacy 与 graph 两条文字路径都先 `matcher.send(result.reply)`，再调度分类。
+主人随后确认 QQ 中明确卖萌请求已恢复正常回复，并选择新增第二个 DeepSeek API Key 做解耦分类。新 Key 只保存在 `.env` 的 `STICKER_CLASSIFIER_API_KEY`，检查时仅确认非空，没有输出内容；Base URL 固定 `https://api.deepseek.com`，模型为 `deepseek-v4-flash`。新增 `sticker_classifier.py`、独立配置和正文发送后的 owner-private 异步调度；分类器不回退使用 ChatAgent Key，不读取历史/记忆/RAG/图片/文件，不写数据库，不重试，也不发送图片。假 transport 覆盖禁用、错误配置、输入预算、严格字段、额外 ID、超时和调用次数；源码审计确认 legacy 与 graph 两条文字路径都先 `matcher.send(result.reply)`，再调度分类。
 独立 Key 手动探针只返回安全有限结果：卖萌为 requested + `playful/medium/acting_cute` + 0.95，日期事实为 not_requested；没有经过 QQ、Tavily、MainAgent、RAG 或聊天存储。补充 401/403/429/500 安全类别与单次调用回归后，全量 `571 tests OK（skipped=2）`，Git 口径 Python AST 145 files OK，pip check 与 git diff --check 通过。Bot 于 23:42 在 remote classifier=false、旧 marker shadow=false、attachments=false 下重启；ai_chat 加载、8080 监听、OneBot 重连均正常，stderr 为空，Agent 最新任务仍为 #43。尚未授权 QQ shadow 或 B2 发送。
 主人随后明确要求打开新的远程 shadow。只把 `ENABLE_REMOTE_STICKER_CLASSIFIER` 改为 true；旧 `ENABLE_CHAT_STICKER_INTENT_SHADOW=false`、`ENABLE_CHAT_STICKER_ATTACHMENTS=false` 保持不变。Bot 于 23:57 重启，ai_chat、8080 与 OneBot 重连正常，stderr 为空。当前只允许主人私聊在正文成功发送后产生一次后台分类，不发送 GIF；等待日期事实和卖萌样本 QQ live。
-2026-07-14 00:02–00:03 主人完成两组 QQ live。样本 #1“今天是几月几号”先得到正常日期正文，远程分类为 not_requested，本地 intent_absent、0 匹配、无选中；样本 #2“爱可给我卖萌”先得到正常角色回复，远程分类为 requested + `playful/medium/acting_cute` + 0.95，本地精确匹配 1 项并影子选中 `aike_act_cute_001`。两次状态均明确自动附带关闭，没有 GIF。NoneBot 日志显示四个 matcher 正常完成，stderr 为空；正式库保持 schema 2、revision 3、enabled 1、disabled 1，Agent 最新任务和 Tavily/external-read 最新任务均仍为 #43，`sticker_classifier.py` 不含 MessageSegment.image、send_private_msg 或 commit_sent。C1 日期负样本与卖萌正样本主链通过；B2 真实自动发送仍需主人另行明确授权。
+2026-07-14 00:02–00:03 主人完成两组 QQ live。样本 #1“今天是几月几号”先得到正常日期正文，远程分类为 not_requested，本地 intent_absent、0 匹配、无选中；样本 #2 明确卖萌请求先得到正常回复，远程分类为 requested + `playful/medium/acting_cute` + 0.95，本地精确匹配 1 项并影子选中 `aike_act_cute_001`。两次状态均明确自动附带关闭，没有 GIF。NoneBot 日志显示四个 matcher 正常完成，stderr 为空；正式库保持 schema 2、revision 3、enabled 1、disabled 1，Agent 最新任务和 Tavily/external-read 最新任务均仍为 #43，`sticker_classifier.py` 不含 MessageSegment.image、send_private_msg 或 commit_sent。C1 日期负样本与卖萌正样本主链通过；B2 真实自动发送仍需主人另行明确授权。
 主人明确授权进入 B2。新增 `sticker_attachment.py`，通过注入单次 sender 复用 A4 发送前安全复核；`__init__.py` 只在正文成功发送、远程分类 requested、本地 selected、attachments=true、未熔断时调用一次 OneBot private image。失败不 retry、不替代，成功后才 commit 冷却/消息间隔/小时计数/shuffle-bag；发送成功但 commit 异常时熔断。全量 `576 tests OK（skipped=2）`，Git 口径 Python AST 147 files OK，pip check 和 git diff --check 通过。先在 attachments=false 下于 00:35 重启安全加载，再按授权设为 true 并于 00:36 重启，ai_chat、8080、OneBot 正常。
-主人 00:39 发送“爱可给我卖萌”，确认先收到正常文字、随后收到动态表情；00:40 状态显示 requested、`playful/medium/acting_cute`、0.95、selected、匹配 1、`aike_act_cute_001`、自动附带已发送。stderr 为空，Agent/Tavily 最新任务仍为 #43。主人随即表示不喜欢该表情并要求删除。核对 enabled 与最终短哈希后，调用现有原子撤销函数把 `aike_act_cute_001` 设为 disabled，library revision 从 3 升至 4；完整 loader 复核为 enabled 0、disabled 2、invalid 0。当前不会再自动发送该 GIF；文件按现有安全撤销合同保留作审计，未做不可逆磁盘删除。
+主人 00:39 发出明确卖萌请求，确认先收到正常文字、随后收到动态表情；00:40 状态显示 requested、`playful/medium/acting_cute`、0.95、selected、匹配 1、`aike_act_cute_001`、自动附带已发送。stderr 为空，Agent/Tavily 最新任务仍为 #43。主人随即表示不喜欢该表情并要求删除。核对 enabled 与最终短哈希后，调用现有原子撤销函数把 `aike_act_cute_001` 设为 disabled，library revision 从 3 升至 4；完整 loader 复核为 enabled 0、disabled 2、invalid 0。当前不会再自动发送该 GIF；文件按现有安全撤销合同保留作审计，未做不可逆磁盘删除。
 ```
 
 ## 后续整理规则
