@@ -392,7 +392,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
                 "select_persona",
                 context({"command": "select_persona", "target": "moyan"}),
             ),
-            "已选择角色卡：moyan，角色卡：莫言",
+            "当前账号使用固定绑定角色卡，不支持在聊天中切换；绑定变更请通过部署配置维护。",
         )
         self.assertEqual(
             self.owner_write_runtime.run_owner_write_command(
@@ -1471,7 +1471,7 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertIn("Agent 请求审批 #42", execution.result.response_text)
 
-    def test_semantic_select_persona_requires_approval_and_keeps_target(self):
+    def test_semantic_select_persona_is_blocked_before_approval(self):
         calls = []
         approvals = []
 
@@ -1511,31 +1511,10 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(execution.result.error, "approval_required")
-        self.assertEqual(execution.result.requested_tool, "owner_write_command")
-        self.assertEqual(execution.result.policy_decision, "require_approval")
+        self.assertEqual(execution.result.error, "")
+        self.assertIn("固定绑定角色卡", execution.result.response_text)
         self.assertEqual(calls, [])
-        self.assertEqual(
-            execution.result.metadata["tool_arguments"],
-            {
-                "command": "select_persona",
-                "query": "帮我选择角色卡 moyan",
-                "target": "moyan",
-            },
-        )
-        self.assertEqual(
-            approvals,
-            [
-                (
-                    "owner_write_command",
-                    "select_persona",
-                    "moyan",
-                    "write_local",
-                    "local writes require approval",
-                )
-            ],
-        )
-        self.assertIn("Agent 请求审批 #43", execution.result.response_text)
+        self.assertEqual(approvals, [])
 
     def test_semantic_add_memory_requires_approval_and_keeps_content(self):
         calls = []
@@ -1792,8 +1771,8 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
             render_mode="concise",
         )
         cases = {
-            "帮我选择角色卡": "角色卡 key",
-            "帮我使用角色卡": "角色卡 key",
+            "帮我选择角色卡": "固定绑定角色卡",
+            "帮我使用角色卡": "固定绑定角色卡",
             "帮我添加事实记忆": "事实记忆需要明确的记忆内容",
             "帮我添加偏好记忆": "偏好记忆需要明确的记忆内容",
             "帮我加入群白名单": "需要明确的数字 target",
@@ -1981,47 +1960,15 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertIn("Agent 请求审批 #47", execution.result.response_text)
 
-    def test_owner_write_executor_passes_full_arguments_to_resume_tool(self):
+    def test_owner_write_executor_rejects_selector_before_execution(self):
         calls = []
-
-        async def retrieve_dev_context(_query, _is_owner):
-            return "dev context"
-
-        def execute_owner_write_command(command, context):
-            calls.append((command, dict(context.metadata["tool_arguments"])))
-            return "已选择角色卡：moyan，墨言"
-
+        async def retrieve_dev_context(*args): return "unused"
         registry = self.main_agent_bridge.create_read_only_main_agent_tool_registry(
-            retrieve_dev_context,
-            execute_owner_write_command=execute_owner_write_command,
-        )
-
-        result = asyncio.run(
-            registry.execute(
-                "owner_write_command",
-                {
-                    "command": "select_persona",
-                    "query": "帮我选择角色卡 moyan",
-                    "target": "moyan",
-                },
-                self.tool_registry.ToolContext(is_owner=True),
-            )
-        )
-
-        self.assertEqual(result.text, "已选择角色卡：moyan，墨言")
-        self.assertEqual(
-            calls,
-            [
-                (
-                    "select_persona",
-                    {
-                        "command": "select_persona",
-                        "query": "帮我选择角色卡 moyan",
-                        "target": "moyan",
-                    },
-                )
-            ],
-        )
+            retrieve_dev_context, execute_owner_write_command=lambda *args: calls.append(args))
+        with self.assertRaises(RuntimeError):
+            asyncio.run(registry.execute("owner_write_command", {"command": "select_persona", "target": "linyin"},
+                                        self.tool_registry.ToolContext(is_owner=True)))
+        self.assertEqual(calls, [])
 
     def test_llm_document_artifact_requires_approval_and_keeps_content(self):
         calls = []
@@ -2390,11 +2337,11 @@ class MainAgentReadOnlyBridgeTests(unittest.TestCase):
         )
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我选择角色卡 moyan"),
-            "select_persona",
+            "",
         )
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我使用角色卡 moyan"),
-            "select_persona",
+            "",
         )
         self.assertEqual(
             self.main_agent_bridge.classify_owner_write_command("帮我添加事实记忆 主人喜欢先看结论"),

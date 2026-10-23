@@ -15,6 +15,7 @@ if str(AI_CHAT_ROOT) not in sys.path:
     sys.path.insert(0, str(AI_CHAT_ROOT))
 
 from failure_diagnostics import format_failure_inspection, inspect_failure_lines  # noqa: E402
+from check_configuration import load_configuration_modules  # noqa: E402
 
 
 DEFAULT_LOGS = (
@@ -40,30 +41,6 @@ def read_log_tail(path: Path, *, limit: int = MAX_LINES_PER_LOG) -> list[str]:
         else:
             output.append(f"{fallback_timestamp} source={path.name} {line}")
     return output
-
-
-def read_env_flags(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
-
-
-def configured(values: dict[str, str], key: str) -> bool:
-    return bool(values.get(key, "").strip())
-
-
-def enabled(values: dict[str, str], key: str, *, default: bool = False) -> bool:
-    value = values.get(key)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def tcp_reachable(host: str, port: int) -> bool:
@@ -94,29 +71,41 @@ def database_readable(path: Path) -> bool:
 
 def build_local_state_report() -> str:
     env_path = PROJECT_ROOT / ".env"
-    values = read_env_flags(env_path)
     issues: list[str] = []
     config_lines = [f".env：{'存在' if env_path.is_file() else '缺失'}。"]
     if not env_path.is_file():
         issues.append("配置文件缺失")
 
-    chat_ready = configured(values, "OPENAI_API_KEY") and configured(values, "OPENAI_MODEL")
+    config_module, reports = load_configuration_modules()
+    try:
+        config = config_module.load_config()
+        evidence = reports.build_configuration_report(config)
+    except config_module.ConfigValidationError as exc:
+        return "\n".join([
+            "本地状态巡检：需要关注", "配置校验失败：",
+            *(f"- {item.key}: {item.message}" for item in exc.issues),
+            "配置无效，未执行端口或数据库检查。",
+        ])
+    for item in evidence["issues"]:
+        config_lines.append(f"配置提示：{item['key']}：{item['message']}。")
+    chat_ready = evidence["default_chat"]["configured"]
     config_lines.append(f"聊天模型必填项：{'已配置' if chat_ready else '不完整'}。")
     if not chat_ready:
         issues.append("聊天模型配置不完整")
 
-    if enabled(values, "ENABLE_MAIN_AGENT"):
-        main_ready = configured(values, "MAIN_LLM_API_KEY") and configured(values, "MAIN_LLM_MODEL")
+    if evidence["main_agent"]["llm_enabled"]:
+        main_ready = evidence["main_agent"]["configured"]
         config_lines.append(f"MainAgent 模型必填项：{'已配置' if main_ready else '不完整'}。")
         if not main_ready:
             issues.append("MainAgent 模型配置不完整")
     else:
         config_lines.append("MainAgent：按配置关闭或未显式开启。")
 
-    bot_port_ok = tcp_reachable("127.0.0.1", 8080)
+    bot_port = evidence["nonebot_port"]
+    bot_port_ok = tcp_reachable("127.0.0.1", bot_port)
     database_ok = database_readable(PROJECT_ROOT / "data" / "chatbot.db")
     runtime_lines = [
-        f"NoneBot 端口 8080：{'可达' if bot_port_ok else '不可达'}。",
+        f"NoneBot 配置端口 {bot_port}：{'可达' if bot_port_ok else '不可达'}。",
         f"SQLite 只读检查：{'通过' if database_ok else '失败'}。",
         f"虚拟环境：{'存在' if (PROJECT_ROOT / '.venv' / 'Scripts' / 'python.exe').is_file() else '缺失'}。",
     ]
@@ -125,13 +114,21 @@ def build_local_state_report() -> str:
     if not database_ok:
         issues.append("SQLite 只读检查失败")
 
-    if enabled(values, "ENABLE_VISION"):
-        ollama_ok = tcp_reachable("127.0.0.1", 11434)
-        runtime_lines.append(f"Ollama 端口 11434：{'可达' if ollama_ok else '不可达'}。")
-        if not ollama_ok:
-            issues.append("视觉已开启但 Ollama 不可达")
-    else:
-        runtime_lines.append("视觉：按配置关闭，不检查 Ollama。")
+    for purpose, url in reports.local_ollama_dependencies(config):
+        endpoint = reports.loopback_endpoint(url)
+        if endpoint is None:
+            runtime_lines.append(f"Ollama 依赖 {purpose}：非本机或地址无效，未连接。")
+            continue
+        dependency_ok = tcp_reachable(*endpoint)
+        runtime_lines.append(f"Ollama 依赖 {purpose}：{'可达' if dependency_ok else '不可达'}。")
+        if not dependency_ok:
+            issues.append(f"Ollama 依赖 {purpose} 不可达")
+    if evidence["vision"]["enabled"]:
+        runtime_lines.append(f"视觉提供方：{evidence['vision']['provider']}；未执行远程探针。")
+        if not evidence["vision"]["configured"]:
+            issues.append("视觉配置不完整")
+    if not evidence["ollama_required"]:
+        runtime_lines.append("没有启用依赖 Ollama 的能力，不检查 Ollama。")
 
     status = "需要关注" if issues else "正常"
     lines = [f"本地状态巡检：{status}", "配置状态：", *config_lines, "", "核心服务：", *runtime_lines]

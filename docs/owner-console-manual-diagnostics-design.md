@@ -170,7 +170,7 @@ POST Cookie 必须与服务启动时生成的随机动作 session 一致。
 
 ## 8. 启用合同
 
-普通启动继续关闭所有手动动作。只有显式运行：
+普通启动默认注册所有已实现的固定手动诊断动作。页面仍不会自动执行任何诊断；每个动作继续要求主人在页面二次确认，并保留同源 Cookie、固定动作请求头和固定 confirmation 校验。只有显式运行：
 
 ```powershell
 .\scripts\start-owner-console.ps1 -EnableProjectDocRagProbe
@@ -191,7 +191,7 @@ OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED=true
 POST 固定返回 403。
 ```
 
-P2.49b 另有独立 `-EnableMemoryRagConsistencyProbe` 开关。两个开关可同时注册到页面，但运行时共享单动作锁，任何时刻只允许执行一个工作流。Main LLM、TTS 和视觉仍没有启用开关或 POST 路由。
+既有 `-Enable...Probe` 参数保留兼容已有启动命令，但不再决定是否注册动作。所有已实现工作流在普通启动时均注册到页面；运行时继续共享单动作锁，任何时刻只允许执行一个工作流。
 
 ## 9. 运行状态
 
@@ -2109,7 +2109,7 @@ vision_unexpected_probe_failure
 OWNER_CONSOLE_VISION_INFERENCE_ENABLED=true
 ```
 
-普通启动不显示面板、不访问 `/api/tags`、`/api/ps` 或 `/api/chat`，也不检查/启动 Ollama。已实现固定动作合同：
+普通启动默认显示该手动诊断面板，但不访问 `/api/tags`、`/api/ps` 或 `/api/chat`，也不检查/启动 Ollama。只有主人完成页面二次确认后才会执行已实现的固定动作合同：
 
 ```text
 POST /api/v1/owner-console/manual-diagnostics/vision-inference

@@ -89,7 +89,7 @@ class StickerSelectionTests(unittest.TestCase):
 
     def conversation_scope(self, **overrides):
         values = {
-            "bot_self_id": "2700318954",
+            "bot_self_id": "2000000001",
             "persona_id": "aike",
             "role_card_key": "aike",
             "chat_type": "private",
@@ -143,6 +143,59 @@ class StickerSelectionTests(unittest.TestCase):
         self.assertEqual(decision.selected_sticker_id, "match")
         self.assertEqual(decision.eligible_count, 1)
 
+    def test_available_combinations_exclude_disabled_other_persona_and_other_scope(self):
+        library = self.library((self.asset('active'), self.asset('disabled', enabled=False),
+                                self.asset('other', persona_key='linyin'), self.asset('group', scope='group')))
+        self.assertEqual(self.module.available_sticker_combinations(library, 'aike'),
+                         (("playful", "medium", "acting_cute"),))
+        self.assertEqual(self.module.available_sticker_combinations(self.library((), issues=('invalid',)), 'aike'), ())
+
+    def test_concurrent_sessions_do_not_change_each_others_shuffle_commit(self):
+        runtime = self.module.StickerSelectionRuntime(rng=random.Random(1))
+        library = self.library((self.asset('one'), self.asset('two')))
+        a, b = self.context(session_key='account-a'), self.context(session_key='account-b')
+        first = runtime.decide(library, self.intent(), a, self.policy())
+        second = runtime.decide(library, self.intent(), b, self.policy())
+        runtime.commit_sent(first, a)
+        runtime.commit_sent(second, b)
+        self.assertEqual(runtime.preflight(a, self.policy()).reason, 'cooldown')
+        self.assertEqual(runtime.preflight(b, self.policy()).reason, 'cooldown')
+
+    def test_shared_asset_is_selectable_by_both_personas_with_independent_bags(self):
+        runtime = self.module.StickerSelectionRuntime(rng=random.Random(1))
+        library = self.library((self.asset('shared_one', persona_key='shared'),
+                                self.asset('aike_only'),
+                                self.asset('linyin_only', persona_key='linyin')))
+        a = self.context(session_key='aike:owner')
+        b = self.context(session_key='linyin:owner', persona_key='linyin')
+        first = runtime.decide(library, self.intent(), a, self.policy())
+        runtime.commit_sent(first, a)
+        second = runtime.decide(library, self.intent(), b, self.policy())
+        self.assertEqual(first.eligible_count, 2)
+        self.assertEqual(second.eligible_count, 2)
+        self.assertNotEqual(second.selected_sticker_id, 'aike_only')
+        runtime.commit_sent(second, b)
+        self.assertEqual(runtime.preflight(a, self.policy()).reason, 'cooldown')
+        self.assertEqual(runtime.preflight(b, self.policy()).reason, 'cooldown')
+
+    def test_combination_list_and_selection_use_same_shared_audience(self):
+        library = self.library((self.asset('shared', persona_key='shared', moods=('happy',),
+                                          intensity='soft', usage_tags=('greeting',)),
+                                self.asset('aike_only'), self.asset('disabled', persona_key='shared', enabled=False)))
+        for persona in ['aike', 'linyin']:
+            combos = self.module.available_sticker_combinations(library, persona)
+            self.assertIn(('happy', 'soft', 'greeting'), combos)
+            decision = self.module.StickerSelectionRuntime().decide(
+                library, self.intent(mood='happy', intensity='soft', scene='greeting'),
+                self.context(persona_key=persona), self.policy())
+            self.assertEqual(decision.selected_sticker_id, 'shared')
+        for persona in ['', 'shared', 'unknown']:
+            self.assertEqual(self.module.available_sticker_combinations(library, persona), ())
+            decision = self.module.StickerSelectionRuntime().decide(
+                library, self.intent(mood='happy', intensity='soft', scene='greeting'),
+                self.context(persona_key=persona), self.policy())
+            self.assertFalse(decision.selected)
+
     def test_default_disabled_scope_low_confidence_and_empty_reply_fail_closed(self):
         library = self.library((self.asset("match"),))
         cases = (
@@ -174,7 +227,7 @@ class StickerSelectionTests(unittest.TestCase):
         )
         linyin = self.module.resolve_sticker_selection_scope(
             self.conversation_scope(
-                bot_self_id="2993614760",
+                bot_self_id="3000000001",
                 persona_id="linyin",
                 role_card_key="linyin",
                 runtime_session_key="persona:linyin:private:owner",
@@ -197,7 +250,7 @@ class StickerSelectionTests(unittest.TestCase):
     def test_requested_but_invalid_persona_scope_never_falls_back_to_aike(self):
         invalid = self.module.resolve_sticker_selection_scope(
             self.conversation_scope(
-                bot_self_id="2993614760",
+                bot_self_id="3000000001",
                 persona_id="linyin",
                 role_card_key="linyin",
                 binding_source="binding",
@@ -208,7 +261,7 @@ class StickerSelectionTests(unittest.TestCase):
             legacy_persona_key="aike",
         )
 
-        self.assertEqual(invalid.session_key, "private:owner")
+        self.assertEqual(invalid.session_key, "")
         self.assertEqual(invalid.persona_key, "")
         decision = self.module.StickerSelectionRuntime().decide(
             self.library((self.asset("aike_only"),)),
@@ -220,7 +273,7 @@ class StickerSelectionTests(unittest.TestCase):
             self.policy(),
         )
         self.assertFalse(decision.selected)
-        self.assertEqual(decision.reason, "persona_unavailable")
+        self.assertEqual(decision.reason, "reply_unavailable")
 
     def test_aike_assets_and_frequency_state_do_not_cross_into_linyin(self):
         runtime = self.module.StickerSelectionRuntime(rng=random.Random(11))

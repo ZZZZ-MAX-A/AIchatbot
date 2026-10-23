@@ -97,6 +97,15 @@ class LocalTimeTests(unittest.TestCase):
                 clock=lambda: datetime(2026, 7, 12, 10, 30),
             )
 
+    def test_resolution_reuses_the_chat_clock_snapshot(self):
+        snapshot = self.local_time.build_local_time_snapshot(clock=self.fixed_shanghai_time)
+        resolution = self.local_time.resolve_local_time_request('今天星期几', snapshot=snapshot)
+        self.assertIs(resolution.snapshot, snapshot)
+        with self.assertRaisesRegex(ValueError, 'either'):
+            self.local_time.resolve_local_time_request('今天星期几', snapshot=snapshot, clock=self.fixed_shanghai_time)
+        with self.assertRaisesRegex(ValueError, 'unsupported'):
+            self.local_time.resolve_local_time_request('今天星期几', snapshot=snapshot, timezone_name='UTC')
+
     def test_trusted_context_drives_chat_agent_and_valid_reply_keeps_persona(self):
         cases = (
             ("今天星期几", "今天是星期日呀，想稍微休息一下吗？", True),

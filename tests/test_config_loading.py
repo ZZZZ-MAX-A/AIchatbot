@@ -18,11 +18,59 @@ class ConfigLoadingTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             return self.config_module.load_config()
 
+    def test_aike_reasoning_effort_is_validated_without_exposing_invalid_value(self):
+        for value in ("low", "high", "max"):
+            with self.subTest(value=value):
+                config = self.load_with_env({"AIKE_LLM_REASONING_EFFORT": value})
+                self.assertEqual(config.aike_llm_reasoning_effort, value)
+        with self.assertRaises(self.config_module.ConfigValidationError) as caught:
+            self.load_with_env({"AIKE_LLM_REASONING_EFFORT": "SECRET-TYPO"})
+        self.assertIn("AIKE_LLM_REASONING_EFFORT", str(caught.exception))
+        self.assertNotIn("SECRET-TYPO", str(caught.exception))
+
+    def test_deepseek_vision_inherits_aike_connection_and_keeps_persona_chat(self):
+        config = self.load_with_env({
+            "AIKE_LLM_API_KEY": "TEST-DS-KEY", "AIKE_LLM_BASE_URL": "https://api.deepseek.com",
+            "AIKE_LLM_MODEL": "deepseek-flash", "AIKE_LLM_REASONING_EFFORT": "low",
+            "PERSONA_LLM_API_KEY": "TEST-GROK-KEY", "PERSONA_LLM_BASE_URL": "https://grok.example/v1",
+            "PERSONA_LLM_MODEL": "grok-4.6", "PERSONA_VISION_MODEL": "deepseek-flash",
+        })
+        self.assertEqual(config.persona_vision_api_key, "TEST-DS-KEY")
+        self.assertEqual(config.persona_vision_base_url, "https://api.deepseek.com")
+        self.assertEqual(config.persona_vision_model, "deepseek-flash")
+        self.assertEqual(config.persona_vision_max_tokens, 4096)
+        self.assertEqual(config.persona_vision_reasoning_effort, "high")
+        self.assertEqual(config.aike_llm_reasoning_effort, "low")
+        self.assertEqual(config.persona_llm_model, "grok-4.6")
+        self.assertEqual(config.persona_llm_api_key, "TEST-GROK-KEY")
+
+    def test_deepseek_vision_explicit_blank_and_independent_override_are_preserved(self):
+        common = {"AIKE_LLM_API_KEY": "TEST-DS-KEY", "PERSONA_LLM_API_KEY": "TEST-GROK-KEY",
+                  "PERSONA_VISION_MODEL": "deepseek-flash"}
+        blank = self.load_with_env({**common, "PERSONA_VISION_API_KEY": "", "PERSONA_VISION_BASE_URL": ""})
+        self.assertEqual(blank.persona_vision_api_key, "")
+        self.assertEqual(blank.persona_vision_base_url, "")
+        override = self.load_with_env({**common, "PERSONA_VISION_API_KEY": "TEST-OTHER-DS-KEY",
+            "PERSONA_VISION_BASE_URL": "https://ds.example/v1", "PERSONA_VISION_MAX_TOKENS": "8192",
+            "PERSONA_VISION_REASONING_EFFORT": "high"})
+        self.assertEqual(override.persona_vision_api_key, "TEST-OTHER-DS-KEY")
+        self.assertEqual(override.persona_vision_base_url, "https://ds.example/v1")
+        self.assertEqual(override.persona_vision_max_tokens, 8192)
+        self.assertEqual(override.persona_vision_reasoning_effort, "high")
+
+    def test_grok_vision_defaults_keep_existing_budget_and_connection(self):
+        config = self.load_with_env({"PERSONA_LLM_API_KEY": "TEST-GROK-KEY",
+            "PERSONA_LLM_BASE_URL": "https://grok.example/v1", "PERSONA_VISION_MODEL": "grok-4.6"})
+        self.assertEqual(config.persona_vision_api_key, "TEST-GROK-KEY")
+        self.assertEqual(config.persona_vision_base_url, "https://grok.example/v1")
+        self.assertEqual(config.persona_vision_max_tokens, 400)
+
     def test_defaults_keep_main_agent_disabled_and_chat_model_on_legacy_provider(self):
         config = self.load_with_env({})
 
         self.assertFalse(config.enable_main_agent)
         self.assertEqual(config.bot_timezone, "Asia/Shanghai")
+        self.assertEqual(config.aike_llm_reasoning_effort, "high")
         self.assertFalse(config.main_agent_use_llm)
         self.assertTrue(config.main_agent_owner_only)
         self.assertFalse(config.main_agent_allow_group)
@@ -65,22 +113,33 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.main_llm_model, "gpt-4.1-mini")
         self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
         self.assertEqual(config.chat_llm_model, "deepseek-v4-flash")
-        self.assertEqual(config.chat_llm_timeout_seconds, config.ai_timeout_seconds)
+        self.assertEqual(config.chat_llm_timeout_seconds, 60)
+        self.assertTrue(config.enable_unknown_slang_tool)
+        self.assertEqual(config.summary_llm_api_key, "")
+        self.assertEqual(config.summary_llm_base_url, "https://api.deepseek.com")
+        self.assertEqual(config.summary_llm_model, "deepseek-v4-flash")
+        self.assertEqual(config.summary_llm_timeout_seconds, 60)
         self.assertFalse(config.enable_persona_llm_routing)
         self.assertEqual(config.persona_llm_role_card_keys, frozenset())
+        self.assertEqual(config.persona_llm_provider, "openai")
         self.assertEqual(config.persona_llm_api_key, "")
         self.assertEqual(config.persona_llm_base_url, "")
         self.assertEqual(config.persona_llm_model, "")
         self.assertEqual(
             config.persona_llm_timeout_seconds,
-            config.ai_timeout_seconds,
+            60,
         )
+        self.assertEqual(config.persona_llm_num_ctx, 4096)
+        self.assertEqual(config.persona_llm_max_tokens, 640)
+        self.assertEqual(config.persona_llm_keep_alive_seconds, 0)
         self.assertFalse(config.enable_persona_vision_routing)
         self.assertEqual(config.persona_vision_role_card_keys, frozenset())
+        self.assertEqual(config.persona_vision_api_key, "")
+        self.assertEqual(config.persona_vision_base_url, "")
         self.assertEqual(config.persona_vision_model, "")
         self.assertEqual(
             config.persona_vision_timeout_seconds,
-            config.ai_timeout_seconds,
+            60,
         )
         self.assertEqual(
             config.persona_vision_private_image_wait_seconds,
@@ -103,8 +162,8 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertFalse(config.enable_image_gen)
         self.assertEqual(config.image_gen_api_key, "")
         self.assertEqual(config.image_gen_base_url, "")
-        self.assertEqual(config.image_gen_model, "grok-imagine-1.0")
-        self.assertEqual(config.image_edit_model, "grok-imagine-1.0-edit")
+        self.assertEqual(config.image_gen_model, "grok-imagine-image-quality")
+        self.assertEqual(config.image_edit_model, "grok-imagine-image-quality")
         self.assertEqual(config.image_gen_timeout_seconds, 120)
         self.assertEqual(config.image_gen_max_prompt_chars, 1000)
         self.assertEqual(config.image_gen_max_input_bytes, 10_485_760)
@@ -178,20 +237,29 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.tts_max_chars, 260)
         self.assertEqual(config.tts_max_total_seconds, 60)
 
-    def test_chat_llm_falls_back_to_legacy_openai_compatible_settings(self):
+    def test_aike_llm_configuration_is_independent_from_chat_llm(self):
         config = self.load_with_env(
             {
-                "OPENAI_API_KEY": "legacy-key",
-                "OPENAI_BASE_URL": "https://legacy.example/v1",
-                "OPENAI_MODEL": "legacy-chat",
-                "AI_TIMEOUT_SECONDS": "33",
+                "AIKE_LLM_API_KEY": "aike-key",
+                "AIKE_LLM_BASE_URL": "https://aike.example/v1",
+                "AIKE_LLM_MODEL": "aike-chat",
+                "AIKE_LLM_TIMEOUT_SECONDS": "33",
             }
         )
 
-        self.assertEqual(config.chat_llm_api_key, "legacy-key")
-        self.assertEqual(config.chat_llm_base_url, "https://legacy.example/v1")
-        self.assertEqual(config.chat_llm_model, "legacy-chat")
-        self.assertEqual(config.chat_llm_timeout_seconds, 33)
+        self.assertEqual(config.aike_llm_api_key, "aike-key")
+        self.assertEqual(config.aike_llm_base_url, "https://aike.example/v1")
+        self.assertEqual(config.aike_llm_model, "aike-chat")
+        self.assertEqual(config.aike_llm_timeout_seconds, 33)
+        self.assertEqual(config.chat_llm_api_key, "")
+        self.assertEqual(config.chat_llm_base_url, "https://api.deepseek.com")
+        self.assertEqual(config.chat_llm_model, "deepseek-v4-flash")
+        self.assertEqual(config.chat_llm_timeout_seconds, 60)
+
+    def test_unknown_slang_tool_can_be_disabled(self):
+        config = self.load_with_env({"ENABLE_UNKNOWN_SLANG_TOOL": "false"})
+
+        self.assertFalse(config.enable_unknown_slang_tool)
 
     def test_owner_private_message_limit_can_be_reenabled_explicitly(self):
         config = self.load_with_env({"OWNER_MAX_PRIVATE_MESSAGE_LENGTH": "500"})
@@ -253,17 +321,41 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertNotIn("main-key", config_repr)
         self.assertNotIn("chat-key", config_repr)
 
+    def test_summary_llm_is_independent_from_chat_llm_credentials(self):
+        config = self.load_with_env(
+            {
+                "AIKE_LLM_API_KEY": "aike-key",
+                "CHAT_LLM_API_KEY": "chat-key",
+                "SUMMARY_LLM_API_KEY": "summary-key",
+                "SUMMARY_LLM_BASE_URL": "https://summary.example/v1",
+                "SUMMARY_LLM_MODEL": "summary-model",
+                "SUMMARY_LLM_TIMEOUT_SECONDS": "33",
+            }
+        )
+
+        self.assertEqual(config.summary_llm_api_key, "summary-key")
+        self.assertEqual(config.summary_llm_base_url, "https://summary.example/v1")
+        self.assertEqual(config.summary_llm_model, "summary-model")
+        self.assertEqual(config.summary_llm_timeout_seconds, 33)
+        self.assertNotIn("summary-key", repr(config))
+
     def test_persona_llm_route_is_explicit_and_keeps_secret_out_of_repr(self):
         config = self.load_with_env(
             {
                 "ENABLE_PERSONA_LLM_ROUTING": "true",
                 "PERSONA_LLM_ROLE_CARD_KEYS": "linyin",
+                "PERSONA_LLM_PROVIDER": "ollama",
                 "PERSONA_LLM_API_KEY": "persona-secret",
-                "PERSONA_LLM_BASE_URL": "https://persona.example/v1",
+                "PERSONA_LLM_BASE_URL": "http://127.0.0.1:11434",
                 "PERSONA_LLM_MODEL": "persona-model",
                 "PERSONA_LLM_TIMEOUT_SECONDS": "75",
+                "PERSONA_LLM_NUM_CTX": "4096",
+                "PERSONA_LLM_MAX_TOKENS": "640",
+                "PERSONA_LLM_KEEP_ALIVE_SECONDS": "0",
                 "ENABLE_PERSONA_VISION_ROUTING": "true",
                 "PERSONA_VISION_ROLE_CARD_KEYS": "linyin",
+                "PERSONA_VISION_API_KEY": "vision-secret",
+                "PERSONA_VISION_BASE_URL": "https://vision.example/v1",
                 "PERSONA_VISION_MODEL": "persona-vision-model",
                 "PERSONA_VISION_TIMEOUT_SECONDS": "80",
             }
@@ -271,15 +363,25 @@ class ConfigLoadingTests(unittest.TestCase):
 
         self.assertTrue(config.enable_persona_llm_routing)
         self.assertEqual(config.persona_llm_role_card_keys, {"linyin"})
+        self.assertEqual(config.persona_llm_provider, "ollama")
         self.assertEqual(config.persona_llm_api_key, "persona-secret")
-        self.assertEqual(config.persona_llm_base_url, "https://persona.example/v1")
+        self.assertEqual(config.persona_llm_base_url, "http://127.0.0.1:11434")
         self.assertEqual(config.persona_llm_model, "persona-model")
         self.assertEqual(config.persona_llm_timeout_seconds, 75)
+        self.assertEqual(config.persona_llm_num_ctx, 4096)
+        self.assertEqual(config.persona_llm_max_tokens, 640)
+        self.assertEqual(config.persona_llm_keep_alive_seconds, 0)
         self.assertTrue(config.enable_persona_vision_routing)
         self.assertEqual(config.persona_vision_role_card_keys, {"linyin"})
+        self.assertEqual(config.persona_vision_api_key, "vision-secret")
+        self.assertEqual(
+            config.persona_vision_base_url,
+            "https://vision.example/v1",
+        )
         self.assertEqual(config.persona_vision_model, "persona-vision-model")
         self.assertEqual(config.persona_vision_timeout_seconds, 80)
         self.assertNotIn("persona-secret", repr(config))
+        self.assertNotIn("vision-secret", repr(config))
 
     def test_invalid_tavily_timeout_loads_fail_closed_sentinel(self):
         config = self.load_with_env(
@@ -389,7 +491,6 @@ class ConfigLoadingTests(unittest.TestCase):
                 "IMAGE_GEN_API_KEY": "image-secret",
                 "IMAGE_GEN_BASE_URL": "https://image.example/v1/",
                 "IMAGE_GEN_MODEL": "unit-generate",
-                "IMAGE_EDIT_MODEL": "unit-edit",
                 "IMAGE_GEN_TIMEOUT_SECONDS": "95",
                 "IMAGE_GEN_MAX_PROMPT_CHARS": "800",
                 "IMAGE_GEN_MAX_INPUT_BYTES": "5000000",
@@ -478,7 +579,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.image_gen_api_key, "image-secret")
         self.assertEqual(config.image_gen_base_url, "https://image.example/v1/")
         self.assertEqual(config.image_gen_model, "unit-generate")
-        self.assertEqual(config.image_edit_model, "unit-edit")
+        self.assertEqual(config.image_edit_model, "unit-generate")
         self.assertEqual(config.image_gen_timeout_seconds, 95)
         self.assertEqual(config.image_gen_max_prompt_chars, 800)
         self.assertEqual(config.image_gen_max_input_bytes, 5_000_000)
@@ -664,6 +765,38 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.scene_private_context_max_chars, 0)
         self.assertEqual(config.scene_member_cache_seconds, 0)
         self.assertEqual(config.scene_max_pending_turns, 0)
+
+
+
+    def test_chat_bubble_split_defaults_off(self):
+        config = self.load_with_env({})
+        self.assertFalse(config.enable_chat_bubble_split)
+        self.assertTrue(config.chat_bubble_split_owner_private_only)
+        self.assertEqual(config.chat_bubble_min_delay_ms, 700)
+        self.assertEqual(config.chat_bubble_max_delay_ms, 1200)
+        self.assertEqual(config.chat_bubble_max_bubbles, 3)
+
+    def test_chat_bubble_split_can_be_enabled(self):
+        config = self.load_with_env(
+            {
+                'ENABLE_CHAT_BUBBLE_SPLIT': 'true',
+                'CHAT_BUBBLE_MIN_DELAY_MS': '800',
+            }
+        )
+        self.assertTrue(config.enable_chat_bubble_split)
+        self.assertEqual(config.chat_bubble_min_delay_ms, 800)
+
+
+
+    def test_chat_reunion_defaults(self):
+        config = self.load_with_env({})
+        self.assertTrue(config.enable_chat_reunion)
+        self.assertTrue(config.chat_reunion_owner_private_only)
+        self.assertEqual(config.chat_reunion_min_gap_hours, 3)
+
+    def test_chat_reunion_can_be_disabled(self):
+        config = self.load_with_env({'ENABLE_CHAT_REUNION': 'false'})
+        self.assertFalse(config.enable_chat_reunion)
 
 
 if __name__ == "__main__":

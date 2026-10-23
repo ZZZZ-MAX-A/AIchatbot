@@ -178,12 +178,12 @@ class FailureInspection:
         return self.failure_count > 0
 
 
-def sanitize_failure_text(value: object, *, limit: int = 240) -> str:
+def sanitize_failure_text(value: object, *, limit: int | None = 240) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ")
     for pattern, replacement in _SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     text = " ".join(text.split())
-    if len(text) > limit:
+    if limit is not None and len(text) > limit:
         return text[: limit - 3].rstrip() + "..."
     return text
 

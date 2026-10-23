@@ -47,7 +47,7 @@ Uvicorn running on http://127.0.0.1:8080
 
 ```powershell
 cd D:\AIchatbot
-.\scripts\start-napcat-shell.ps1 2700318954
+.\scripts\start-napcat-shell.ps1 2000000001
 ```
 
 如果需要扫码，使用手机 QQ 扫码授权。
@@ -81,7 +81,7 @@ NapCatQQ 不一定需要重启。
 
 ```text
 关闭 NapCat 窗口
-重新运行 .\scripts\start-napcat-shell.ps1 2700318954
+重新运行 .\scripts\start-napcat-shell.ps1 2000000001
 ```
 
 ## 可靠性巡检
@@ -129,7 +129,7 @@ Bot 代码更新后需重启，新的“可靠性巡检”自然命令和分类�
 
 ```text
 不要先打开普通 QQ
-直接使用 .\scripts\start-napcat-shell.ps1 2700318954 启动
+直接使用 .\scripts\start-napcat-shell.ps1 2000000001 启动
 ```
 
 ## WebUI
@@ -183,7 +183,7 @@ data/chatbot.db 聊天上下文和私聊试用次数
 关键配置：
 
 ```env
-BOT_OWNER_QQ=3313097998
+BOT_OWNER_QQ=1000000001
 BOT_OWNER_PUBLIC_NAME=雨泽
 BOT_ALIASES=
 
@@ -235,7 +235,7 @@ RULE_REMINDER_INTERVAL_MESSAGES=40
 
 `SUMMARY_MIN_SOURCE_MESSAGES` 控制最低摘要门槛，默认 40 条消息，约等于 20 轮问答。未达到门槛时不会生成摘要。
 
-`ENABLE_GAP_SCENE_SUMMARIES` 控制空窗场景状态摘要。开启后，当前会话未压缩原文超过 40 条时生成第 1 条空窗摘要，超过 80 条时生成第 2 条空窗摘要，超过 120 条后正式压缩旧 80 条并清理已覆盖的空窗摘要。
+`ENABLE_GAP_SCENE_SUMMARIES` 控制空窗当前场状态卡。开启后始终只维护 1 张活卡：短时窗口是最近 `MAX_CONTEXT_MESSAGES` 条（默认 40）；刚滑出短时窗口的原文满 25 条时首写；之后每新露出 20 条，用旧卡加新原文覆盖更新同一张卡。约第 65 / 85 / 105 条各更新一次；超过 `MAX_STORED_MESSAGES_PER_SESSION`（默认 120）后正式压缩最早 80 条并清卡。`GAP_SCENE_SUMMARY_1_THRESHOLD` 和 `GAP_SCENE_SUMMARY_2_THRESHOLD` 仍可存在于配置中，但调度不再读取。
 
 `ENABLE_LONG_TERM_MEMORY_CONTEXT` 控制手动长期记忆是否注入上下文。长期事实摘要和主人偏好摘要只由主人通过命令手动维护，系统不会让 AI 自动写入长期记忆。
 
@@ -591,6 +591,7 @@ schema_meta: 数据库版本
 超过 MAX_STORED_MESSAGES_PER_SESSION 后自动压缩旧消息
 自动压缩时保留最近 SUMMARY_KEEP_RECENT_MESSAGES 条原文
 自动压缩每次最多压缩 SUMMARY_BATCH_MESSAGES 条旧消息
+摘要模型拒写或输出不可用时，必须保留原文、不写入摘要、不清理空窗卡，并向主人私聊通知
 手动执行 /压缩当前会话 时，会把上次摘要后的未摘要消息压缩到最新一条
 待摘要消息少于 SUMMARY_MIN_SOURCE_MESSAGES 时，不生成摘要
 摘要生成优先保留主人明确说过的需求、决定、纠正、验收结果、待办和边界
@@ -684,7 +685,7 @@ prompts/persona-cards/moyan.auto-reply.json
 
 ```powershell
 cd D:\AIchatbot
-.\scripts\start-napcat-shell.ps1 2700318954
+.\scripts\start-napcat-shell.ps1 2000000001
 ```
 
 ### AI 调用失败
@@ -1045,9 +1046,52 @@ cd D:\AIchatbot
 
 如果 `data/access.json` 损坏，可以关闭机器人后手动修复或删除该文件，再重启机器人。
 
+## 主人私聊图片生成与修改
+
+`/生成图片` 与 `/修改图片` 是只允许主人私聊使用的独立图片链路，不会写入普通聊天历史、会话摘要、长期记忆、MemoryRAG 或 SceneHub。它们通过独立的 `IMAGE_GEN_*` 配置访问 OpenAI 兼容图片端点，不复用聊天接口的密钥。
+
+```env
+ENABLE_IMAGE_GEN=true
+IMAGE_GEN_API_KEY=图片服务专属密钥
+IMAGE_GEN_BASE_URL=https://你的图片服务/v1
+IMAGE_GEN_MODEL=grok-imagine-image-quality
+# 未设置时会回退到 IMAGE_GEN_MODEL；如供应商提供独立改图模型，可显式填写。
+IMAGE_EDIT_MODEL=grok-imagine-image-quality
+IMAGE_GEN_TIMEOUT_SECONDS=120
+```
+
+`/生成图片 <描述>` 发起一次生成请求。`/修改图片 <要求>` 只在内存保存本次修改要求，主人需在有效期内发送下一张私聊图片才会发起一次改图请求；`/取消改图` 只清除这次待处理要求。每次请求最多一次调用，客户端不自动重试，避免失败时重复消耗图片额度。
+
+服务端优先请求 `b64_json` 结果；若供应商仍返回 URL，机器人只下载一次并验证图片格式、尺寸和大小。成功图片落盘到 `data/generated-images/`，文件名以 `gen_` 或 `edit_` 开头。未通过校验的下载结果不会发送。
+
+图片失败记录在 `logs/ai_chat_error.log`。日志包含 `operation`、`stage`、稳定错误码、HTTP/provider 元数据和允许的安全上下文。常见 `stage` 为 `provider_request`、`provider_response`、`result_download`、`result_decode`、`result_validation` 与 `input_download`。URL 下载失败只记录协议、主机名和是否带 query，不记录完整签名 URL；提示词、输入图、密钥和 token 不写入该日志。
+
+`/Qwen改图 <模式> [额外要求]` 是另一条仅主人私聊可用的 Hugging Face Gradio ZeroGPU 链路，不复用普通 `/修改图片` 的 `IMAGE_EDIT_MODEL`。当前 Space 的公开 API 合同为提交 `/gradio_api/call/v2/edit_image`、事件流 `/gradio_api/call/edit_image/{event_id}`，结果是包含 base64 PNG data URL 和 seed 的对象；机器人会在本地校验并保存，不再把该结果误当成下载 URL。`QWEN_SPACE_HF_TOKEN` 可选但建议填写已登录 Hugging Face 账号的 token，以获得更高队列优先级。
+
+Qwen 改图日志会额外记录 `qwen_phase`、`qwen_http_status`、API 路径和脱敏的供应商响应摘要。常见错误码包括：`qwen_endpoint_not_found`（Space API 路径变更）、`qwen_auth_failed`（401/403）、`qwen_rate_limited`（429）、`qwen_gpu_unavailable`（ZeroGPU 在 60 秒内没有分配 GPU）、`qwen_quota_exceeded`（额度不足）和 `qwen_result_invalid`（结果结构或图片校验失败）。模型提交失败不会自动重试；已完成但结果保存/发送失败时，仍可在有效期内使用 `/重取改图`，避免重复调用模型。
+
 ## 视觉识图运行说明
 
-视觉识图使用本地 Ollama，不走 DeepSeek 接口。
+当前生产视觉识图默认使用阿里云百炼 `aliyun_bailian` 的 `qwen3.7-flash`，不复用普通聊天 Key，也不会因为视觉功能自动切换到本地 Ollama。旧的 Ollama 配置仍保留作兼容和 MemoryRAG 参考；只有把 `VISION_PROVIDER=ollama` 明确切回本地提供方时，才需要执行下面的 Ollama 检查。
+
+云端视觉配置：
+
+```env
+ENABLE_VISION=true
+VISION_PROVIDER=aliyun_bailian
+VISION_CLOUD_MODEL=qwen3.7-flash
+ALIYUN_BAILIAN_BASE_URL=https://你的百炼兼容接口/v1
+ALIYUN_BAILIAN_API_KEY=视觉专属密钥
+VISION_TIMEOUT_SECONDS=180
+VISION_MAX_IMAGES=1
+VISION_MAX_IMAGE_BYTES=5242880
+VISION_IMAGE_CACHE_TTL_SECONDS=120
+VISION_PRIVATE_IMAGE_WAIT_SECONDS=5
+```
+
+`/视觉状态` 会显示当前提供方、云端模型、脱敏接口、Key 是否配置，以及“未主动发起远程探针”。这是有意的：普通状态命令只读取配置和本地状态，不为了诊断自动消耗云端额度。需要真实云端请求时，应使用 Owner Console 中显式开启的云视觉手动诊断，并按照返回的阶段和错误码排查。
+
+若确实要使用旧本地 Ollama，先明确设置：
 
 确认模型存在：
 
@@ -1153,6 +1197,11 @@ QQ 内主人命令：
 ```text
 /诊断
 /配置状态
+/配置详情
+/配置详情 视觉
+/配置详情 图片
+/配置详情 Qwen
+/配置详情 全部
 /视觉状态
 /最近错误
 /清空错误日志
@@ -1160,9 +1209,21 @@ QQ 内主人命令：
 /清空图片缓存
 ```
 
-这些命令由机器人插件代码直接检查配置、数据库、Ollama、聊天接口、错误日志和图片缓存，不交给聊天 AI，不走角色卡，不写入聊天记忆。
+这些命令由机器人插件代码直接检查配置、数据库、当前聊天链路、视觉提供方、错误日志和图片缓存，不交给聊天 AI，不走角色卡，不写入聊天记忆。所有配置命令只允许主人使用。
 
-`/视觉状态` 会额外使用一张内置小 PNG 执行一次真实 Ollama 视觉推理自检，用于识别“模型存在但返回 @@@@@@ / 空描述 / 调用失败”的情况。自检只展示耗时和返回字数，不展示测试图描述正文；如果 Ollama 服务异常、模型不存在或视觉未开启，则跳过推理自检。
+配置命令有三个层级：
+
+```text
+/配置状态       常用配置总览，快速确认当前进程加载的路线
+/配置详情 <区域> 安全的分区配置视图，查看模型、开关、超时、数量和脱敏接口
+/配置详情 全部   查看所有安全分区
+```
+
+可用区域为：`运行`、`聊天`、`人格`、`Agent`、`视觉`、`图片`、`Qwen`、`语音`、`记忆`、`访问`、`能力`。Key、Token、QQ 号、角色卡正文、私聊内容、真实地点和路径原值不会被输出。
+
+需要区分“配置已加载”和“功能已验证”：`/配置状态`、`/配置详情`只说明当前进程读到了哪些配置；`/诊断`检查数据库、聊天连通性和适用的本地服务；云端视觉默认不外呼；Qwen HF Token 已配置也不代表 Hugging Face ZeroGPU 当前一定有可用 GPU。
+
+`/视觉状态` 在 `VISION_PROVIDER=ollama` 且服务和模型可用时，才会使用一张内置小 PNG 执行真实 Ollama 视觉推理自检；云端提供方只显示“未主动发起远程探针”，不会在普通状态命令中隐式调用远程服务。
 
 机器人完全没反应时，不要只在 QQ 里重复发命令，先在本地运行：
 
@@ -1182,7 +1243,7 @@ Ollama 进程
 11434 和 8080 端口
 .env 关键配置
 OLLAMA_MODELS
-Ollama tags 和 qwen2.5vl:3b
+Ollama tags 和当前需要的本地模型（仅 `VISION_PROVIDER=ollama` 或 Ollama embedding 启用时检查）
 SQLite 数据库
 最近 AI 错误
 ```
@@ -1263,7 +1324,7 @@ cd D:\AIchatbot
 ```text
 删除括号和星号动作描写
 狗修金 -> 主人
-爱可 -> 我
+默认人格 -> 我
 保留轻度口吃和省略号停顿
 按完整句子分段，段间约 550ms 停顿
 ```
@@ -1289,6 +1350,54 @@ D:\AIchatbot\temp_audio
 ```text
 docs/v1.1-voice-output-draft.md
 ```
+
+## 本地人格聊天试用
+
+专属人格聊天只作用于 `PERSONA_LLM_ROLE_CARD_KEYS` 明确列出的隔离人格。摘要是默认人格和独立人格共有的功能，但不跟随人格聊天路由：正式摘要、空窗状态卡和换话题摘要统一使用独立的 `SUMMARY_LLM_*` 配置，且分别写入各自角色数据库；即使以后把 `aike` 加入 `PERSONA_LLM_ROLE_CARD_KEYS`，也不会改变摘要路由。当前独立人格聊天和人格视觉目标均为 OpenAI 兼容接口的 `grok-4.5`；真实 `.env` 中的聊天 Key 由 `PERSONA_LLM_API_KEY` 提供，视觉在未单独设置 `PERSONA_VISION_API_KEY` 时回退使用该 Key。此前 Dolphin 试用因中文角色表现不合格已撤回：
+
+```env
+ENABLE_PERSONA_LLM_ROUTING=true
+PERSONA_LLM_ROLE_CARD_KEYS=private-card-key
+PERSONA_LLM_PROVIDER=openai
+PERSONA_LLM_API_KEY=<provider-api-key>
+PERSONA_LLM_BASE_URL=https://api.shuaiapi.com/v1
+PERSONA_LLM_MODEL=grok-4.5
+PERSONA_LLM_TIMEOUT_SECONDS=90
+PERSONA_LLM_NUM_CTX=4096
+PERSONA_LLM_MAX_TOKENS=640
+PERSONA_LLM_KEEP_ALIVE_SECONDS=0
+```
+
+8GB 显存与本地 TTS 共用时建议保持 `KEEP_ALIVE_SECONDS=0`。这会让每轮聊天承担模型冷启动时间，但模型回复完成后会立即释放，不会继续长期占用显存。测试当前是否仍驻留：
+
+本地人格路由还会追加一条表达层约束：普通角色聊天回复应包含至少一处简短、具体、使用全角括号的动作描写；动作必须符合角色卡，不自动添加撒娇、安慰或亲昵情绪。纯信息、纯命令和极短确认可以不强行添加。
+
+```powershell
+ollama ps
+```
+
+人格视觉必须使用独立的远程配置，避免聊天改为 Ollama 后把视觉请求错误发送到本机文本模型：
+
+```env
+ENABLE_PERSONA_VISION_ROUTING=true
+PERSONA_VISION_ROLE_CARD_KEYS=private-card-key
+PERSONA_VISION_API_KEY=
+PERSONA_VISION_BASE_URL=https://your-vision-provider.example/v1
+PERSONA_VISION_MODEL=your-vision-model
+PERSONA_VISION_TIMEOUT_SECONDS=90
+```
+
+本地人格路由失败时不会静默把私聊内容回退到云端。排查顺序为：`ollama list` 确认模型存在、`ollama ps` 检查驻留、确认 `127.0.0.1:11434` 可达，再查看 Bot 的脱敏错误类型。不要把真实角色卡、私聊内容或 `.env` 写入诊断记录和公开仓库。
+
+## Web 记忆维护范围
+
+记忆页和诊断页使用同一“记忆维护范围”选择器。选择固定账号后，页面展示人物、记忆库和会话命名空间；记忆统计、记忆技术证据与 MemoryRAG 一致性检查都使用该账号当前绑定的持久库。QQ 备用命令仍按接收消息的账号维护。
+
+默认只采用唯一明确绑定的旧库账号。未知账号、异常角色卡绑定、仅进程内记忆、缺失库或不完整结构不会借用其他人格库。Web 统计只读聚合计数，不初始化、迁移或显示正文；记忆 RAG 计数不包含项目文档。
+
+切换账号会取消旧请求和旧确认。绑定、持久记忆模式或相关索引配置变更后，旧确认被拒绝，需刷新绑定再确认。最近一致性结果按账号及配置版本区分，Owner Console 重启后清空。项目文档、模型、语音检查使用各自配置，不跟随此选择器更换。
+
+具体维护入口和后续收敛计划见 `docs/maintenance-consolidation.md`。真实 QQ、模型、语音及场景在线验收在项目整理完成后统一进行。
 
 ## Git 提交
 

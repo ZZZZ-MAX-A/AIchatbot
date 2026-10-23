@@ -4,7 +4,7 @@ import base64
 import json
 import unittest
 
-from pure_ai_chat_loader import AI_CHAT_ROOT, load_sticker_labeling_module
+from pure_ai_chat_loader import AI_CHAT_ROOT, load_sticker_labeling_module, load_sticker_library_module
 
 
 class StickerLabelingTests(unittest.TestCase):
@@ -133,6 +133,7 @@ class StickerLabelingTests(unittest.TestCase):
             }
             <= self.module.ALLOWED_STICKER_MOODS
         )
+
         self.assertTrue(
             {
                 "act_cute",
@@ -198,6 +199,19 @@ class StickerLabelingTests(unittest.TestCase):
         self.assertEqual(suggestion.moods, ("playful",))
         self.assertEqual(suggestion.actions, ("act_cute",))
         self.assertEqual(suggestion.suggested_scenes, ("acting_cute",))
+
+    def test_owner_corrected_semantics_match_runtime_library_contract(self):
+        library = load_sticker_library_module()
+        self.assertEqual(self.module.ALLOWED_STICKER_MOODS, library.ALLOWED_MOODS)
+        for mood, scene in [('proud', 'praise_received'), ('flustered', 'general_reaction'),
+                            ('neutral', 'thinking')]:
+            with self.subTest(mood=mood):
+                suggestion = self.module.parse_sticker_label_suggestion(
+                    self.response(moods=[mood], suggested_scenes=[scene]))
+                self.assertEqual(suggestion.moods, (mood,))
+                self.assertEqual(suggestion.suggested_scenes, (scene,))
+                self.assertIn(mood, library.ALLOWED_MOODS)
+                self.assertIn(scene, library.ALLOWED_USAGE_TAGS)
 
     def test_vision_failure_and_non_string_response_fail_closed(self):
         def failing_call(_config, _image: str, _prompt: str) -> str:

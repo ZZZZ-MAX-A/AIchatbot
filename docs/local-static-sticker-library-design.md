@@ -1,8 +1,10 @@
 # 主人审核的本地表情包库设计（静态与动态）
 
-状态：A1–A4、独立 DeepSeek 有限分类器和 B2 主人私聊自动附带均已实现并通过 QQ live。旧 ChatAgent 内嵌 marker/JSON envelope 方案保持关闭；当前运行配置为远程分类开启、旧 marker shadow 关闭、自动附件开启。2026-07-14 按主人明确指定逐项批准 14 个候选后，正式库为 schema 2、revision 18、enabled 14、disabled 2、invalid 0；剩余 16 个候选继续保留且不参与运行时选择。
+状态：A1–A4、独立 DeepSeek 有限分类器和 B2 主人私聊自动附带均已实现，早期默认人格链路通过 QQ live。旧 ChatAgent 内嵌 marker/JSON envelope 方案保持关闭；当前配置为远程分类开启、旧 marker shadow 关闭、自动附件开启。2026-10-13 已补上独立人格表情链路，并按主人看图修正、确认的标签正式批准 20 张默认人格与独立人格共用素材。当前正式库为 schema 2、revision 38、enabled 34、disabled 2、invalid 0；默认人格可选 34 张，独立人格可选 20 张。旧未批准候选继续保留且不参与选择；新版代码与 QQ 图片发送仍待重新加载后的统一在线验收。
 
-日期：2026-07-14。
+共用素材使用明确的 `persona_key=shared`，角色专属素材仍分别限制为 `aike` 或 `linyin`。素材只保存一份，受众过滤统一，发送频率按实际账号及会话隔离；新标签支持得意（proud）、慌乱（flustered）与安静思考（thinking）。实现、配置及验证说明见 [默认人格与独立人格自动表情](chat-sticker-reliability.md)。
+
+日期：2026-07-14；最新补充：2026-10-13。
 
 ## 1. 目标
 

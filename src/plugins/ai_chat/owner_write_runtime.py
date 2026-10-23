@@ -79,6 +79,10 @@ def run_owner_write_command(
     command: str,
     context: Any,
 ) -> str:
+    if command == "select_persona":
+        from .persona_maintenance import FIXED_PERSONA_MESSAGE
+
+        return FIXED_PERSONA_MESSAGE
     if command == "clear_image_cache":
         count = runtime.clear_image_cache()
         return f"已清空图片缓存：{count} 条。"
@@ -130,15 +134,6 @@ def run_owner_write_command(
         operation, list_name, changed_text, unchanged_text = access_operations[command]
         changed = operation(list_name, target)
         return f"{changed_text}：{target}" if changed else f"{unchanged_text}：{target}"
-
-    if command == "select_persona":
-        target = _argument_text(context, "target")
-        if not target:
-            raise RuntimeError("select_persona requires target")
-        card = runtime.select_role_card(target)
-        if card is None:
-            return f"没有找到角色卡：{target}"
-        return f"已选择角色卡：{card.key}，{card.title}"
 
     if command in {"add_fact_memory", "add_preference_memory"}:
         content = _argument_text(context, "content")

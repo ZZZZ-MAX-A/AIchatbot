@@ -66,6 +66,86 @@ class ReliabilityEventTests(unittest.TestCase):
         self.assertEqual(success.outcome.value, "succeeded")
         self.assertIsNone(success.category)
 
+    def test_encyclopedia_statuses_persist_by_persona_without_query_content(self):
+        temp_dir, db_path, patcher = self.temp_database()
+        with temp_dir, patcher:
+            self.database.ensure_database()
+            for role in ("aike", "linyin"):
+                for status in (
+                    "found", "partial", "not_found", "no_content", "planner_timeout", "lookup_timeout",
+                    "planner_empty_response", "planner_response_truncated", "planner_invalid_response",
+                    "planner_error", "lookup_error", "invalid_arguments", "source_unavailable",
+                ):
+                    self.assertTrue(self.reliability.record_encyclopedia_observation_safely(
+                        {"encyclopedia_status": status, "query": "PRIVATE-QUERY", "results": "PRIVATE-PAGE", "account": "PRIVATE-ID"}, role,
+                    ))
+            self.assertFalse(self.reliability.record_encyclopedia_observation_safely({"encyclopedia_status": "found"}, "PRIVATE-ID"))
+            self.assertFalse(self.reliability.record_encyclopedia_observation_safely({"encyclopedia_status": "PRIVATE-ERROR"}, "aike"))
+            for status in ("disabled", "not_needed", "not_requested", "skipped"):
+                self.assertFalse(self.reliability.record_encyclopedia_observation_safely({"encyclopedia_status": status}, "aike"))
+            with self.database.connect() as connection:
+                rows = connection.execute("SELECT component, operation, code, outcome FROM reliability_event_buckets").fetchall()
+            self.assertEqual(len(rows), 26)
+            self.assertEqual({row[1] for row in rows}, {"aike_query", "linyin_query"})
+            self.assertNotIn("PRIVATE", str(rows))
+
+    def test_encyclopedia_recorder_storage_failure_does_not_interrupt_chat(self):
+        with patch.object(self.reliability, "record_reliability_event", side_effect=RuntimeError("database offline")):
+            self.assertFalse(self.reliability.record_encyclopedia_observation_safely({"encyclopedia_status": "lookup_timeout"}, "linyin"))
+
+    def create_legacy_reliability_table(self, connection):
+        connection.execute("""CREATE TABLE reliability_event_buckets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, schema_version INTEGER NOT NULL,
+            bucket_start TEXT NOT NULL, runtime_id TEXT NOT NULL, component TEXT NOT NULL,
+            operation TEXT NOT NULL, category TEXT NOT NULL, code TEXT NOT NULL,
+            outcome TEXT NOT NULL, occurrence_count INTEGER NOT NULL,
+            first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+            CHECK (component = 'chat_llm' AND operation = 'generate_reply'),
+            UNIQUE (bucket_start, runtime_id, component, operation, category, code, outcome)
+        )""")
+        connection.execute("CREATE INDEX idx_reliability_event_buckets_window ON reliability_event_buckets (last_seen_at, component, operation)")
+        connection.execute("""INSERT INTO reliability_event_buckets VALUES
+            (71, 1, ?, ?, 'chat_llm', 'generate_reply', 'network', 'request_timeout', 'failed', 9, ?, ?)""",
+            (at(10).isoformat(), RUNTIME_A, at(10).isoformat(), at(10, 4).isoformat()))
+        connection.execute("UPDATE sqlite_sequence SET seq = 400 WHERE name = 'reliability_event_buckets'")
+
+    def test_legacy_diagnostic_schema_upgrade_preserves_rows_sequence_and_is_idempotent(self):
+        temp_dir, _db_path, patcher = self.temp_database()
+        with temp_dir, patcher:
+            with self.database.connect() as connection:
+                self.create_legacy_reliability_table(connection)
+                before = tuple(connection.execute("SELECT * FROM reliability_event_buckets").fetchone())
+                connection.execute("CREATE TABLE untouched_memory (content TEXT)")
+                connection.execute("INSERT INTO untouched_memory VALUES ('test-private-text')")
+            self.database.ensure_database()
+            with self.database.connect() as connection:
+                self.assertEqual(tuple(connection.execute("SELECT * FROM reliability_event_buckets").fetchone()), before)
+                self.assertEqual(connection.execute("SELECT seq FROM sqlite_sequence WHERE name = 'reliability_event_buckets'").fetchone()[0], 400)
+                self.assertEqual(connection.execute("SELECT content FROM untouched_memory").fetchone()[0], "test-private-text")
+                statements = []
+                connection.set_trace_callback(statements.append)
+                self.database._ensure_reliability_event_schema(connection)
+                self.assertFalse(any("ALTER TABLE" in statement for statement in statements))
+                indexes = {row[1] for row in connection.execute("PRAGMA index_list(reliability_event_buckets)")}
+                self.assertIn("idx_reliability_event_buckets_window", indexes)
+                self.assertIn("idx_reliability_event_buckets_runtime", indexes)
+            self.assertTrue(self.reliability.record_encyclopedia_observation_safely({"encyclopedia_status": "found"}, "linyin"))
+            with self.database.connect() as connection:
+                self.assertEqual(connection.execute("SELECT MAX(id) FROM reliability_event_buckets").fetchone()[0], 401)
+
+    def test_legacy_upgrade_rolls_back_if_copy_fails(self):
+        temp_dir, _db_path, patcher = self.temp_database()
+        with temp_dir, patcher:
+            with self.database.connect() as connection:
+                self.create_legacy_reliability_table(connection)
+                connection.execute("UPDATE reliability_event_buckets SET code = 'old_unknown_code'")
+                before_sql = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'reliability_event_buckets'").fetchone()[0]
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.database._ensure_reliability_event_schema(connection)
+                self.assertEqual(connection.execute("SELECT sql FROM sqlite_master WHERE name = 'reliability_event_buckets'").fetchone()[0], before_sql)
+                self.assertEqual(connection.execute("SELECT id, code FROM reliability_event_buckets").fetchone()[:], (71, "old_unknown_code"))
+                self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'reliability_event_buckets_previous'").fetchone())
+
     def test_contract_rejects_unknown_or_mismatched_values(self):
         invalid_cases = (
             {"component": "user:12345", "operation": "classify_intent"},

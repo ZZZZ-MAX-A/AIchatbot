@@ -285,7 +285,7 @@ class MemoryRagQqBoundaryTests(unittest.TestCase):
         self.assertIn("agent_ops_health_reply", source)
         self.assertIn('if command == "ops_health":', runtime_source)
         self.assertIn("Agent 聚合诊断", source)
-        self.assertIn("视觉/Ollama、MemoryRAG/Embedding", source)
+        self.assertIn("视觉提供方/本地服务、MemoryRAG/Embedding", source)
 
     def test_agent_owner_read_includes_read_only_vision_troubleshoot(self):
         source = PLUGIN_ENTRY.read_text(encoding="utf-8")

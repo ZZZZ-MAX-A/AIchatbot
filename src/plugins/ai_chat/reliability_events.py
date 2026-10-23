@@ -43,8 +43,10 @@ class ReliabilityCodeContract:
 COMPONENT_OPERATIONS: dict[str, frozenset[str]] = {
     "bot_runtime": frozenset({"lifecycle"}),
     "chat_llm": frozenset({"generate_reply"}),
+    "public_encyclopedia": frozenset({"aike_query", "linyin_query"}),
     "main_llm": frozenset({"plan_action"}),
     "sticker_classifier": frozenset({"classify_intent"}),
+    "sticker_attachment": frozenset({"select_asset", "send_image"}),
     "document_artifact": frozenset({"render_document"}),
     "document_delivery": frozenset({"send_document"}),
     "project_doc_rag": frozenset({"rebuild_index", "retrieve"}),
@@ -70,6 +72,29 @@ CODE_CONTRACTS: dict[str, ReliabilityCodeContract] = {
     "model_rate_limited": _failure_contract(FailureCategory.MODEL),
     "model_not_found": _failure_contract(FailureCategory.MODEL),
     "invalid_model_response": _failure_contract(FailureCategory.MODEL),
+    "encyclopedia_planner_empty_response": _failure_contract(FailureCategory.MODEL),
+    "encyclopedia_planner_response_truncated": _failure_contract(FailureCategory.MODEL),
+    "encyclopedia_planner_invalid_response": _failure_contract(FailureCategory.MODEL),
+    "encyclopedia_planner_error": _failure_contract(FailureCategory.MODEL),
+    "encyclopedia_planner_timeout": _failure_contract(FailureCategory.NETWORK),
+    "encyclopedia_lookup_timeout": _failure_contract(FailureCategory.NETWORK),
+    "encyclopedia_source_unavailable": _failure_contract(FailureCategory.NETWORK),
+    "encyclopedia_lookup_error": _failure_contract(FailureCategory.DATA),
+    "encyclopedia_invalid_arguments": _failure_contract(FailureCategory.DATA),
+    "encyclopedia_partial": _failure_contract(FailureCategory.DATA),
+    "encyclopedia_not_found": ReliabilityCodeContract(None, frozenset({ReliabilityOutcome.SKIPPED})),
+    "encyclopedia_no_content": ReliabilityCodeContract(None, frozenset({ReliabilityOutcome.SKIPPED})),
+    "sticker_empty_response": _failure_contract(FailureCategory.MODEL),
+    "sticker_response_too_large": _failure_contract(FailureCategory.MODEL),
+    "sticker_json_invalid": _failure_contract(FailureCategory.MODEL),
+    "sticker_contract_invalid": _failure_contract(FailureCategory.MODEL),
+    "sticker_response_truncated": _failure_contract(FailureCategory.MODEL),
+    "sticker_response_filtered": _failure_contract(FailureCategory.MODEL),
+    "sticker_combination_unavailable": _failure_contract(FailureCategory.MODEL),
+    "sticker_library_unavailable": _failure_contract(FailureCategory.DATA),
+    "sticker_send_failed": _failure_contract(FailureCategory.NETWORK),
+    "sticker_send_timeout": _failure_contract(FailureCategory.NETWORK),
+    "sticker_sent_commit_failed": _failure_contract(FailureCategory.DATA),
     "authorization_failed": _failure_contract(FailureCategory.PERMISSION),
     "invalid_configuration": _failure_contract(FailureCategory.CONFIGURATION),
     "data_validation_failed": _failure_contract(FailureCategory.DATA),
@@ -407,6 +432,24 @@ def record_success_safely(
         occurred_at=occurred_at,
         runtime_id=runtime_id,
     )
+
+
+def record_encyclopedia_observation_safely(observation: dict[str, object], role_card_key: str) -> bool:
+    """Persist fixed status and persona only, through existing reliability buckets."""
+    if role_card_key not in {"aike", "linyin"}:
+        return False
+    status = observation.get("encyclopedia_status")
+    if not isinstance(status, str):
+        return False
+    operation = role_card_key + "_query"
+    if status == "found":
+        return record_success_safely("public_encyclopedia", operation)
+    code = "encyclopedia_" + status
+    contract = CODE_CONTRACTS.get(code)
+    if contract is None:
+        return False
+    outcome = ReliabilityOutcome.SKIPPED if status in {"not_found", "no_content"} else ReliabilityOutcome.DEGRADED
+    return record_result_safely(component="public_encyclopedia", operation=operation, code=code, outcome=outcome)
 
 
 def record_failure_safely(

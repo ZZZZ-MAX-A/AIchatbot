@@ -467,9 +467,9 @@ MainAgent：
 ```text
 RootGraph/CHAT 最近观测：
 时间：2026-07-06T14:32:07
-会话：private private:3313097998 group=-
+会话：private private:1000000001 group=-
 消息：id=1177041770 text=否 image=是
-Actor：user=3313097998 role=owner
+Actor：user=1000000001 role=owner
 Policy：allow allow=是 reason=policy allows dispatch
 Route：intent=chat handler=chat dispatched=是
 Context：level=chat_context memory_rag=是 project_doc_rag=否 vision=是

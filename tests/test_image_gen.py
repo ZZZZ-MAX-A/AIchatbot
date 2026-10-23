@@ -55,8 +55,8 @@ class ImageGenTests(unittest.IsolatedAsyncioTestCase):
             "enable_image_gen": True,
             "image_gen_api_key": "unit-secret",
             "image_gen_base_url": "https://unit.invalid/v1",
-            "image_gen_model": "grok-imagine-1.0",
-            "image_edit_model": "grok-imagine-1.0-edit",
+            "image_gen_model": "grok-imagine-image-quality",
+            "image_edit_model": "grok-imagine-image-quality",
             "image_gen_timeout_seconds": 120,
             "image_gen_max_prompt_chars": 1000,
             "image_gen_max_input_bytes": 10_485_760,
@@ -107,11 +107,11 @@ class ImageGenTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(images.generate_calls), 1)
         call = images.generate_calls[0]
-        self.assertEqual(call["model"], "grok-imagine-1.0")
+        self.assertEqual(call["model"], "grok-imagine-image-quality")
         self.assertEqual(call["n"], 1)
         self.assertEqual(call["size"], "1024x1024")
         self.assertEqual(call["quality"], "high")
-        self.assertNotIn("response_format", call)
+        self.assertEqual(call["response_format"], "b64_json")
         self.assertNotIn("max_tokens", call)
         self.assertEqual(client_options["max_retries"], 0)
         self.assertEqual(client_options["base_url"], "https://unit.invalid/v1")
@@ -136,11 +136,11 @@ class ImageGenTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(images.edit_calls), 1)
         call = images.edit_calls[0]
-        self.assertEqual(call["model"], "grok-imagine-1.0-edit")
+        self.assertEqual(call["model"], "grok-imagine-image-quality")
         self.assertEqual(call["n"], 1)
         self.assertEqual(call["size"], "1024x1024")
         self.assertEqual(call["quality"], "high")
-        self.assertNotIn("response_format", call)
+        self.assertEqual(call["response_format"], "b64_json")
         self.assertNotIn("max_tokens", call)
         filename, source, media_type = call["image"]
         self.assertEqual(filename, "source.png")
@@ -187,11 +187,67 @@ class ImageGenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             text,
             "provider_type=ProviderError http_status=400 "
-            "provider_code=invalid_request_error provider_param=response_format",
+            "provider_code=invalid_request_error provider_param=response_format "
+            'provider_message="[redacted-field] [redacted-field]"',
         )
         self.assertNotIn("unit-secret", text)
         self.assertNotIn("private-text", text)
         self.assertNotIn("unit.invalid", text)
+
+    async def test_url_download_failure_keeps_only_safe_result_metadata(self):
+        def failed_download(*_args):
+            raise RuntimeError("download rejected: https://cdn.example/result?token=unit-secret")
+
+        vision = SimpleNamespace(_download_image_base64=failed_download)
+        response = SimpleNamespace(
+            data=[
+                SimpleNamespace(
+                    b64_json=None,
+                    url="https://cdn.example/result?token=unit-secret",
+                )
+            ]
+        )
+
+        with patch.dict(sys.modules, {"src.plugins.ai_chat.vision": vision}):
+            with self.assertRaisesRegex(
+                self.module.ImageGenError,
+                "provider_image_download_failed",
+            ) as raised:
+                await self.module._response_image_bytes(
+                    response,
+                    max_bytes=10_485_760,
+                )
+
+        context = raised.exception.context
+        self.assertEqual(context["stage"], "result_download")
+        self.assertEqual(context["response_mode"], "url")
+        self.assertEqual(context["result_scheme"], "https")
+        self.assertEqual(context["result_host"], "cdn.example")
+        self.assertEqual(context["result_has_query"], "yes")
+        formatted = self.module.format_image_gen_context(context)
+        self.assertIn("result_host=cdn.example", formatted)
+        self.assertNotIn("unit-secret", formatted)
+        self.assertNotIn("https://", formatted)
+
+    async def test_provider_request_failure_records_safe_request_context(self):
+        images = FakeImages(self.response(), error=RuntimeError("provider unavailable"))
+        with patch.object(
+            self.module,
+            "AsyncOpenAI",
+            return_value=FakeClient(images),
+        ):
+            with self.assertRaisesRegex(
+                self.module.ImageGenError,
+                "provider_generate_failed",
+            ) as raised:
+                await self.module.generate_image(self.settings(), "测试")
+
+        context = raised.exception.context
+        self.assertEqual(context["stage"], "provider_request")
+        self.assertEqual(context["model"], "grok-imagine-image-quality")
+        self.assertEqual(context["size"], "1024x1024")
+        self.assertEqual(context["quality"], "high")
+        self.assertEqual(context["response_format"], "b64_json")
 
     async def test_provider_failure_is_not_retried_and_invalid_output_is_rejected(self):
         failed_images = FakeImages(

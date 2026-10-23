@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ownerConsoleApi } from "./ownerConsoleApi";
+import { alternateMemoryScope } from "../testFixtures/memoryScope";
 
 const actionEnvelope = {
   schema_version: "owner_console.http.v1",
@@ -21,6 +22,57 @@ const actionEnvelope = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("memory maintenance scope API", () => {
+  it("sends only the fixed account and revision while retaining action confirmation and header", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_path, init) => new Response(JSON.stringify({
+      ...actionEnvelope, resource: "memory", read_only: init.method === "GET",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await ownerConsoleApi.getMemory(undefined, alternateMemoryScope);
+    await ownerConsoleApi.getDiagnostics(undefined, alternateMemoryScope);
+    await ownerConsoleApi.getManualDiagnostics(undefined, alternateMemoryScope);
+    await ownerConsoleApi.runMemoryRagConsistency(undefined, alternateMemoryScope);
+    await ownerConsoleApi.getDiagnostics(undefined, null);
+    const suffix = `?bot_self_id=3000000001&scope_revision=${alternateMemoryScope.revision}`;
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      `/api/v1/owner-console/memory${suffix}`, `/api/v1/owner-console/diagnostics${suffix}`,
+      `/api/v1/owner-console/manual-diagnostics${suffix}`, `/api/v1/owner-console/manual-diagnostics/memory-rag-consistency${suffix}`,
+      "/api/v1/owner-console/diagnostics?skip_memory=true",
+    ]);
+    expect(fetchMock.mock.calls[3][1].method).toBe("POST");
+    expect(fetchMock.mock.calls[3][1]).toMatchObject({
+      body: JSON.stringify({ confirmation: "run_registered_memory_rag_consistency" }),
+      headers: expect.objectContaining({ "X-Owner-Console-Action": "manual-memory-rag-consistency-v1" }),
+    });
+  });
+});
+
+describe("account voice reference API", () => {
+  it("requests the selected account sample as a protected read", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array(64), {
+      status: 200, headers: { "Content-Type": "audio/wav" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await ownerConsoleApi.getPersonaVoiceSample("3000000001")).size).toBe(64);
+    expect(fetchMock.mock.calls[0]).toEqual([
+      "/api/v1/owner-console/settings/accounts/3000000001/voice-sample",
+      expect.objectContaining({ method: "GET", credentials: "same-origin", cache: "no-store",
+        headers: { Accept: "audio/wav", "X-Owner-Console-Action": "persona-voice-sample-v1" } }),
+    ]);
+  });
+  it("rejects caller-supplied paths before a request", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    await expect(ownerConsoleApi.getPersonaVoiceSample("../sample")).rejects.toThrow("账号标识无效");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("rejects non-audio responses", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("unexpected", {
+      status: 200, headers: { "Content-Type": "text/html" },
+    })));
+    await expect(ownerConsoleApi.getPersonaVoiceSample("2000000001")).rejects.toThrow("音色样例格式无效");
+  });
 });
 
 describe("ownerConsoleApi manual TTS action", () => {

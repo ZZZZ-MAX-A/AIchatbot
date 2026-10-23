@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import secrets
+from dataclasses import replace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,6 +15,13 @@ from starlette.concurrency import run_in_threadpool
 from .agent_tasks import AGENT_APPROVAL_STATUSES, AGENT_TASK_STATUSES
 from .access_store import load_access_store
 from .config import PROJECT_ROOT, load_config
+from .completion_routes import resolve_chat_completion_route
+from .vision_routes import persona_vision_api_key
+from .account_persona_settings import VOICE_SAMPLE_ACTION_HEADER
+from .memory_maintenance import (
+    MemoryMaintenanceError, resolve_memory_maintenance_scope, memory_maintenance_database_scope,
+)
+from .main_agent_observability import redacted_base_url
 from .owner_console_http_adapter import (
     OwnerConsoleHttpAdapterError,
     build_owner_console_context_from_config,
@@ -138,6 +147,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTE_NAMES = frozenset(
         "approvals.detail",
         "access-control",
         "settings",
+        "settings.voice-sample",
         "memory",
         "diagnostics",
         "reliability",
@@ -155,6 +165,7 @@ OWNER_CONSOLE_FASTAPI_ENABLED_ROUTES = (
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/approvals/{{approval_id}}",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/access-control",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings",
+    f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings/accounts/{{bot_self_id}}/voice-sample",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics",
     f"{OWNER_CONSOLE_HTTP_API_PREFIX}/reliability",
@@ -174,6 +185,35 @@ def _owner_console_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _owner_console_text(config: Any, name: str, default: str = "") -> str:
+    return str(getattr(config, name, default) or "").strip()
+
+
+def _owner_console_configured(config: Any, name: str) -> str:
+    return _owner_console_bool(bool(_owner_console_text(config, name)))
+
+
+def _owner_console_count(config: Any, name: str) -> int:
+    value = getattr(config, name, ())
+    try:
+        return len(value)
+    except TypeError:
+        return 0 if not value else 1
+
+
+def _owner_console_redacted_url(config: Any, name: str) -> str:
+    value = _owner_console_text(config, name)
+    if not value:
+        return "(empty)"
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return "(invalid)"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme}://{host}{port}{path}"
+
+
 def _owner_console_static_enabled() -> bool:
     return _owner_console_bool_env(OWNER_CONSOLE_STATIC_ENABLED_ENV, False)
 
@@ -181,7 +221,7 @@ def _owner_console_static_enabled() -> bool:
 def _owner_console_manual_diagnostics_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED_ENV,
-        False,
+        True,
     )
 
 
@@ -209,42 +249,42 @@ def _owner_console_access_actions_enabled() -> bool:
 def _owner_console_project_doc_rag_probe_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED_ENV,
-        False,
+        True,
     )
 
 
 def _owner_console_memory_rag_consistency_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED_ENV,
-        False,
+        True,
     )
 
 
 def _owner_console_main_llm_contract_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED_ENV,
-        False,
+        True,
     )
 
 
 def _owner_console_tts_synthesis_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED_ENV,
-        False,
+        True,
     )
 
 
 def _owner_console_vision_inference_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_VISION_INFERENCE_ENABLED_ENV,
-        False,
+        True,
     )
 
 
 def _owner_console_cloud_vision_enabled() -> bool:
     return _owner_console_bool_env(
         OWNER_CONSOLE_CLOUD_VISION_ENABLED_ENV,
-        False,
+        True,
     )
 
 
@@ -294,6 +334,20 @@ def _owner_console_runtime_from_config(
         access_actions_enabled=access_actions_enabled,
         dynamic_access_provider=dynamic_access_provider,
     )
+
+
+def _owner_console_memory_target(request: Request, config: Any):
+    params = request.query_params
+    if params and (set(params) != {"bot_self_id", "scope_revision"}
+                   or any(len(params.getlist(key)) != 1 or not params[key] for key in params)):
+        raise MemoryMaintenanceError("invalid_memory_scope_request", "记忆维护需要明确账号与范围版本", 400)
+    return resolve_memory_maintenance_scope(config, params.get("bot_self_id"), params.get("scope_revision"))
+
+
+def _owner_console_memory_error(resource: str, exc: MemoryMaintenanceError):
+    code = "bad_request" if exc.status_code == 400 else "not_found" if exc.status_code == 404 else "conflict"
+    return _owner_console_error_response(resource, status_code=exc.status_code, code=code,
+        message=exc.message, details={"reason": exc.code})
 
 
 def _owner_console_success(resource: str, data: Any) -> Any:
@@ -469,10 +523,36 @@ def _owner_console_same_origin_request(request: Request) -> bool:
     )
 
 
-def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
-    memory = runtime.build_memory_snapshot()
-    counts = memory.counts
-    return runtime.build_health_snapshot(
+def _build_owner_console_http_diagnostics(runtime: Any, config: Any, target: Any = None,
+                                          *, skip_memory: bool = False) -> Any:
+    memory_error = None
+    try:
+        if skip_memory:
+            raise MemoryMaintenanceError("memory_scope_unselected", "尚未选择有效记忆账号，本次未读取记忆库")
+        target = target or resolve_memory_maintenance_scope(config)
+        memory = runtime.build_account_memory_snapshot(target.bot_self_id, target.revision)
+        counts = memory.counts
+        memory_lines = [
+            "memory_snapshot=collected",
+            f"memory_persona={target.persona_name}",
+            f"memory_database={target.database}",
+            f"memory_scope_revision={target.revision}",
+            f"message_count={counts.message_count}",
+            f"session_count={counts.session_count}",
+            f"session_summary_count={counts.session_summary_count}",
+            f"manual_memory_count={counts.manual_memory_count}",
+            f"rag_document_count={counts.rag_document_count}",
+            f"rag_embedding_count={counts.rag_embedding_count}",
+            "memory_content_exposed=false", "project_doc_content_exposed=false",
+            "retrieval_executed=false", "index_rebuild_executed=false",
+        ]
+    except MemoryMaintenanceError as exc:
+        memory_error = exc
+        memory_lines = ["memory_snapshot=unavailable", f"memory_error_code={exc.code}"]
+        if target:
+            memory_lines += [f"memory_persona={target.persona_name}", f"memory_database={target.database}"]
+    chat_route = resolve_chat_completion_route(config)
+    snapshot = runtime.build_health_snapshot(
         bot_status_lines=[
             "Owner Console HTTP API: ok",
             "transport=http",
@@ -486,49 +566,74 @@ def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
             "diagnostics_module_imported=false",
         ],
         config=[
-            f"bot_owner_configured={_owner_console_bool(bool(config.bot_owner_qq))}",
-            f"enable_private_chat={_owner_console_bool(config.enable_private_chat)}",
-            f"enable_group_chat={_owner_console_bool(config.enable_group_chat)}",
-            f"enable_main_agent={_owner_console_bool(config.enable_main_agent)}",
-            f"main_agent_use_llm={_owner_console_bool(config.main_agent_use_llm)}",
-            f"enable_chat_graph_runtime={_owner_console_bool(config.enable_chat_graph_runtime)}",
+            f"bot_owner_configured={_owner_console_bool(bool(getattr(config, 'bot_owner_qq', '')))}",
+            f"enable_private_chat={_owner_console_bool(bool(getattr(config, 'enable_private_chat', False)))}",
+            f"enable_group_chat={_owner_console_bool(bool(getattr(config, 'enable_group_chat', False)))}",
+            f"enable_main_agent={_owner_console_bool(bool(getattr(config, 'enable_main_agent', False)))}",
+            f"main_agent_use_llm={_owner_console_bool(bool(getattr(config, 'main_agent_use_llm', False)))}",
+            f"enable_chat_graph_runtime={_owner_console_bool(bool(getattr(config, 'enable_chat_graph_runtime', False)))}",
+            f"chat_runtime={'chat_graph' if bool(getattr(config, 'enable_chat_graph_runtime', False)) else 'legacy'}",
+            "chat_route_scope=default",
+            f"config_snapshot_kind={getattr(config, 'configuration_snapshot_kind', 'unknown')}",
+            f"config_issue_count={len(getattr(config, 'configuration_issues', ()))}",
+            f"chat_effective_route={chat_route.source}",
+            f"chat_provider={chat_route.provider}",
+            f"chat_model={chat_route.model or '未配置'}",
+            f"chat_base_url={redacted_base_url(chat_route.base_url)}",
+            f"chat_credentials_configured={_owner_console_bool(bool(chat_route.api_key))}",
+            f"chat_configuration_complete={_owner_console_bool(chat_route.configured)}",
+            f"chat_timeout_seconds={chat_route.timeout_seconds}",
+            f"persona_llm_enabled={_owner_console_bool(bool(getattr(config, 'enable_persona_llm_routing', False)))}",
+            f"persona_llm_model={_owner_console_text(config, 'persona_llm_model') or '未配置'}",
+            f"persona_llm_credentials_configured={_owner_console_configured(config, 'persona_llm_api_key')}",
+            f"persona_llm_role_key_count={_owner_console_count(config, 'persona_llm_role_card_keys')}",
+            f"persona_vision_enabled={_owner_console_bool(bool(getattr(config, 'enable_persona_vision_routing', False)))}",
+            f"persona_vision_model={_owner_console_text(config, 'persona_vision_model') or '未配置'}",
+            f"persona_vision_credentials_configured={_owner_console_bool(bool(persona_vision_api_key(config)))}",
+            f"persona_vision_role_key_count={_owner_console_count(config, 'persona_vision_role_card_keys')}",
+            f"image_gen_enabled={_owner_console_bool(bool(getattr(config, 'enable_image_gen', False)))}",
+            f"image_gen_model={_owner_console_text(config, 'image_gen_model') or '未配置'}",
+            f"image_edit_model={_owner_console_text(config, 'image_edit_model') or '未配置'}",
+            f"image_gen_credentials_configured={_owner_console_configured(config, 'image_gen_api_key')}",
+            f"qwen_space_enabled={_owner_console_bool(bool(getattr(config, 'enable_qwen_space_edit', False)))}",
+            f"qwen_space_token_configured={_owner_console_configured(config, 'qwen_space_hf_token')}",
+            f"qwen_space_base_url_configured={_owner_console_configured(config, 'qwen_space_base_url')}",
+            f"tts_enabled={_owner_console_bool(bool(getattr(config, 'enable_tts', False)))}",
+            f"tts_auto_start={_owner_console_bool(bool(getattr(config, 'tts_auto_start', False)))}",
+            f"tts_voice_configured={_owner_console_configured(config, 'tts_voice')}",
+            f"weather_enabled={_owner_console_bool(bool(getattr(config, 'enable_chat_weather', False)))}",
+            f"weather_mode={_owner_console_text(config, 'chat_weather_mode', 'off') or 'off'}",
+            f"memory_rag_enabled={_owner_console_bool(bool(getattr(config, 'enable_memory_rag', False)))}",
+            f"project_doc_rag_enabled={_owner_console_bool(bool(getattr(config, 'enable_project_doc_rag', False)))}",
+            f"embedding_provider={_owner_console_text(config, 'memory_rag_embedding_provider') or '未配置'}",
+            f"embedding_model={_owner_console_text(config, 'memory_rag_embedding_model') or '未配置'}",
+            f"embedding_base_url={_owner_console_redacted_url(config, 'memory_rag_embedding_base_url')}",
+            f"scene_hub_enabled={_owner_console_bool(bool(getattr(config, 'enable_shared_scene_hub', False)))}",
         ],
         vision=[
-            f"enable_vision={_owner_console_bool(config.enable_vision)}",
-            f"vision_provider={getattr(config, 'vision_provider', 'aliyun_bailian')}",
-            f"vision_model={getattr(config, 'vision_cloud_model', 'qwen3.7-flash')}",
+            f"enable_vision={_owner_console_bool(bool(getattr(config, 'enable_vision', False)))}",
+            f"vision_provider={_owner_console_text(config, 'vision_provider', 'aliyun_bailian') or 'aliyun_bailian'}",
+            f"vision_model={_owner_console_text(config, 'vision_cloud_model', 'qwen3.7-flash') or 'qwen3.7-flash'}",
             "vision_region=cn-beijing",
             f"workspace_configured={_owner_console_bool(bool(str(getattr(config, 'aliyun_bailian_base_url', '') or '').strip()))}",
             f"credentials_configured={_owner_console_bool(bool(str(getattr(config, 'aliyun_bailian_api_key', '') or '').strip()))}",
             "thinking_enabled=false",
             "client_automatic_retry=false",
             "automatic_local_fallback=false",
-            f"vision_max_images={config.vision_max_images}",
+            f"vision_max_images={getattr(config, 'vision_max_images', 0)}",
             "ollama_probe_executed=false",
             "vision_inference_executed=false",
         ],
         image_cache=[
             "image_cache_stats_collected=false",
-            f"image_cache_ttl_seconds={config.vision_image_cache_ttl_seconds}",
-            f"private_image_wait_seconds={config.vision_private_image_wait_seconds}",
+            f"image_cache_ttl_seconds={getattr(config, 'vision_image_cache_ttl_seconds', 0)}",
+            f"private_image_wait_seconds={getattr(config, 'vision_private_image_wait_seconds', 0)}",
         ],
-        memory=[
-            "memory_snapshot=collected",
-            f"message_count={counts.message_count}",
-            f"session_count={counts.session_count}",
-            f"session_summary_count={counts.session_summary_count}",
-            f"manual_memory_count={counts.manual_memory_count}",
-            f"rag_document_count={counts.rag_document_count}",
-            f"rag_embedding_count={counts.rag_embedding_count}",
-            f"memory_content_exposed={_owner_console_bool(memory.memory_content_exposed)}",
-            f"project_doc_content_exposed={_owner_console_bool(memory.project_doc_content_exposed)}",
-            f"retrieval_executed={_owner_console_bool(memory.retrieval_executed)}",
-            f"index_rebuild_executed={_owner_console_bool(memory.index_rebuild_executed)}",
-        ],
+        memory=memory_lines,
         tts=[
-            f"enable_tts={_owner_console_bool(config.enable_tts)}",
-            f"tts_voice_configured={_owner_console_bool(bool(config.tts_voice))}",
-            f"tts_auto_start={_owner_console_bool(config.tts_auto_start)}",
+            f"enable_tts={_owner_console_bool(bool(getattr(config, 'enable_tts', False)))}",
+            f"tts_voice_configured={_owner_console_bool(bool(getattr(config, 'tts_voice', '')))}",
+            f"tts_auto_start={_owner_console_bool(bool(getattr(config, 'tts_auto_start', False)))}",
             "tts_probe_executed=false",
         ],
         recent_errors=[
@@ -538,6 +643,9 @@ def _build_owner_console_http_diagnostics(runtime: Any, config: Any) -> Any:
         main_agent_observation_lines=[],
         root_graph_observation_lines=[],
     )
+    if memory_error:
+        snapshot = replace(snapshot, memory=replace(snapshot.memory, ok=False, error=memory_error.message))
+    return snapshot
 
 
 def _register_owner_console_static_routes(app: FastAPI, static_dir: Path) -> None:
@@ -618,7 +726,7 @@ def create_owner_console_fastapi_app(
                 _owner_console_main_llm_contract_enabled()
             ),
             tts_synthesis_enabled=_owner_console_tts_synthesis_enabled(),
-            vision_inference_enabled=False,
+            vision_inference_enabled=_owner_console_vision_inference_enabled(),
             cloud_vision_enabled=_owner_console_cloud_vision_enabled(),
         )
     manual_snapshot = manual_runtime.build_snapshot()
@@ -1547,17 +1655,50 @@ def create_owner_console_fastapi_app(
                 message="failed to build owner console settings snapshot",
                 exc=exc,
             )
-        return _owner_console_success(
-            "settings",
-            settings,
-        )
+        response = JSONResponse(content=_owner_console_success("settings", settings))
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.set_cookie(OWNER_CONSOLE_ACTION_COOKIE, action_token, httponly=True,
+                            samesite="strict", secure=False, path=OWNER_CONSOLE_HTTP_API_PREFIX)
+        return response
+
+    @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings/accounts/{{bot_self_id}}/voice-sample", response_model=None)
+    async def owner_console_persona_voice_sample(request: Request, bot_self_id: str) -> Any:
+        resource = "settings/voice-sample"
+        host = request.headers.get("host", "").strip().lower()
+        cookie = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if (not host or not _owner_console_loopback_host(host)
+                or request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != VOICE_SAMPLE_ACTION_HEADER
+                or not cookie or not secrets.compare_digest(cookie, action_token)
+                or request.headers.get("sec-fetch-site", "same-origin") not in {"same-origin", "none"}):
+            return _owner_console_error_response(resource, status_code=403, code="forbidden",
+                                                message="voice sample requires the local owner settings session")
+        try:
+            config = load_config()
+            build_owner_console_context_from_config(config)
+            runtime = _owner_console_runtime_from_config(config)
+            content = await run_in_threadpool(runtime.read_account_voice_sample, bot_self_id)
+        except OwnerConsoleHttpAdapterError as exc:
+            return _owner_console_adapter_error(resource, exc)
+        except (ValueError, OSError, EOFError):
+            return _owner_console_error_response(resource, status_code=404, code="not_found",
+                                                message="当前账号的参考音色样例不可用")
+        except Exception:
+            return _owner_console_error_response(resource, status_code=404, code="not_found",
+                                                message="当前账号的参考音色样例不可用")
+        return Response(content=content, media_type="audio/wav", headers={
+            "Cache-Control": "no-store, max-age=0", "Pragma": "no-cache",
+            "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff",
+        })
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/memory", response_model=None)
-    async def owner_console_memory() -> Any:
+    async def owner_console_memory(request: Request) -> Any:
         try:
             config = load_config()
             runtime = _owner_console_runtime_from_config(config)
-            memory = runtime.build_memory_snapshot()
+            target = _owner_console_memory_target(request, config)
+            memory = runtime.build_account_memory_snapshot(target.bot_self_id, target.revision)
+        except MemoryMaintenanceError as exc:
+            return _owner_console_memory_error("memory", exc)
         except OwnerConsoleHttpAdapterError as exc:
             return _owner_console_adapter_error(
                 "memory",
@@ -1598,11 +1739,16 @@ def create_owner_console_fastapi_app(
         )
 
     @app.get(f"{OWNER_CONSOLE_HTTP_API_PREFIX}/diagnostics", response_model=None)
-    async def owner_console_diagnostics() -> Any:
+    async def owner_console_diagnostics(request: Request) -> Any:
         try:
             config = load_config()
             runtime = _owner_console_runtime_from_config(config)
-            diagnostics = _build_owner_console_http_diagnostics(runtime, config)
+            skip_memory = (set(request.query_params) == {"skip_memory"}
+                           and request.query_params.getlist("skip_memory") == ["true"])
+            target = _owner_console_memory_target(request, config) if request.query_params and not skip_memory else None
+            diagnostics = _build_owner_console_http_diagnostics(runtime, config, target, skip_memory=skip_memory)
+        except MemoryMaintenanceError as exc:
+            return _owner_console_memory_error("diagnostics", exc)
         except OwnerConsoleHttpAdapterError as exc:
             return _owner_console_adapter_error(
                 "diagnostics",
@@ -1640,10 +1786,15 @@ def create_owner_console_fastapi_app(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}/manual-diagnostics",
         response_model=None,
     )
-    async def owner_console_manual_diagnostics() -> Any:
+    async def owner_console_manual_diagnostics(request: Request) -> Any:
+        try:
+            target = _owner_console_memory_target(request, load_config()) if request.query_params else None
+            snapshot = manual_runtime.build_snapshot(memory_scope=target) if target else manual_runtime.build_snapshot()
+        except MemoryMaintenanceError as exc:
+            return _owner_console_memory_error("manual-diagnostics", exc)
         payload = _owner_console_success(
             "manual-diagnostics",
-            manual_runtime.build_snapshot(),
+            snapshot,
         )
         response = JSONResponse(content=payload)
         response.set_cookie(
@@ -1656,85 +1807,66 @@ def create_owner_console_fastapi_app(
         )
         return response
 
+    async def run_fixed_manual_diagnostic(
+        request: Request,
+        *,
+        resource: str,
+        enabled: bool,
+        disabled_message: str,
+        expected_header: str,
+        expected_confirmation: str,
+        executor: Callable[[], Any],
+    ) -> Any:
+        """Shared gate for explicitly registered, parameter-free diagnostic runs."""
+        def reject(status: int, code: str, message: str) -> JSONResponse:
+            return _owner_console_action_error_response(
+                resource, status_code=status, code=code, message=message
+            )
+
+        if not enabled:
+            return reject(403, "forbidden", disabled_message)
+        if not _owner_console_same_origin_request(request):
+            return reject(403, "forbidden", "manual diagnostic action requires a same-origin loopback request")
+        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != expected_header:
+            return reject(403, "forbidden", "manual diagnostic action header is invalid")
+        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
+        if not cookie_token or not secrets.compare_digest(cookie_token, action_token):
+            return reject(403, "forbidden", "manual diagnostic action session is invalid")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/json":
+            return reject(400, "bad_request", "manual diagnostic action requires application/json")
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if body != {"confirmation": expected_confirmation}:
+            return reject(400, "bad_request", "manual diagnostic confirmation is invalid")
+        try:
+            result = await run_in_threadpool(executor)
+        except MemoryMaintenanceError as exc:
+            code = "bad_request" if exc.status_code == 400 else "not_found" if exc.status_code == 404 else "conflict"
+            return reject(exc.status_code, code, exc.message)
+        except OwnerConsoleManualDiagnosticDisabled:
+            return reject(403, "forbidden", disabled_message)
+        except OwnerConsoleManualDiagnosticBusy:
+            return reject(409, "conflict", "another manual diagnostic is already running")
+        return _owner_console_action_success(resource, result)
+
     @app.post(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
         "/manual-diagnostics/project-doc-rag",
         response_model=None,
     )
     async def owner_console_project_doc_rag_probe(request: Request) -> Any:
-        resource = "manual-diagnostics/project-doc-rag"
-        if not project_doc_rag_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="project document RAG manual probe is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            PROJECT_DOC_RAG_PROBE_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": PROJECT_DOC_RAG_PROBE_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(
-                manual_runtime.run_project_doc_rag_probe
-            )
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="project document RAG manual probe is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/project-doc-rag',
+            enabled=project_doc_rag_action_enabled,
+            disabled_message='project document RAG manual probe is disabled',
+            expected_header=PROJECT_DOC_RAG_PROBE_ACTION_HEADER,
+            expected_confirmation=PROJECT_DOC_RAG_PROBE_CONFIRMATION,
+            executor=lambda: manual_runtime.run_project_doc_rag_probe(),
+        )
 
     @app.get(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
@@ -1947,79 +2079,19 @@ def create_owner_console_fastapi_app(
         response_model=None,
     )
     async def owner_console_memory_rag_consistency(request: Request) -> Any:
-        resource = "manual-diagnostics/memory-rag-consistency"
-        if not memory_rag_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="MemoryRAG consistency diagnostic is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            MEMORY_RAG_CONSISTENCY_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": MEMORY_RAG_CONSISTENCY_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(
-                manual_runtime.run_memory_rag_consistency
-            )
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="MemoryRAG consistency diagnostic is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        def execute_scoped_consistency():
+            target = _owner_console_memory_target(request, load_config())
+            with memory_maintenance_database_scope(load_config(), target):
+                return manual_runtime.run_memory_rag_consistency(memory_scope=target)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/memory-rag-consistency',
+            enabled=memory_rag_action_enabled,
+            disabled_message='MemoryRAG consistency diagnostic is disabled',
+            expected_header=MEMORY_RAG_CONSISTENCY_ACTION_HEADER,
+            expected_confirmation=MEMORY_RAG_CONSISTENCY_CONFIRMATION,
+            executor=execute_scoped_consistency,
+        )
 
     @app.post(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
@@ -2027,79 +2099,15 @@ def create_owner_console_fastapi_app(
         response_model=None,
     )
     async def owner_console_main_llm_contract(request: Request) -> Any:
-        resource = "manual-diagnostics/main-llm-contract"
-        if not main_llm_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="Main LLM contract diagnostic is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            MAIN_LLM_CONTRACT_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": MAIN_LLM_CONTRACT_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(
-                manual_runtime.run_main_llm_contract
-            )
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="Main LLM contract diagnostic is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/main-llm-contract',
+            enabled=main_llm_action_enabled,
+            disabled_message='Main LLM contract diagnostic is disabled',
+            expected_header=MAIN_LLM_CONTRACT_ACTION_HEADER,
+            expected_confirmation=MAIN_LLM_CONTRACT_CONFIRMATION,
+            executor=lambda: manual_runtime.run_main_llm_contract(),
+        )
 
     @app.post(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
@@ -2107,77 +2115,15 @@ def create_owner_console_fastapi_app(
         response_model=None,
     )
     async def owner_console_tts_synthesis(request: Request) -> Any:
-        resource = "manual-diagnostics/tts-synthesis"
-        if not tts_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="TTS synthesis diagnostic is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            TTS_SYNTHESIS_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": TTS_SYNTHESIS_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(manual_runtime.run_tts_synthesis)
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="TTS synthesis diagnostic is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/tts-synthesis',
+            enabled=tts_action_enabled,
+            disabled_message='TTS synthesis diagnostic is disabled',
+            expected_header=TTS_SYNTHESIS_ACTION_HEADER,
+            expected_confirmation=TTS_SYNTHESIS_CONFIRMATION,
+            executor=lambda: manual_runtime.run_tts_synthesis(),
+        )
 
     @app.post(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
@@ -2185,79 +2131,15 @@ def create_owner_console_fastapi_app(
         response_model=None,
     )
     async def owner_console_vision_inference(request: Request) -> Any:
-        resource = "manual-diagnostics/vision-inference"
-        if not vision_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="vision inference diagnostic is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            VISION_INFERENCE_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": VISION_INFERENCE_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(
-                manual_runtime.run_vision_inference
-            )
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="vision inference diagnostic is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/vision-inference',
+            enabled=vision_action_enabled,
+            disabled_message='vision inference diagnostic is disabled',
+            expected_header=VISION_INFERENCE_ACTION_HEADER,
+            expected_confirmation=VISION_INFERENCE_CONFIRMATION,
+            executor=lambda: manual_runtime.run_vision_inference(),
+        )
 
     @app.get(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"
@@ -2474,79 +2356,15 @@ def create_owner_console_fastapi_app(
     async def owner_console_cloud_vision_fixed_description(
         request: Request,
     ) -> Any:
-        resource = "manual-diagnostics/cloud-vision-fixed-description"
-        if not cloud_vision_action_enabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="cloud vision diagnostic is disabled",
-            )
-        if not _owner_console_same_origin_request(request):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action requires a same-origin loopback request",
-            )
-        if request.headers.get(OWNER_CONSOLE_ACTION_HEADER, "") != (
-            CLOUD_VISION_ACTION_HEADER
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action header is invalid",
-            )
-        cookie_token = request.cookies.get(OWNER_CONSOLE_ACTION_COOKIE, "")
-        if not cookie_token or not secrets.compare_digest(
-            cookie_token,
-            action_token,
-        ):
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="manual diagnostic action session is invalid",
-            )
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic action requires application/json",
-            )
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if body != {"confirmation": CLOUD_VISION_CONFIRMATION}:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=400,
-                code="bad_request",
-                message="manual diagnostic confirmation is invalid",
-            )
-        try:
-            result = await run_in_threadpool(
-                manual_runtime.run_cloud_vision_fixed_description
-            )
-        except OwnerConsoleManualDiagnosticDisabled:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=403,
-                code="forbidden",
-                message="cloud vision diagnostic is disabled",
-            )
-        except OwnerConsoleManualDiagnosticBusy:
-            return _owner_console_action_error_response(
-                resource,
-                status_code=409,
-                code="conflict",
-                message="another manual diagnostic is already running",
-            )
-        return _owner_console_action_success(resource, result)
+        return await run_fixed_manual_diagnostic(
+            request,
+            resource='manual-diagnostics/cloud-vision-fixed-description',
+            enabled=cloud_vision_action_enabled,
+            disabled_message='cloud vision diagnostic is disabled',
+            expected_header=CLOUD_VISION_ACTION_HEADER,
+            expected_confirmation=CLOUD_VISION_CONFIRMATION,
+            executor=lambda: manual_runtime.run_cloud_vision_fixed_description(),
+        )
 
     @app.get(
         f"{OWNER_CONSOLE_HTTP_API_PREFIX}"

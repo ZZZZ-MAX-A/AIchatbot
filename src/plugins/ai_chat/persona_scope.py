@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 
 
-PERSONA_V2_FOUNDATION_VERSION = 2
+PERSONA_V2_FOUNDATION_VERSION = 3
 PERSONA_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 BOT_SELF_ID_PATTERN = re.compile(r"^[0-9]{5,20}$")
 
@@ -126,6 +126,12 @@ def parse_persona_bindings(raw_value: str) -> ParsedPersonaBindings:
             persona_id=persona_id,
             role_card_key=role_card_key,
         )
+    persona_cards: dict[str, str] = {}
+    for binding in by_bot.values():
+        previous = persona_cards.setdefault(binding.persona_id, binding.role_card_key)
+        if previous != binding.role_card_key:
+            errors.append("conflicting_persona_role_cards")
+            break
     return ParsedPersonaBindings(
         bindings=tuple(by_bot[key] for key in sorted(by_bot)),
         errors=tuple(errors),
@@ -144,10 +150,13 @@ def build_persona_routing_settings(
 ) -> PersonaRoutingSettings:
     parsed = parse_persona_bindings(raw_bindings)
     normalized_legacy_persona_id = legacy_persona_id.strip()
+    settings_errors = list(parsed.errors)
     if not valid_persona_id(normalized_legacy_persona_id):
+        settings_errors.append("invalid_legacy_persona_id")
         normalized_legacy_persona_id = "aike"
     normalized_legacy_role_card_key = legacy_role_card_key.strip()
     if not valid_role_card_key(normalized_legacy_role_card_key):
+        settings_errors.append("invalid_legacy_role_card_key")
         normalized_legacy_role_card_key = normalized_legacy_persona_id
     return PersonaRoutingSettings(
         routing_v2_enabled=bool(routing_v2_enabled),
@@ -161,7 +170,7 @@ def build_persona_routing_settings(
         legacy_persona_id=normalized_legacy_persona_id,
         legacy_role_card_key=normalized_legacy_role_card_key,
         bindings=parsed.bindings,
-        binding_errors=parsed.errors,
+        binding_errors=tuple(settings_errors),
     )
 
 
@@ -175,11 +184,11 @@ def resolve_conversation_scope(
     legacy_session_key: str,
     available_role_card_keys: frozenset[str] | None = None,
 ) -> ConversationScope:
-    """Resolve an account-scoped persona route while preserving legacy defaults.
+    """Resolve a fixed account identity independently of its storage mode.
 
-    Routing activates only for an explicitly allowlisted bot with one valid
-    binding and an available role card.  Any incomplete V2 configuration fails
-    closed instead of borrowing the globally active legacy role card.
+    Only the explicitly bound legacy identity may use the existing default DB
+    and session keys. Other identities require V2; invalid scopes never borrow
+    another account's role card or persistence.
     """
 
     normalized_bot_id = bot_self_id.strip()
@@ -206,15 +215,19 @@ def resolve_conversation_scope(
     )
 
     errors: list[str] = []
-    if routing_requested and binding is None:
+    if binding is None:
         errors.append("missing_persona_binding")
     if memory_requested and not routing_requested:
         errors.append("memory_v2_requires_routing_v2")
-    if routing_requested and settings.binding_errors:
+    if settings.binding_errors:
         errors.append("persona_binding_parse_errors")
+    if binding is not None and not routing_requested and (
+        binding.persona_id != settings.legacy_persona_id
+        or binding.role_card_key != settings.legacy_role_card_key
+    ):
+        errors.append("nonlegacy_persona_requires_routing_v2")
     if (
-        routing_requested
-        and binding is not None
+        binding is not None
         and available_role_card_keys is not None
         and binding.role_card_key not in available_role_card_keys
     ):
@@ -222,11 +235,11 @@ def resolve_conversation_scope(
 
     routing_active = bool(routing_requested and binding is not None and not errors)
     memory_active = bool(memory_requested and routing_active)
-    persona_id = binding.persona_id if binding is not None else settings.legacy_persona_id
+    persona_id = binding.persona_id if binding is not None else ""
     role_card_key = (
         binding.role_card_key
         if binding is not None
-        else settings.legacy_role_card_key
+        else ""
     )
     runtime_session_key = (
         f"persona:{persona_id}:{legacy_session_key}"
@@ -242,9 +255,11 @@ def resolve_conversation_scope(
         group_id=normalized_group_id,
         legacy_session_key=legacy_session_key,
         runtime_session_key=runtime_session_key,
-        binding_source="explicit" if binding is not None else "legacy_fallback",
+        binding_source="explicit" if binding is not None else "unbound",
         runtime_mode=(
-            "persona_v2_persistent"
+            "invalid"
+            if errors
+            else "persona_v2_persistent"
             if memory_active
             else "persona_v2_ephemeral"
             if routing_active

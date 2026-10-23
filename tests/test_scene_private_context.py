@@ -22,6 +22,7 @@ class ScenePrivateContextTests(unittest.TestCase):
             legacy_persona_id="aike",
             legacy_role_card_key="aike",
             bindings=(
+                self.module.PersonaBinding("20001", "aike", "aike"),
                 self.module.PersonaBinding("20002", "linyin", "linyin"),
             ),
         )

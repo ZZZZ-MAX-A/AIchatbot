@@ -81,6 +81,7 @@ class OwnerConsoleHttpContractTests(unittest.TestCase):
                 "access_control",
             ),
             ("settings", "settings", "/api/v1/owner-console/settings", "settings"),
+            ("settings.voice-sample", "settings/voice-sample", "/api/v1/owner-console/settings/accounts/{bot_self_id}/voice-sample", "settings"),
             (
                 "manual-diagnostics",
                 "manual-diagnostics",

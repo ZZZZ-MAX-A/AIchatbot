@@ -6,7 +6,22 @@ import time
 
 from .persona_scope import ConversationScope
 from .sticker_intent import StickerIntent
-from .sticker_library import StickerLibrary
+from .sticker_library import StickerLibrary, sticker_asset_supports_persona
+
+
+def available_sticker_combinations(
+    library: StickerLibrary, persona_key: str,
+) -> tuple[tuple[str, str, str], ...]:
+    """Expose only selectable tags, with no asset identifiers or private text."""
+    if library.issues:
+        return ()
+    return tuple(sorted({
+        (mood, asset.intensity, scene)
+        for asset in library.assets
+        if asset.enabled and sticker_asset_supports_persona(asset.persona_key, persona_key)
+        and asset.scope == "owner_private"
+        for mood in asset.moods for scene in asset.usage_tags
+    }))
 
 
 @dataclass(frozen=True)
@@ -63,6 +78,8 @@ def resolve_sticker_selection_scope(
     legacy_persona_key: str,
 ) -> StickerSelectionScope:
     """Resolve sticker state without falling back across persona boundaries."""
+    if conversation.configuration_error:
+        return StickerSelectionScope(session_key="", persona_key="")
     if conversation.routing_v2_requested:
         persona_key = (
             conversation.role_card_key.strip()
@@ -84,7 +101,7 @@ class StickerSelectionDecision:
     selected_sticker_id: str | None
     reason: str
     eligible_count: int = 0
-    bag_key: tuple[str, str, str, str] | None = None
+    bag_key: tuple[str, str, str, str, str] | None = None
 
     @property
     def selected(self) -> bool:
@@ -103,7 +120,7 @@ class StickerSelectionRuntime:
         self._last_sent_at: dict[str, float] = {}
         self._last_sent_message_index: dict[str, int] = {}
         self._sent_times: dict[str, list[float]] = {}
-        self._bags: dict[tuple[str, str, str, str], list[str]] = {}
+        self._bags: dict[tuple[str, str, str, str, str], list[str]] = {}
 
     @staticmethod
     def _base_gate_reason(
@@ -186,7 +203,7 @@ class StickerSelectionRuntime:
             asset.sticker_id
             for asset in library.assets
             if asset.enabled
-            and asset.persona_key == context.persona_key
+            and sticker_asset_supports_persona(asset.persona_key, context.persona_key)
             and asset.scope == "owner_private"
             and intent.mood in asset.moods
             and asset.intensity == intent.intensity
@@ -195,6 +212,7 @@ class StickerSelectionRuntime:
         if not eligible_ids:
             return StickerSelectionDecision(None, "no_match")
         bag_key = (
+            context.session_key,
             context.persona_key,
             intent.mood,
             intent.intensity,
@@ -227,6 +245,10 @@ class StickerSelectionRuntime:
         if not bag or bag[0] != decision.selected_sticker_id:
             raise ValueError("selection_bag_changed")
         bag.pop(0)
+        self.record_sent(context)
+
+    def record_sent(self, context: StickerSelectionContext) -> None:
+        """Account for a delivered image even when shuffle bookkeeping failed."""
         self._last_sent_at[context.session_key] = context.now
         self._last_sent_message_index[context.session_key] = context.message_index
         self._sent_times.setdefault(context.session_key, []).append(context.now)

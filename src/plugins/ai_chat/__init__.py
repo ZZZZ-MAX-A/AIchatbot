@@ -1,6 +1,7 @@
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
@@ -31,6 +32,8 @@ from .access_store import (
     remove_item,
 )
 from .base_prompt import load_base_chat_reminder
+from .bilibili_context import qq_bilibili_background
+from .encyclopedia_observability import write_encyclopedia_turn_log_safely
 from .chat_contracts import (
     ChatImageContext,
     ChatOptions,
@@ -70,6 +73,7 @@ from .diagnostics import (
     check_ollama,
     clear_error_log,
     format_config_status,
+    format_config_detail_status,
     format_diagnostics,
     format_image_cache_status,
     format_recent_errors,
@@ -93,7 +97,13 @@ from .development_context_report import (
     parse_development_context_report_json,
     with_development_context_retrieval_limits,
 )
-from .gap_scene_summaries import ensure_gap_scene_summaries, gap_scene_summary_stats, list_gap_scene_summaries
+from .gap_scene_summaries import (
+    GAP_SCENE_FIRST_WRITE_COUNT,
+    GAP_SCENE_SUMMARY_UPDATE_STEP,
+    ensure_gap_scene_summaries,
+    gap_scene_summary_stats,
+    list_gap_scene_summaries,
+)
 from .external_read_status import (
     external_read_task_snapshot_lines,
     latest_external_read_task_snapshot,
@@ -177,6 +187,8 @@ from .manual_memory import (
     manual_memory_stats,
     memory_type_label,
 )
+from .memory_audience import MemoryAudience
+from .completion_routes import resolve_chat_completion_route
 from .main_agent_observability import build_main_llm_failure_log_message, redacted_base_url
 from .llm import (
     active_persona_prompt_path,
@@ -189,8 +201,10 @@ from .image_gen import (
     ImageGenError,
     ImageGenRuntime,
     edit_image,
+    format_image_gen_context,
     format_provider_failure_diagnostic,
     generate_image,
+    image_gen_failure_stage,
     image_gen_settings_status,
     load_image_ref,
     normalize_image_prompt,
@@ -222,6 +236,8 @@ from .scene_actor_profile import (
     format_scene_style_example_log_fields,
 )
 from .local_time import (
+    LocalTimeSnapshot,
+    build_local_time_snapshot,
     finalize_local_time_chat_reply,
     history_with_trusted_local_time_context,
     resolve_local_time_request,
@@ -235,13 +251,17 @@ from .lc import (
 )
 from .memory import (
     append_message,
+    mark_assistant_sent,
     build_history,
     clear_all_sessions,
     clear_session,
+    filter_stale_identity_refusal_messages,
     memory_stats,
     session_message_count,
     session_message_progress,
 )
+from .memory_time import event_message_time
+from .rag.memory_time import memory_document_time_context
 from .owner_notify import (
     format_owner_notification,
     validate_owner_notification_content,
@@ -275,6 +295,7 @@ from .reliability_events import (
     format_reliability_trend_report,
     process_runtime_id,
     read_reliability_trend,
+    record_encyclopedia_observation_safely,
     record_failure_safely,
     record_result_safely,
     record_success_safely,
@@ -287,6 +308,7 @@ from .persona_scope import (
     resolve_conversation_scope,
 )
 from .persona_memory_scope import persona_memory_database_scope
+from .persona_capabilities import resolve_persona_voice_route
 from .scene_private_context import (
     ScenePrivateContextLimits,
     build_scene_private_continuity_context,
@@ -296,7 +318,11 @@ from .persona_behavior_diagnostics import (
     format_linyin_behavior_diagnostic_reply,
     is_linyin_behavior_diagnostic_scope,
 )
-from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, select_role_card
+from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards, role_card_by_key, select_role_card
+from .persona_maintenance import (
+    FIXED_PERSONA_MESSAGE, INVALID_PERSONA_MESSAGE, build_persona_binding_report,
+    resolve_memory_session_scope,
+)
 from .summaries import (
     clear_all_summaries,
     clear_session_summaries,
@@ -304,18 +330,46 @@ from .summaries import (
     recent_summaries,
     summary_stats,
 )
+from .topic_scene_switch import (
+    consume_topic_switch_hint,
+    detect_topic_switch_intent,
+    switch_topic_scene,
+    topic_switch_enabled,
+)
+from .reply_bubble_split import (
+    bump_chat_bubble_generation,
+    chat_bubble_split_allowed,
+    current_chat_bubble_generation,
+    next_bubble_delays,
+    normalize_bubble_limits,
+    resolve_chat_bubbles,
+    wait_for_bubble_delay,
+)
+from .reunion import (
+    build_reunion_hint,
+    classify_reunion_gap,
+    correct_capped_reunion_duration,
+    parse_created_at,
+    reunion_allowed,
+)
+from .chat_interactions import InteractionKey, InteractionStore
+
 from .sticker_intent import (
     STICKER_INTENT_SYSTEM_CONTEXT,
     extract_sticker_intent,
 )
+from .sticker_library import ALLOWED_PERSONA_KEYS, load_approved_sticker_library
 from .sticker_attachment import send_selected_sticker_attachment
 from .sticker_classifier import (
     RemoteStickerClassifierSettings,
     StickerClassifierResult,
+    StickerClassifierDiagnostics,
     classify_sticker_intent,
     format_remote_sticker_attachment_status,
+    format_sticker_classifier_diagnostics,
 )
 from .sticker_selection import (
+    available_sticker_combinations,
     StickerSelectionContext,
     StickerSelectionDecision,
     StickerSelectionPolicy,
@@ -410,6 +464,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ERROR_LOG_PATH = PROJECT_ROOT / "logs" / "ai_chat_error.log"
 SCENE_HUB_LOG_PATH = PROJECT_ROOT / "logs" / "scene_hub.log"
 _session_locks: dict[str, asyncio.Lock] = {}
+_interaction_store = InteractionStore()
 _main_agent_session_locks: dict[str, asyncio.Lock] = {}
 _image_gen_runtime = ImageGenRuntime()
 _qwen_space_runtime = QwenSpaceRuntime()
@@ -446,6 +501,11 @@ class RemoteStickerClassifierShadowSnapshot:
     selected_sticker_id: str
     eligible_count: int
     attachment_status: str
+    response_chars: int = 0
+    finish_reason: str = "unknown"
+    parse_reason: str = ""
+    normalized_code_fence: bool = False
+    diagnostics: StickerClassifierDiagnostics | None = None
 
 
 @dataclass(frozen=True)
@@ -455,12 +515,11 @@ class RemoteStickerClassifierEvaluation:
     context: StickerSelectionContext | None = None
 
 
-_last_remote_sticker_classifier_shadow: (
-    RemoteStickerClassifierShadowSnapshot | None
-) = None
+_remote_sticker_classifier_snapshots: dict[str, RemoteStickerClassifierShadowSnapshot] = {}
 _remote_sticker_classifier_sample_id = 0
-_remote_sticker_classifier_task: asyncio.Task[None] | None = None
-_chat_sticker_attachments_suspended = False
+_remote_sticker_classifier_tasks: dict[str, asyncio.Task[None]] = {}
+_chat_sticker_attachment_locks: dict[str, asyncio.Lock] = {}
+_chat_sticker_attachments_suspended: dict[str, float] = {}
 _reliability_runtime_id = process_runtime_id()
 
 
@@ -526,6 +585,49 @@ def session_lock(key: str) -> asyncio.Lock:
     return lock
 
 
+def owner_interaction_key(event: MessageEvent) -> InteractionKey | None:
+    if not is_owner(config, event):
+        return None
+    scope = conversation_scope(event)
+    if scope.configuration_error or not scope.bot_self_id or not scope.persona_id:
+        return None
+    return InteractionKey(scope.bot_self_id, scope.persona_id, str(event.user_id))
+
+
+def owner_interaction_lock_key(bot_self_id: str, owner_id: str) -> str:
+    return f"owner-interaction:{bot_self_id}:{owner_id}"
+
+
+def chat_turn_lock(event: MessageEvent, session_key: str) -> asyncio.Lock:
+    key = owner_interaction_key(event)
+    return session_lock(owner_interaction_lock_key(key.bot_self_id, key.owner_id) if key else session_key)
+
+
+@asynccontextmanager
+async def chat_turn_scope(event: MessageEvent, session_key: str):
+    # Preserve the original session lock used by history maintenance as well.
+    interaction_lock = chat_turn_lock(event, session_key)
+    history_lock = session_lock(session_key)
+    async with AsyncExitStack() as guard:
+        await guard.enter_async_context(interaction_lock)
+        if history_lock is not interaction_lock:
+            await guard.enter_async_context(history_lock)
+        yield
+
+
+def record_owner_interaction_success(event: MessageEvent) -> None:
+    try:
+        key = owner_interaction_key(event)
+        if key is None:
+            return
+        _interaction_store.record_success(
+            key, source="private" if isinstance(event, PrivateMessageEvent) else "group",
+        )
+    except Exception as exc:
+        # A metadata failure must not turn a delivered reply into a send failure.
+        log_background_error(exc, event)
+
+
 def main_agent_session_lock(key: str) -> asyncio.Lock:
     lock = _main_agent_session_locks.get(key)
     if lock is None:
@@ -555,10 +657,17 @@ def log_image_gen_provider_failure(exc: ImageGenError, *, operation: str) -> Non
     ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     cause = exc.__cause__ or exc
     diagnostic = format_provider_failure_diagnostic(cause)
+    stage = str(
+        exc.context.get("stage")
+        or image_gen_failure_stage(exc.code, operation=operation)
+    )
+    context = format_image_gen_context(exc.context)
+    context_suffix = f" {context}" if context else ""
     with ERROR_LOG_PATH.open("a", encoding="utf-8") as file:
         file.write(
             f"{datetime.now().isoformat(timespec='seconds')} "
-            f"component=image_gen operation={operation} {diagnostic}\n"
+            f"component=image_gen operation={operation} stage={stage} "
+            f"error_code={exc.code} {diagnostic}{context_suffix}\n"
         )
 
 
@@ -608,7 +717,7 @@ async def reject_or_silent(matcher: Matcher, reason: str | None) -> None:
 def tts_status_lines() -> list[str]:
     lines = [
         f"语音输出：{'开启' if config.enable_tts else '关闭'}",
-        f"TTS 服务：{config.tts_service_url}",
+        f"TTS 服务：{redacted_base_url(config.tts_service_url)}",
         f"默认音色：{config.tts_voice}",
         f"默认情绪：{config.tts_emotion}",
         f"自动启动：{'开启' if config.tts_auto_start else '关闭'}",
@@ -731,9 +840,14 @@ def session_key(event: MessageEvent) -> str:
 
 def conversation_scope(event: MessageEvent) -> ConversationScope:
     is_group = isinstance(event, GroupMessageEvent)
-    available_role_card_keys = frozenset(card.key for card in list_role_cards())
+    settings = getattr(config, "persona_routing", PersonaRoutingSettings())
+    binding = next((item for item in settings.bindings
+                    if item.bot_self_id == str(getattr(event, "self_id", ""))), None)
+    available_role_card_keys = (frozenset({binding.role_card_key})
+        if binding is not None and role_card_by_key(binding.role_card_key) is not None
+        else frozenset())
     return resolve_conversation_scope(
-        getattr(config, "persona_routing", PersonaRoutingSettings()),
+        settings,
         bot_self_id=str(getattr(event, "self_id", "")),
         user_id=user_id(event),
         chat_type="group" if is_group else "private",
@@ -755,64 +869,33 @@ def persona_memory_id_from_session_key(key: str) -> str:
     return parts[1]
 
 
-def persona_memory_write_enabled(persona_id: str) -> bool:
-    settings = getattr(config, "persona_routing", PersonaRoutingSettings())
-    if not settings.routing_v2_enabled or not settings.memory_v2_enabled:
-        return False
-    return any(
-        binding.persona_id == persona_id
-        and binding.bot_self_id in settings.routing_v2_bot_ids
-        and binding.bot_self_id in settings.memory_v2_bot_ids
-        for binding in settings.bindings
-    )
-
-
 def add_manual_memory_for_session(**kwargs) -> int:
-    persona_id = persona_memory_id_from_session_key(
-        str(kwargs.get("source_session_key") or "")
-    )
-    if persona_id:
-        if not persona_memory_write_enabled(persona_id):
-            raise RuntimeError("persona persistent memory is not enabled")
-        with persona_memory_database_scope(persona_id):
+    scope = resolve_memory_session_scope(config, str(kwargs.get("source_session_key") or ""))
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
             return add_manual_memory(**kwargs)
     return add_manual_memory(**kwargs)
 
 
 def clear_session_summaries_for_session(key: str) -> int:
-    persona_id = persona_memory_id_from_session_key(key)
-    if persona_id:
-        if not persona_memory_write_enabled(persona_id):
-            raise RuntimeError("persona persistent memory is not enabled")
-        with persona_memory_database_scope(persona_id):
+    scope = resolve_memory_session_scope(config, key)
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
             return clear_session_summaries(key)
     return clear_session_summaries(key)
 
 
 def delete_session_summary_for_session(key: str, summary_id: int) -> bool:
-    persona_id = persona_memory_id_from_session_key(key)
-    if persona_id:
-        if not persona_memory_write_enabled(persona_id):
-            raise RuntimeError("persona persistent memory is not enabled")
-        with persona_memory_database_scope(persona_id):
+    scope = resolve_memory_session_scope(config, key)
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
             return delete_session_summary(key, summary_id)
     return delete_session_summary(key, summary_id)
 
 
 def tts_route_for_event(event: MessageEvent) -> tuple[str, str] | None:
-    if not config.enable_tts:
-        return None
-    scope = conversation_scope(event)
-    if not scope.routing_v2_active:
-        return config.tts_voice, config.tts_emotion
-    if (
-        scope.role_card_key != "linyin"
-        or not config.enable_linyin_tts
-        or not config.linyin_tts_voice
-        or not config.linyin_tts_emotion
-    ):
-        return None
-    return config.linyin_tts_voice, config.linyin_tts_emotion
+    route = resolve_persona_voice_route(config, conversation_scope(event))
+    return (route.voice, route.emotion) if route.enabled else None
 
 
 def tts_enabled_for_event(event: MessageEvent) -> bool:
@@ -824,8 +907,7 @@ def tts_candidate_scope_key(event: MessageEvent) -> str:
 
 
 def tts_trailing_noise_cleanup_for_event(event: MessageEvent) -> bool:
-    scope = conversation_scope(event)
-    return bool(scope.routing_v2_active and scope.role_card_key == "linyin")
+    return resolve_persona_voice_route(config, conversation_scope(event)).trim_trailing_noise
 
 
 def chat_request_for_event(
@@ -838,8 +920,8 @@ def chat_request_for_event(
         key=scope.runtime_session_key,
         text=text,
         image_context=image_context,
-        persona_id=scope.persona_id if scope.routing_v2_active else "",
-        role_card_key=scope.role_card_key if scope.routing_v2_active else "",
+        persona_id=scope.persona_id,
+        role_card_key=scope.role_card_key,
         persistent_memory_enabled=not scope.routing_v2_active,
         persona_memory_enabled=scope.memory_v2_active,
         tts_enabled=tts_enabled_for_event(event),
@@ -863,9 +945,8 @@ def resolve_chat_sticker_scope(
 ) -> tuple[ConversationScope, StickerSelectionScope]:
     conversation = conversation_scope(event)
     legacy_persona_key = ""
-    if not conversation.routing_v2_requested:
-        card = active_role_card()
-        legacy_persona_key = card.key if card is not None else ""
+    if not conversation.configuration_error:
+        legacy_persona_key = conversation.role_card_key
     return conversation, resolve_sticker_selection_scope(
         conversation,
         legacy_persona_key=legacy_persona_key,
@@ -876,7 +957,7 @@ def chat_sticker_message_progress(
     conversation: ConversationScope,
     sticker_scope: StickerSelectionScope,
 ) -> int:
-    if conversation.routing_v2_requested and not conversation.routing_v2_active:
+    if conversation.configuration_error:
         return 0
     if conversation.memory_v2_active:
         with persona_memory_database_scope(conversation.persona_id):
@@ -897,7 +978,7 @@ def chat_sticker_selection_context(
         resolved_scope or resolve_chat_sticker_scope(event)
     )
     return StickerSelectionContext(
-        session_key=sticker_scope.session_key,
+        session_key=remote_sticker_scope_key((conversation, sticker_scope)),
         is_owner=is_owner(config, event),
         is_private=isinstance(event, PrivateMessageEvent),
         persona_key=sticker_scope.persona_key,
@@ -1223,6 +1304,7 @@ async def run_memory_context_graph(
                 min_score=config.memory_rag_min_score,
                 max_context_chars=config.memory_rag_max_context_chars,
                 source_types=set(MEMORY_RAG_SOURCE_TYPES),
+                audience=memory_audience_for_event(event, key),
             )
             current.semantic_memory_result_count = len(results)
             current.semantic_memory_hits = list(semantic_memory_hit_snapshots(results))
@@ -1234,14 +1316,26 @@ async def run_memory_context_graph(
             log_background_error(exc, event)
         return current
 
-    def build_history_node(current: MemoryContext) -> MemoryContext:
+    async def build_history_node(current: MemoryContext) -> MemoryContext:
+        topic_hint = consume_topic_switch_hint(current.session_key)
+        system_contexts = list(current.system_contexts or [])
+        if topic_hint:
+            system_contexts.append(topic_hint)
         current.history = build_history(
             current.session_key,
             config.max_context_messages,
             config.max_session_summaries_in_context,
             config.max_gap_scene_summaries_in_context,
-            current.system_contexts,
+            system_contexts,
         )
+        if current.message_type == "private" and is_owner(config, event):
+            try:
+                current.history, current.bilibili_memory_status = await asyncio.to_thread(
+                    qq_bilibili_background, config, conversation=conversation_scope(event),
+                    owner_id=user_id(event), history=current.history, query=current.query,
+                )
+            except Exception:
+                current.bilibili_memory_status = {"status": "unavailable"}
         current.rule_reminder_context = rule_reminder_context(current.session_key)
         if current.rule_reminder_context:
             current.history.append({"role": "system", "content": current.rule_reminder_context})
@@ -1275,6 +1369,7 @@ async def build_chat_prompt_context(
         semantic_memory_context_chars = len(memory_execution.result.semantic_memory_context)
         semantic_memory_error = memory_execution.result.semantic_memory_error
         semantic_memory_hits = memory_execution.result.semantic_memory_hits
+        bilibili_memory_status = dict(memory_execution.result.bilibili_memory_status)
     elif persistent_memory_enabled:
         memory_execution = await run_memory_context_graph(event, key, query=query)
         history = list(memory_execution.result.history)
@@ -1282,20 +1377,28 @@ async def build_chat_prompt_context(
         semantic_memory_context_chars = len(memory_execution.result.semantic_memory_context)
         semantic_memory_error = memory_execution.result.semantic_memory_error
         semantic_memory_hits = memory_execution.result.semantic_memory_hits
+        bilibili_memory_status = dict(memory_execution.result.bilibili_memory_status)
     else:
-        history = ephemeral_persona_history.build_history(
-            key,
-            config.max_context_messages,
-            [
+        eph_contexts = [
                 language_reset_context(),
                 speaker_identity_context(event),
                 owner_public_context(),
-            ],
+            ]
+        topic_hint = consume_topic_switch_hint(key)
+        if topic_hint:
+            eph_contexts.append(topic_hint)
+        history = ephemeral_persona_history.build_history(
+            key,
+            config.max_context_messages,
+            eph_contexts,
         )
         semantic_memory_result_count = 0
         semantic_memory_context_chars = 0
         semantic_memory_error = ""
         semantic_memory_hits = ()
+        bilibili_memory_status = {"status": "ephemeral_memory"}
+    if persona_memory_id:
+        history = filter_stale_identity_refusal_messages(history)
     if semantic_voice:
         history.append({"role": "system", "content": semantic_voice_instruction()})
     if has_image_context:
@@ -1312,6 +1415,7 @@ async def build_chat_prompt_context(
         semantic_memory_context_chars=semantic_memory_context_chars,
         semantic_memory_error=semantic_memory_error,
         semantic_memory_hits=semantic_memory_hits,
+        bilibili_memory_status=bilibili_memory_status,
     )
 
 
@@ -1367,10 +1471,23 @@ def parse_single_arg(arg_text: str) -> str:
 def status_lines() -> list[str]:
     driver = get_driver()
     access = current_access()
+    chat_graph_enabled = bool(config.enable_chat_graph_runtime)
+    chat_route = resolve_chat_completion_route(config)
+    vision_provider = str(getattr(config, "vision_provider", "ollama") or "ollama").strip()
+    vision_model = (
+        getattr(config, "vision_cloud_model", "qwen3.7-flash")
+        if vision_provider == "aliyun_bailian"
+        else config.vision_model
+    )
     return [
         f"机器人：{config.bot_name}",
-        f"模型：{config.openai_model}",
-        f"接口：{config.openai_base_url}",
+        f"聊天链路：{'ChatGraph/RootGraph' if chat_graph_enabled else '兼容聊天链路'}",
+        f"默认聊天模型：{chat_route.model or '未配置'}",
+        f"接口：{redacted_base_url(chat_route.base_url)}",
+        f"视觉：{'开启' if config.enable_vision else '关闭'} / {vision_provider} / {vision_model or '未配置'}",
+        f"普通图片：{'开启' if getattr(config, 'enable_image_gen', False) else '关闭'} / {getattr(config, 'image_gen_model', '') or '未配置'} / {getattr(config, 'image_edit_model', '') or '未配置'}",
+        f"Qwen Space 改图：{'开启' if getattr(config, 'enable_qwen_space_edit', False) else '关闭'}",
+        f"TTS：{'开启' if config.enable_tts else '关闭'} / 自动启动 {'开启' if config.tts_auto_start else '关闭'}",
         f"私聊：{'开启' if config.enable_private_chat else '关闭'}",
         f"群聊：{'开启' if config.enable_group_chat else '关闭'}",
         f"群主动回复：{'开启' if config.enable_group_auto_reply else '关闭'}",
@@ -1573,7 +1690,7 @@ def memory_rag_status_lines(snapshot: dict[str, object]) -> list[str]:
         f"调试命令权限：{'仅主人' if snapshot['owner_only_debug'] else '按 QQ 命令权限'}",
         f"向量服务：{snapshot['embedding_provider']}",
         f"向量模型：{snapshot['embedding_model']}",
-        f"向量服务地址：{snapshot['embedding_base_url']}",
+        f"向量服务地址：{redacted_base_url(str(snapshot['embedding_base_url']))}",
         f"向量维度：{snapshot['embedding_dimension']}",
         f"Embedding 自检：{embedding_check_detail}",
         f"每次最多召回：{snapshot['top_k']} 条",
@@ -1664,6 +1781,7 @@ def format_semantic_memory_context(results) -> str:
             heading += f" | 会话 {document.session_key}"
         heading += "]"
         lines.append(heading)
+        lines.append(memory_document_time_context(document))
         lines.append(document.content.strip())
         lines.append("")
     return "\n".join(lines).strip()
@@ -1675,8 +1793,8 @@ def format_memory_rag_error_reply(exc: Exception) -> str:
     if "cannot connect to ollama" in lower_message or "connection refused" in lower_message:
         return (
             "MemoryRAG 命令执行失败：无法连接 Ollama。"
-            "请确认 Ollama 正在运行，地址为 "
-            f"{config.memory_rag_embedding_base_url}。"
+            "请确认 Ollama 正在运行，地址范围为 "
+            f"{redacted_base_url(config.memory_rag_embedding_base_url)}。"
         )
     if "timed out" in lower_message or "timeout" in lower_message:
         return "MemoryRAG 命令执行失败：embedding 请求超时，请稍后重试或检查 Ollama 负载。"
@@ -1850,7 +1968,7 @@ def tts_status_reply_lines(tts_health: dict[str, object] | None = None) -> list[
             f"语音状态：{overall}",
             "功能配置：开启。",
             f"启动策略：{'按需自动冷启动' if auto_start else '不自动启动'}。",
-            f"TTS 服务地址：{config.tts_service_url}",
+            f"TTS 服务地址：{redacted_base_url(config.tts_service_url)}",
         ]
         if detail == "non_loopback_not_checked":
             lines.append("本地服务：未验证（只允许主动检查本机 loopback 地址）。")
@@ -1922,10 +2040,14 @@ async def agent_ops_health_reply(event: MessageEvent) -> str:
             vision_execution.result.reply_text,
             (
                 "视觉识图：",
-                "Ollama 地址：",
-                "Ollama 服务：",
-                "视觉模型：",
-                "模型存在：",
+                "当前提供方：",
+                "云端模型：",
+                "云端接口：",
+                "云端 Key：",
+                "旧本地 Ollama 地址：",
+                "旧本地 Ollama 服务：",
+                "旧本地视觉模型：",
+                "本地模型存在：",
                 "视觉上下文：",
                 "推理自检：",
             ),
@@ -1962,7 +2084,7 @@ async def agent_ops_health_reply(event: MessageEvent) -> str:
     return "\n".join(
         [
             "Agent 聚合诊断：",
-            "范围：视觉/Ollama、MemoryRAG/Embedding、最近错误、RootGraph、MainAgent。",
+            "范围：视觉提供方/本地服务、MemoryRAG/Embedding、最近错误、RootGraph、MainAgent。",
             "",
             *_section_lines("视觉链路", vision_lines),
             "",
@@ -1993,21 +2115,25 @@ async def agent_vision_troubleshoot_reply(event: MessageEvent) -> str:
     vision_execution = await run_diagnostics_graph(event, DiagnosticsView.VISION)
     if vision_execution.result.error:
         vision_lines = [vision_execution.result.reply_text or vision_execution.result.error]
-        step_lines.append("1. 视觉/Ollama 自检：失败")
+        step_lines.append("1. 视觉提供方/本地服务自检：失败")
     else:
         vision_lines = _select_prefixed_lines(
             vision_execution.result.reply_text,
             (
                 "视觉识图：",
-                "Ollama 地址：",
-                "Ollama 服务：",
-                "视觉模型：",
-                "模型存在：",
+                "当前提供方：",
+                "云端模型：",
+                "云端接口：",
+                "云端 Key：",
+                "旧本地 Ollama 地址：",
+                "旧本地 Ollama 服务：",
+                "旧本地视觉模型：",
+                "本地模型存在：",
                 "视觉上下文：",
                 "推理自检：",
             ),
         )
-        step_lines.append("1. 视觉/Ollama 自检：完成")
+        step_lines.append("1. 视觉提供方/本地服务自检：完成")
 
     cache_execution = await run_diagnostics_graph(event, DiagnosticsView.IMAGE_CACHE)
     if cache_execution.result.error:
@@ -2047,7 +2173,7 @@ async def agent_vision_troubleshoot_reply(event: MessageEvent) -> str:
     return "\n".join(
         [
             "MainAgent 多步只读诊断：图片识别",
-            "范围：视觉/Ollama、图片缓存、最近错误、RootGraph、MainAgent。",
+            "范围：视觉提供方/本地服务、图片缓存、最近错误、RootGraph、MainAgent。",
             "只读保证：未清理缓存、未修改配置、未写入数据库、未发送额外 QQ 消息。",
             "",
             "步骤：",
@@ -2055,7 +2181,7 @@ async def agent_vision_troubleshoot_reply(event: MessageEvent) -> str:
             "",
             *_section_lines("初步判断", [f"- {line}" for line in findings]),
             "",
-            *_section_lines("视觉/Ollama 证据", vision_lines),
+            *_section_lines("视觉提供方/本地服务证据", vision_lines),
             "",
             *_section_lines("图片缓存证据", cache_lines),
             "",
@@ -2089,6 +2215,8 @@ def _memory_rag_root_evidence_lines(root_lines: list[str]) -> list[str]:
 
 async def agent_memory_rag_troubleshoot_reply(event: MessageEvent) -> str:
     scope = conversation_scope(event)
+    if scope.configuration_error:
+        return INVALID_PERSONA_MESSAGE
     if scope.routing_v2_active and not scope.memory_v2_active:
         return (
             "当前角色的持久记忆尚未启用；"
@@ -2193,13 +2321,31 @@ async def run_diagnostics_graph(event: MessageEvent, view: DiagnosticsView = Dia
         requester_id=user_id(event),
         session_key=scope.runtime_session_key,
     )
+    if scope.configuration_error:
+        state.reply_text = INVALID_PERSONA_MESSAGE
+        state.error = "invalid_persona_scope"
+        return await DiagnosticsGraphRunner().run(state)
 
     async def read_config_snapshot(current: DiagnosticsState) -> DiagnosticsState:
+        chat_graph_enabled = bool(config.enable_chat_graph_runtime)
+        chat_route = resolve_chat_completion_route(config)
         current.config_snapshot = {
             "bot_name": config.bot_name,
-            "chat_model": config.openai_model,
-            "vision_model": config.vision_model,
-            "tts_service_url": config.tts_service_url,
+            "chat_runtime": "chat_graph" if chat_graph_enabled else "legacy",
+            "chat_route": chat_route.source,
+            "chat_route_scope": "default",
+            "chat_model": chat_route.model,
+            "vision_provider": getattr(config, "vision_provider", "ollama") or "ollama",
+            "vision_model": (
+                getattr(config, "vision_cloud_model", "qwen3.7-flash")
+                if getattr(config, "vision_provider", "ollama") == "aliyun_bailian"
+                else config.vision_model
+            ),
+            "image_gen_model": getattr(config, "image_gen_model", ""),
+            "image_edit_model": getattr(config, "image_edit_model", ""),
+            "qwen_space_enabled": getattr(config, "enable_qwen_space_edit", False),
+            "persona_llm_enabled": getattr(config, "enable_persona_llm_routing", False),
+            "tts_service_url": redacted_base_url(config.tts_service_url),
         }
         return current
 
@@ -2298,6 +2444,10 @@ async def run_memory_retrieval_graph(
     )
 
     async def validate_retrieval_request(current: MemoryRetrievalState) -> MemoryRetrievalState:
+        if scope.configuration_error:
+            current.reply_text = INVALID_PERSONA_MESSAGE
+            current.error = "invalid_persona_scope"
+            return current
         if scope.routing_v2_active and not scope.memory_v2_active:
             current.reply_text = (
                 "当前角色的持久记忆尚未启用；本次没有访问爱可的 MemoryRAG。"
@@ -2333,6 +2483,7 @@ async def run_memory_retrieval_graph(
                     min_score=config.memory_rag_min_score,
                     max_context_chars=config.memory_rag_max_context_chars,
                     source_types=set(MEMORY_RAG_SOURCE_TYPES),
+                    audience=memory_audience_for_event(event, scope.runtime_session_key),
                 )
                 current.metadata["results"] = results
                 current.metadata["result_count"] = len(results)
@@ -2529,7 +2680,7 @@ def summary_status_lines(key: str) -> list[str]:
         f"上下文摘要数：{config.max_session_summaries_in_context}",
         f"空窗摘要：{'开启' if config.enable_gap_scene_summaries else '关闭'}",
         f"当前空窗摘要数：{gap['summary_count']}",
-        f"空窗摘要阈值：>{config.gap_scene_summary_1_threshold} / >{config.gap_scene_summary_2_threshold}",
+        f"空窗状态卡：溢出满 {GAP_SCENE_FIRST_WRITE_COUNT} 条首写，之后每露出 {GAP_SCENE_SUMMARY_UPDATE_STEP} 条更新同一张卡",
         f"上下文空窗摘要数：{config.max_gap_scene_summaries_in_context}",
         f"规则提醒间隔：{config.rule_reminder_interval_messages} 条",
     ]
@@ -2582,11 +2733,17 @@ def language_reset_context() -> str:
     return "语言模式：正式运行链路使用中文回复；语音输出只支持中文。"
 
 
+def memory_audience_for_event(event: MessageEvent, key: str = "") -> MemoryAudience:
+    return MemoryAudience(
+        message_type=event.message_type,
+        user_id=user_id(event),
+        group_id=group_id(event) if isinstance(event, GroupMessageEvent) else "",
+        session_key=key,
+    )
+
+
 def manual_memory_subjects(event: MessageEvent) -> list[tuple[str, str]]:
-    subjects = [("user", user_id(event))]
-    if isinstance(event, GroupMessageEvent):
-        subjects.append(("group", group_id(event)))
-    return subjects
+    return memory_audience_for_event(event).manual_subjects()
 
 
 def fact_memory_subject(event: MessageEvent) -> tuple[str, str]:
@@ -2596,7 +2753,7 @@ def fact_memory_subject(event: MessageEvent) -> tuple[str, str]:
 
 
 def preference_memory_subject(event: MessageEvent) -> tuple[str, str]:
-    return ("user", user_id(event))
+    return fact_memory_subject(event)
 
 
 def subject_label(subject_type: str, subject_id: str) -> str:
@@ -2661,6 +2818,10 @@ async def run_memory_admin_graph(
         return usage.get(current.action, "用法不正确。")
 
     async def validate_admin_request(current: MemoryAdminState) -> MemoryAdminState:
+        if scope.configuration_error:
+            current.reply_text = INVALID_PERSONA_MESSAGE
+            current.error = "invalid_persona_scope"
+            return current
         if scope.routing_v2_active and not scope.memory_v2_active:
             current.reply_text = (
                 "当前角色的持久记忆尚未启用；本次没有修改爱可的记忆数据库。"
@@ -2974,6 +3135,7 @@ async def send_tts_record(
     *,
     refresh_cache: bool = False,
     force_language: str = "",
+    counts_as_chat: bool = False,
 ) -> None:
     if not tts_enabled_for_event(event):
         raise RuntimeError("TTS is disabled for this persona route")
@@ -3002,6 +3164,8 @@ async def send_tts_record(
         user_id=int(event.user_id),
         message=MessageSegment.record(str(tts_result.audio_path)),
     )
+    if counts_as_chat:
+        record_owner_interaction_success(event)
 
 
 async def handle_direct_or_last_tts(
@@ -3273,6 +3437,10 @@ async def run_voice_graph_intent(
             error_holder["exception"] = exc
             return set_error(current, "send_failed")
         current.sent = True
+        if mode == VoiceMode.SEMANTIC_REPLY:
+            semantic_context["assistant_sent_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if mode == VoiceMode.SEMANTIC_REPLY and semantic_context["result"].interaction_success_eligible:
+            record_owner_interaction_success(event)
         return current
 
     async def run_graph():
@@ -3288,7 +3456,7 @@ async def run_voice_graph_intent(
         return await runner.run(state)
 
     if mode == VoiceMode.SEMANTIC_REPLY:
-        async with session_lock(chat_session_key(event)):
+        async with chat_turn_scope(event, chat_session_key(event)):
             execution = await run_graph()
             error = execution.result.error
             if error:
@@ -3304,6 +3472,10 @@ async def run_voice_graph_intent(
                 stored_assistant=voice_text,
                 voice_text=voice_text,
                 sticker_intent=result.sticker_intent,
+                time_observation=result.time_observation,
+                interaction_success_eligible=result.interaction_success_eligible,
+                tool_observation=result.tool_observation,
+                assistant_sent_at=semantic_context.get("assistant_sent_at"),
             )
             shadow_state = safe_apply_shadow_runtime_result(
                 event,
@@ -3380,16 +3552,32 @@ async def finish_voice_graph_error(
     return True
 
 
-def persona_status_lines() -> list[str]:
-    prompt = load_persona_prompt()
-    active_path = active_persona_prompt_path()
+def load_persona_prompt_for_event(event: MessageEvent) -> str:
+    scope = conversation_scope(event)
+    return load_persona_prompt(scope.role_card_key) if not scope.configuration_error else ""
+
+
+def persona_status_lines_for_event(event: MessageEvent) -> list[str]:
+    scope = conversation_scope(event)
     return [
-        f"当前角色卡：{active_path if active_path else '未启用'}",
-        f"角色卡目录：{ROLE_CARD_DIR}",
-        f"可选角色卡：{len(list_role_cards())}",
-        f"内容长度：{len(prompt)}",
-        f"加载状态：{'已启用' if prompt else '未启用'}",
+        f"固定人格：{scope.persona_id or '未绑定'}",
+        f"固定角色卡：{scope.role_card_key or '未绑定'}",
+        f"记忆模式：{scope.runtime_mode}",
+        f"绑定状态：{scope.configuration_error or '正常'}",
+        "运行时角色切换：关闭",
     ]
+
+
+def persona_status_lines() -> list[str]:
+    report = build_persona_binding_report(config)
+    lines = ["账号固定绑定：", "运行时角色切换：关闭"]
+    for row in report["rows"]:
+        lines.append(f"- {row['account_label']}：{row['persona_id']} / {row['role_card_key']}；"
+                     f"模型 {row['chat_model'] or '未配置'}；记忆 {row['memory_mode']}；"
+                     f"状态 {','.join(row['errors']) or '正常'}")
+    if report["errors"]:
+        lines.append("绑定错误：" + ",".join(report["errors"]))
+    return lines
 
 
 def list_lines(title: str, items: frozenset[str]) -> str:
@@ -3399,38 +3587,42 @@ def list_lines(title: str, items: frozenset[str]) -> str:
 
 
 def role_card_list_lines() -> list[str]:
-    cards = list_role_cards()
-    active = active_role_card()
-    active_key = active.key if active is not None else ""
-    lines = [
-        "角色卡列表：",
-        f"可选数量：{len(cards)}",
-        f"当前启用：{active.title if active is not None else '未启用'}",
-    ]
-    if not cards:
-        lines.append("暂无可用角色卡。")
-        return lines
-    for card in cards:
-        marker = "（当前）" if card.key == active_key else ""
-        lines.append(f"- {card.key}：{card.title}{marker}")
-    return lines
+    return persona_status_lines()
 
 
 def model_config_status_lines() -> list[str]:
+    chat_graph_enabled = bool(getattr(config, "enable_chat_graph_runtime", False))
+    chat_route = resolve_chat_completion_route(config)
+    vision_provider = str(
+        getattr(config, "vision_provider", "ollama") or "ollama"
+    ).strip()
+    persona_llm_keys = getattr(config, "persona_llm_role_card_keys", ()) or ()
+    persona_vision_keys = getattr(config, "persona_vision_role_card_keys", ()) or ()
     return [
         "模型配置摘要：",
-        f"聊天模型：{config.chat_llm_model or config.openai_model or '未配置'}",
-        f"聊天接口：{redacted_base_url(config.chat_llm_base_url or config.openai_base_url)}",
-        f"聊天 Key：{'已配置' if (config.chat_llm_api_key or config.openai_api_key) else '未配置'}",
-        f"聊天超时：{config.chat_llm_timeout_seconds} 秒",
-        f"MainAgent LLM：{'开启' if config.main_agent_use_llm else '关闭'}",
-        f"MainAgent 模型：{config.main_llm_model or '未配置'}",
-        f"MainAgent 接口：{redacted_base_url(config.main_llm_base_url)}",
-        f"MainAgent Key：{'已配置' if config.main_llm_api_key else '未配置'}",
-        f"MainAgent 超时：{config.main_llm_timeout_seconds} 秒",
-        f"Embedding provider：{config.memory_rag_embedding_provider}",
-        f"Embedding model：{config.memory_rag_embedding_model}",
-        f"Embedding base_url：{redacted_base_url(config.memory_rag_embedding_base_url)}",
+        f"聊天链路：{'ChatGraph/RootGraph' if chat_graph_enabled else '兼容聊天链路'}",
+        f"默认聊天模型：{chat_route.model or '未配置'}",
+        f"聊天接口：{redacted_base_url(chat_route.base_url)}",
+        f"聊天 Key：{'已配置' if chat_route.api_key else '未配置'}",
+        f"聊天超时：{chat_route.timeout_seconds} 秒",
+        f"MainAgent：{'开启' if getattr(config, 'enable_main_agent', False) else '关闭'} / LLM {'开启' if getattr(config, 'main_agent_use_llm', False) else '关闭'}",
+        f"MainAgent 模型：{getattr(config, 'main_llm_model', '') or '未配置'}",
+        f"MainAgent 接口：{redacted_base_url(getattr(config, 'main_llm_base_url', ''))}",
+        f"MainAgent Key：{'已配置' if getattr(config, 'main_llm_api_key', '') else '未配置'}",
+        f"视觉：{'开启' if getattr(config, 'enable_vision', False) else '关闭'} / {vision_provider}",
+        f"视觉模型：{getattr(config, 'vision_cloud_model', 'qwen3.7-flash') if vision_provider == 'aliyun_bailian' else getattr(config, 'vision_model', '') or '未配置'}",
+        f"视觉云端 Key：{'已配置' if getattr(config, 'aliyun_bailian_api_key', '') else '未配置'}" if vision_provider == 'aliyun_bailian' else f"视觉本地接口：{'已配置' if getattr(config, 'vision_ollama_base_url', '') else '未配置'}",
+        f"人格聊天路由：{'开启' if getattr(config, 'enable_persona_llm_routing', False) else '关闭'} / {getattr(config, 'persona_llm_model', '') or '未配置'} / {len(persona_llm_keys)} 个角色",
+        f"人格视觉路由：{'开启' if getattr(config, 'enable_persona_vision_routing', False) else '关闭'} / {getattr(config, 'persona_vision_model', '') or '未配置'} / {len(persona_vision_keys)} 个角色",
+        f"普通图片：{'开启' if getattr(config, 'enable_image_gen', False) else '关闭'} / 生图 {getattr(config, 'image_gen_model', '') or '未配置'} / 改图 {getattr(config, 'image_edit_model', '') or '未配置'}",
+        f"Qwen Space 改图：{'开启' if getattr(config, 'enable_qwen_space_edit', False) else '关闭'} / HF Token {'已配置' if getattr(config, 'qwen_space_hf_token', '') else '未配置'}",
+        f"TTS：{'开启' if getattr(config, 'enable_tts', False) else '关闭'} / 自动启动 {'开启' if getattr(config, 'tts_auto_start', False) else '关闭'} / 音色 {'已配置' if getattr(config, 'tts_voice', '') else '未配置'}",
+        f"凛音 TTS：{'开启' if getattr(config, 'enable_linyin_tts', False) else '关闭'} / 音色 {'已配置' if getattr(config, 'linyin_tts_voice', '') else '未配置'}",
+        f"Embedding：{getattr(config, 'memory_rag_embedding_provider', '未配置')} / {getattr(config, 'memory_rag_embedding_model', '未配置')}",
+        f"Embedding 接口：{redacted_base_url(getattr(config, 'memory_rag_embedding_base_url', ''))}",
+        f"MemoryRAG / ProjectDocRAG：{'开启' if getattr(config, 'enable_memory_rag', False) else '关闭'} / {'开启' if getattr(config, 'enable_project_doc_rag', False) else '关闭'}",
+        f"天气：{'开启' if getattr(config, 'enable_chat_weather', False) else '关闭'} / {getattr(config, 'chat_weather_mode', 'off')}",
+        f"SceneHub：{'开启' if getattr(config, 'enable_shared_scene_hub', False) else '关闭'}",
     ]
 
 
@@ -3499,6 +3691,8 @@ def rag_index_detail_lines() -> list[str]:
 
 def rag_index_detail_lines_for_event(event: MessageEvent) -> list[str]:
     scope = conversation_scope(event)
+    if scope.configuration_error:
+        return [INVALID_PERSONA_MESSAGE]
     if scope.routing_v2_active and not scope.memory_v2_active:
         return [
             "当前角色的持久记忆尚未启用；",
@@ -3545,6 +3739,13 @@ pending_image_edit = on_message(
     rule=Rule(pending_image_edit_rule), priority=10, block=True
 )
 reset_cmd = on_command("reset", aliases={"重置", "清空上下文"}, priority=5, block=True)
+topic_switch_cmd = on_command(
+    "换话题",
+    aliases={"新开一段", "场景重置", "换个话题", "topic_switch"},
+    priority=5,
+    block=True,
+)
+
 generate_image_cmd = on_command(
     "生成图片", aliases={"画图"}, priority=5, block=True
 )
@@ -3569,6 +3770,7 @@ linyin_behavior_diagnostic_cmd = on_command(
 status_cmd = on_command("status", aliases={"状态"}, priority=5, block=True)
 diagnostics_cmd = on_command("诊断", aliases={"diagnose"}, priority=5, block=True)
 config_status_cmd = on_command("配置状态", aliases={"config_status"}, priority=5, block=True)
+config_detail_cmd = on_command("配置详情", aliases={"config_detail"}, priority=5, block=True)
 vision_status_cmd = on_command("视觉状态", aliases={"vision_status"}, priority=5, block=True)
 recent_errors_cmd = on_command("最近错误", aliases={"recent_errors"}, priority=5, block=True)
 clear_error_log_cmd = on_command("清空错误日志", aliases={"clear_error_log"}, priority=5, block=True)
@@ -3681,12 +3883,55 @@ private_users_cmd = on_command("私聊白名单", aliases={"private_users"}, pri
 blacklist_cmd = on_command("黑名单", aliases={"blacklist"}, priority=5, block=True)
 
 
-async def run_auto_compression(key: str, event: MessageEvent) -> None:
+async def notify_owner_compression_preserved(
+    event: MessageEvent,
+    reason: str,
+    failure_detail: str = "",
+) -> None:
+    detail = (reason or "摘要失败").strip() or "摘要失败"
+    safe_failure_detail = sanitize_failure_text(failure_detail, limit=None).strip()
+    failure_text = (
+        safe_failure_detail
+        if safe_failure_detail
+        else "未获得可展示的模型返回或报错信息。"
+    )
+    text = (
+        "【记忆保护】自动摘要失败，原来的对话一条都没删。\n"
+        f"原因：{detail}\n"
+        f"摘要模型返回/报错：\n{failure_text}\n"
+        "短时原文还在。请不要清会话；可用 /查看摘要 看现状。"
+    )
     try:
-        async with session_lock(key):
-            await compress_session(config, key)
+        bot_id = str(getattr(event, "self_id", "") or "")
+        bot = get_bot(bot_id) if bot_id else get_bot()
+        owner = str(getattr(config, "bot_owner_qq", "") or "").strip()
+        target = int(owner) if owner else int(user_id(event))
+        await bot.call_api("send_private_msg", user_id=target, message=text)
     except Exception as exc:
         log_background_error(exc, event)
+
+
+async def run_auto_compression(key: str, event: MessageEvent) -> None:
+    result = None
+    try:
+        scope = resolve_memory_session_scope(config, key)
+        async with session_lock(key):
+            with persona_memory_database_scope(scope.persona_id) if scope.memory_v2_active else nullcontext():
+                result = await compress_session(config, key)
+    except Exception as exc:
+        log_background_error(exc, event)
+        await notify_owner_compression_preserved(
+            event,
+            type(exc).__name__,
+            sanitize_failure_text(f"{type(exc).__name__}: {exc}", limit=800),
+        )
+        return
+    if result is not None and getattr(result, "notify_owner", False):
+        await notify_owner_compression_preserved(
+            event,
+            result.reason,
+            getattr(result, "failure_detail", ""),
+        )
 
 
 def build_chat_turn(user_content: str, assistant_content: str) -> ChatTurn:
@@ -3723,6 +3968,7 @@ async def run_memory_persist_graph(
             current.message_type,
             current.user_id,
             current.group_id,
+            occurred_at=event_message_time(event),
         )
         current.user_saved = True
         return current
@@ -3785,6 +4031,10 @@ async def persist_scoped_chat_turn(
     *,
     persona_memory_id: str = "",
 ) -> MemoryPersistGraphExecution:
+    scope = conversation_scope(event)
+    expected_persona = scope.persona_id if scope.memory_v2_active else ""
+    if scope.configuration_error or key != scope.runtime_session_key or persona_memory_id != expected_persona:
+        raise RuntimeError("invalid_persona_memory_scope")
     if persona_memory_id:
         with persona_memory_database_scope(persona_memory_id):
             return await persist_chat_turn(key, event, prompt_context, turn)
@@ -3797,6 +4047,10 @@ async def schedule_scoped_chat_compression(
     *,
     persona_memory_id: str = "",
 ) -> MemoryPersistGraphExecution:
+    scope = conversation_scope(event)
+    expected_persona = scope.persona_id if scope.memory_v2_active else ""
+    if scope.configuration_error or key != scope.runtime_session_key or persona_memory_id != expected_persona:
+        raise RuntimeError("invalid_persona_memory_scope")
     if persona_memory_id:
         # The child task created by schedule_chat_compression inherits this
         # ContextVar-backed database scope and keeps it after this block exits.
@@ -3868,7 +4122,7 @@ def build_chat_access_policy(
         "silent_limit_rejection": options.silent_limit_rejection,
     }
     scope = conversation_scope(event)
-    if scope.routing_v2_requested and not scope.routing_v2_active:
+    if scope.configuration_error:
         return deny_chat_access_policy(
             decision="persona_v2_configuration_error",
             reason=scope.configuration_error or "persona V2 route is unavailable",
@@ -4367,6 +4621,29 @@ def recent_root_graph_chat_observation_lines() -> list[str]:
             lines.append(f"MemoryRAG hits：{hits_summary}")
         if memory_error:
             lines.append(f"MemoryRAG error：{memory_error[:180]}")
+    if chat_commit.get("chat_time_context_injected"):
+        lines.append(f"Time：Beijing={chat_commit.get('bot_local_datetime', '')} injected=true")
+        lines.append(
+            f"Reunion：status={chat_commit.get('reunion_status', '')} "
+            f"gap_seconds={chat_commit.get('reunion_elapsed_seconds', 0)} "
+            f"bucket={chat_commit.get('reunion_bucket', '')} "
+            f"last_success={chat_commit.get('reunion_last_success_at', '')}"
+        )
+    if chat_commit.get("encyclopedia_status"):
+        lines.append(
+            f"Encyclopedia：mode={chat_commit.get('encyclopedia_mode', '')} "
+            f"status={chat_commit.get('encyclopedia_status', '')} "
+            f"trigger={chat_commit.get('encyclopedia_trigger', '')} "
+            f"plan_ms={chat_commit.get('encyclopedia_plan_ms', 0)} "
+            f"lookup_ms={chat_commit.get('encyclopedia_lookup_ms', 0)} "
+            f"evidence={chat_commit.get('encyclopedia_evidence_count', 0)} "
+            f"cache={chat_commit.get('encyclopedia_cache_hit', False)}"
+        )
+        lines.append(
+            f"Encyclopedia reply：status={chat_commit.get('encyclopedia_reply_status', '')} "
+            f"location={chat_commit.get('encyclopedia_diagnostic_location', '')} "
+            f"log_written={chat_commit.get('encyclopedia_log_written', False)}"
+        )
     if chat_commit:
         lines.append(
             "Commit detail："
@@ -4504,6 +4781,11 @@ def safe_apply_shadow_runtime_result(
             persisted_turn=persisted_turn,
         )
         shadow_artifact = updated.runtime.artifacts.setdefault("shadow_chat", {})
+        if result.time_observation:
+            update_chat_commit(updated, **result.time_observation)
+        if result.tool_observation:
+            update_chat_commit(updated, **result.tool_observation)
+            updated.runtime.artifacts["encyclopedia_graph"] = dict(result.tool_observation)
         shadow_artifact["graph_result"] = {
             "should_reply_text": graph_result.should_reply_text,
             "has_voice_text": bool(graph_result.voice_text),
@@ -4523,6 +4805,9 @@ async def prepare_chat_request(
     options: ChatOptions,
 ) -> ChatRequest | None:
     await check_access(event, matcher)
+    if conversation_scope(event).configuration_error:
+        await matcher.finish(INVALID_PERSONA_MESSAGE)
+        return None
 
     if is_command_message(event):
         return None
@@ -4655,7 +4940,7 @@ def _record_remote_sticker_classifier_reliability(status: str) -> None:
     if status in {"requested", "not_requested"}:
         record_success_safely("sticker_classifier", "classify_intent")
         return
-    if status == "disabled":
+    if status in {"disabled", "no_available_stickers"}:
         record_result_safely(
             component="sticker_classifier",
             operation="classify_intent",
@@ -4671,10 +4956,13 @@ def _record_remote_sticker_classifier_reliability(status: str) -> None:
         "rate_limited": "model_rate_limited",
         "timeout": "request_timeout",
         "unavailable": "connection_failed",
-        "empty_response": "invalid_model_response",
-        "response_too_large": "invalid_model_response",
-        "json_invalid": "invalid_model_response",
-        "contract_invalid": "invalid_model_response",
+        "empty_response": "sticker_empty_response",
+        "response_too_large": "sticker_response_too_large",
+        "json_invalid": "sticker_json_invalid",
+        "contract_invalid": "sticker_contract_invalid",
+        "response_truncated": "sticker_response_truncated",
+        "response_filtered": "sticker_response_filtered",
+        "unsupported_combination": "sticker_combination_unavailable",
     }
     code = code_by_status.get(status, "unexpected_runtime_state")
     record_result_safely(
@@ -4694,6 +4982,7 @@ async def _evaluate_remote_sticker_classifier_result(
     resolved_sticker_scope: (
         tuple[ConversationScope, StickerSelectionScope] | None
     ) = None,
+    library=None,
 ) -> RemoteStickerClassifierEvaluation:
     intent = classification.intent
     if intent is None:
@@ -4706,11 +4995,12 @@ async def _evaluate_remote_sticker_classifier_result(
     try:
         from .sticker_library import load_approved_sticker_library
 
-        library = await asyncio.to_thread(
-            load_approved_sticker_library,
-            config.local_sticker_root,
-            limits=sticker_limits_from_config(),
-        )
+        if library is None:
+            library = await asyncio.to_thread(
+                load_approved_sticker_library,
+                config.local_sticker_root,
+                limits=sticker_limits_from_config(),
+            )
     except Exception:
         return RemoteStickerClassifierEvaluation(
             RemoteStickerClassifierShadowSnapshot(
@@ -4777,18 +5067,20 @@ async def _maybe_send_remote_sticker_attachment(
     bot: Bot,
     event: MessageEvent,
     evaluation: RemoteStickerClassifierEvaluation,
+    *,
+    can_send=None,
 ) -> RemoteStickerClassifierShadowSnapshot:
     global _chat_sticker_attachments_suspended
 
     snapshot = evaluation.snapshot
     if not config.enable_chat_sticker_attachments:
         return snapshot
-    if _chat_sticker_attachments_suspended:
-        return replace(snapshot, attachment_status="suspended")
     decision = evaluation.decision
     context = evaluation.context
     if decision is None or context is None or not decision.selected_sticker_id:
         return replace(snapshot, attachment_status="not_triggered")
+    if _chat_sticker_attachments_suspended_for(context.session_key):
+        return replace(snapshot, attachment_status="suspended")
 
     async def onebot_sender(recipient: int, file_path: Path) -> None:
         await bot.call_api(
@@ -4803,15 +5095,60 @@ async def _maybe_send_remote_sticker_attachment(
         int(event.user_id),
         limits=sticker_limits_from_config(),
         sender=onebot_sender,
+        can_send=can_send,
     )
     if not send_result.sent:
+        if send_result.status == "send_timeout":
+            unknown_context = replace(context, now=current_selection_time())
+            _chat_sticker_selection_runtime.record_sent(unknown_context)
+            _chat_sticker_attachments_suspended[context.session_key] = unknown_context.now + config.chat_sticker_cooldown_seconds
+        _record_sticker_attachment_reliability(send_result.status)
         return replace(snapshot, attachment_status=send_result.status)
+    context = replace(context, now=current_selection_time())
     try:
         _chat_sticker_selection_runtime.commit_sent(decision, context)
     except ValueError:
-        _chat_sticker_attachments_suspended = True
+        _chat_sticker_selection_runtime.record_sent(context)
+        _chat_sticker_attachments_suspended[context.session_key] = context.now + config.chat_sticker_cooldown_seconds
+        _record_sticker_attachment_reliability("sent_commit_failed")
         return replace(snapshot, attachment_status="sent_commit_failed")
+    _record_sticker_attachment_reliability("sent")
     return replace(snapshot, attachment_status="sent")
+
+
+def _chat_sticker_attachments_suspended_for(session_key: str) -> bool:
+    until = _chat_sticker_attachments_suspended.get(session_key)
+    if until is None:
+        return False
+    if current_selection_time() < until:
+        return True
+    _chat_sticker_attachments_suspended.pop(session_key, None)
+    return False
+
+
+def _record_sticker_attachment_reliability(status: str, *, operation: str = "send_image") -> None:
+    if status in {"sent", "selected"}:
+        record_success_safely("sticker_attachment", operation)
+        return
+    if status == "expired" or status in {
+        "no_match", "confidence_low", "cooldown", "message_gap", "hourly_cap", "intent_absent",
+    }:
+        code, outcome = "operation_skipped", ReliabilityOutcome.SKIPPED
+    else:
+        code = (
+            "sticker_sent_commit_failed" if status == "sent_commit_failed"
+            else "sticker_library_unavailable" if status.startswith("asset_") or status in {"library_unavailable", "library_invalid"}
+            else "sticker_send_failed" if status == "send_failed"
+            else "sticker_send_timeout" if status == "send_timeout"
+            else "unexpected_runtime_state"
+        )
+        outcome = ReliabilityOutcome.FAILED
+    record_result_safely(component="sticker_attachment", operation=operation, code=code, outcome=outcome)
+
+
+def remote_sticker_scope_key(resolved_scope) -> str:
+    conversation, sticker_scope = resolved_scope
+    return f"{conversation.bot_self_id}:{sticker_scope.session_key}"
 
 
 def schedule_remote_sticker_classifier_shadow(
@@ -4820,187 +5157,156 @@ def schedule_remote_sticker_classifier_shadow(
     user_text: str,
     reply_text: str,
 ) -> None:
-    global _last_remote_sticker_classifier_shadow
     global _remote_sticker_classifier_sample_id
-    global _remote_sticker_classifier_task
 
-    if not config.enable_remote_sticker_classifier:
+    if not config.enable_remote_sticker_classifier or not config.enable_local_stickers:
         return
     if not isinstance(event, PrivateMessageEvent) or not is_owner(config, event):
         return
 
     resolved_sticker_scope = resolve_chat_sticker_scope(event)
-
+    conversation, sticker_scope = resolved_sticker_scope
+    if conversation.configuration_error or sticker_scope.persona_key not in ALLOWED_PERSONA_KEYS:
+        return
+    scope_key = remote_sticker_scope_key(resolved_sticker_scope)
+    bubble_key = chat_session_key(event)
+    generation = current_chat_bubble_generation(bubble_key)
     _remote_sticker_classifier_sample_id += 1
     sample_id = _remote_sticker_classifier_sample_id
-    if isinstance(user_text, str) and not user_text.strip():
-        _last_remote_sticker_classifier_shadow = (
-            RemoteStickerClassifierShadowSnapshot(
-                sample_id=sample_id,
-                classifier_status="skipped",
-                mood="",
-                intensity="",
-                scene="",
-                confidence=0.0,
-                decision_reason="empty_user_text",
-                selected_sticker_id="",
-                eligible_count=0,
-                attachment_status="preflight_blocked",
-            )
+
+    def save_status(status: str, reason: str, attachment: str = "preflight_blocked") -> None:
+        _remote_sticker_classifier_snapshots[scope_key] = RemoteStickerClassifierShadowSnapshot(
+            sample_id=sample_id, classifier_status=status, mood="", intensity="", scene="",
+            confidence=0.0, decision_reason=reason, selected_sticker_id="",
+            eligible_count=0, attachment_status=attachment,
         )
+
+    def is_current() -> bool:
+        current = _remote_sticker_classifier_snapshots.get(scope_key)
+        return bool(current and current.sample_id == sample_id
+                    and current_chat_bubble_generation(bubble_key) == generation)
+
+    def expire_status() -> None:
+        current = _remote_sticker_classifier_snapshots.get(scope_key)
+        if current is not None and current.sample_id == sample_id:
+            _remote_sticker_classifier_snapshots[scope_key] = replace(
+                current, classifier_status="superseded", decision_reason="reply_superseded", attachment_status="expired",
+            )
+
+    # A new turn supersedes only this account/session's classification.
+    previous = _remote_sticker_classifier_tasks.get(scope_key)
+    if previous is not None and not previous.done():
+        previous.cancel()
+    if isinstance(user_text, str) and not user_text.strip():
+        save_status("skipped", "empty_user_text")
         return
     if config.enable_chat_sticker_attachments:
-        if _chat_sticker_attachments_suspended:
-            _last_remote_sticker_classifier_shadow = (
-                RemoteStickerClassifierShadowSnapshot(
-                    sample_id=sample_id,
-                    classifier_status="skipped",
-                    mood="",
-                    intensity="",
-                    scene="",
-                    confidence=0.0,
-                    decision_reason="attachments_suspended",
-                    selected_sticker_id="",
-                    eligible_count=0,
-                    attachment_status="suspended",
-                )
-            )
-            return
         try:
-            policy = StickerSelectionPolicy(
-                enabled=True,
-                owner_private_only=config.chat_sticker_owner_private_only,
+            context = chat_sticker_selection_context(
+                event, reply_text, resolved_scope=resolved_sticker_scope,
+            )
+            if _chat_sticker_attachments_suspended_for(context.session_key):
+                save_status("skipped", "attachments_suspended", "suspended")
+                return
+            preflight = _chat_sticker_selection_runtime.preflight(context, StickerSelectionPolicy(
+                enabled=True, owner_private_only=config.chat_sticker_owner_private_only,
                 cooldown_seconds=config.chat_sticker_cooldown_seconds,
                 min_messages_between=config.chat_sticker_min_messages_between,
                 max_per_hour=config.chat_sticker_max_per_hour,
                 max_per_reply=config.chat_sticker_max_per_reply,
                 min_confidence=config.chat_sticker_min_intent_confidence,
-            )
-            context = chat_sticker_selection_context(
-                event,
-                reply_text,
-                resolved_scope=resolved_sticker_scope,
-            )
-            preflight = _chat_sticker_selection_runtime.preflight(context, policy)
+            ))
         except Exception:
-            _last_remote_sticker_classifier_shadow = (
-                RemoteStickerClassifierShadowSnapshot(
-                    sample_id=sample_id,
-                    classifier_status="skipped",
-                    mood="",
-                    intensity="",
-                    scene="",
-                    confidence=0.0,
-                    decision_reason="preflight_unavailable",
-                    selected_sticker_id="",
-                    eligible_count=0,
-                    attachment_status="preflight_blocked",
-                )
-            )
+            save_status("skipped", "preflight_unavailable")
             return
         if not preflight.allowed:
-            _last_remote_sticker_classifier_shadow = (
-                RemoteStickerClassifierShadowSnapshot(
-                    sample_id=sample_id,
-                    classifier_status="skipped",
-                    mood="",
-                    intensity="",
-                    scene="",
-                    confidence=0.0,
-                    decision_reason=preflight.reason,
-                    selected_sticker_id="",
-                    eligible_count=0,
-                    attachment_status="preflight_blocked",
-                )
-            )
+            save_status("skipped", preflight.reason)
             return
-    if (
-        _remote_sticker_classifier_task is not None
-        and not _remote_sticker_classifier_task.done()
-    ):
-        _last_remote_sticker_classifier_shadow = (
-            RemoteStickerClassifierShadowSnapshot(
-                sample_id=sample_id,
-                classifier_status="busy",
-                mood="",
-                intensity="",
-                scene="",
-                confidence=0.0,
-                decision_reason="classifier_busy",
-                selected_sticker_id="",
-                eligible_count=0,
-                attachment_status=(
-                    "disabled"
-                    if not config.enable_chat_sticker_attachments
-                    else "not_triggered"
-                ),
-            )
-        )
-        return
-
-    _last_remote_sticker_classifier_shadow = RemoteStickerClassifierShadowSnapshot(
-        sample_id=sample_id,
-        classifier_status="pending",
-        mood="",
-        intensity="",
-        scene="",
-        confidence=0.0,
-        decision_reason="classifier_pending",
-        selected_sticker_id="",
-        eligible_count=0,
-        attachment_status=(
-            "disabled" if not config.enable_chat_sticker_attachments else "pending"
-        ),
-    )
+    save_status("pending", "classifier_pending", "pending" if config.enable_chat_sticker_attachments else "disabled")
 
     async def run_classifier() -> None:
-        global _last_remote_sticker_classifier_shadow
         try:
+            try:
+                library = await asyncio.to_thread(
+                    load_approved_sticker_library, config.local_sticker_root,
+                    limits=sticker_limits_from_config(),
+                )
+                if library.issues:
+                    raise ValueError("sticker_library_invalid")
+            except Exception:
+                _record_sticker_attachment_reliability("library_unavailable", operation="select_asset")
+                if is_current():
+                    save_status("skipped", "library_unavailable", "not_triggered")
+                return
+            if not is_current():
+                _record_sticker_attachment_reliability("expired", operation="select_asset")
+                expire_status()
+                return
             classification = await classify_sticker_intent(
-                remote_sticker_classifier_settings(),
-                user_text,
-                reply_text,
+                remote_sticker_classifier_settings(), user_text, reply_text,
+                available_combinations=available_sticker_combinations(library, sticker_scope.persona_key),
             )
             _record_remote_sticker_classifier_reliability(classification.status)
-            evaluation = await _evaluate_remote_sticker_classifier_result(
-                event,
-                reply_text,
-                sample_id,
-                classification,
-                resolved_sticker_scope=resolved_sticker_scope,
-            )
-            snapshot = await _maybe_send_remote_sticker_attachment(
-                bot,
-                event,
-                evaluation,
-            )
+            lock = _chat_sticker_attachment_locks.setdefault(scope_key, asyncio.Lock())
+            async with lock:
+                if not is_current():
+                    _record_sticker_attachment_reliability("expired", operation="select_asset")
+                    expire_status()
+                    return
+                evaluation = await _evaluate_remote_sticker_classifier_result(
+                    event, reply_text, sample_id, classification,
+                    resolved_sticker_scope=resolved_sticker_scope, library=library,
+                )
+                if classification.intent is not None:
+                    _record_sticker_attachment_reliability(evaluation.snapshot.decision_reason, operation="select_asset")
+                if not is_current():
+                    _record_sticker_attachment_reliability("expired", operation="select_asset")
+                    expire_status()
+                    return
+                # Once delivery starts, finish its bookkeeping even if superseded.
+                # The sender rechecks freshness after async asset validation.
+                sending = asyncio.create_task(_maybe_send_remote_sticker_attachment(
+                    bot, event, evaluation, can_send=is_current,
+                ))
+                try:
+                    snapshot = await asyncio.shield(sending)
+                except asyncio.CancelledError:
+                    await sending
+                    raise
+            snapshot = replace(snapshot, response_chars=classification.response_chars,
+                               finish_reason=classification.finish_reason,
+                               parse_reason=classification.parse_reason,
+                               normalized_code_fence=classification.normalized_code_fence,
+                               diagnostics=classification.diagnostics)
+        except asyncio.CancelledError:
+            expire_status()
+            return
         except Exception as exc:
-            record_failure_safely(
-                "sticker_classifier",
-                "classify_intent",
-                exc,
-            )
-            snapshot = RemoteStickerClassifierShadowSnapshot(
-                sample_id=sample_id,
-                classifier_status="internal_error",
-                mood="",
-                intensity="",
-                scene="",
-                confidence=0.0,
-                decision_reason="classifier_internal_error",
-                selected_sticker_id="",
-                eligible_count=0,
-                attachment_status=(
-                    "disabled"
-                    if not config.enable_chat_sticker_attachments
-                    else "internal_error"
-                ),
-            )
-        current = _last_remote_sticker_classifier_shadow
-        if current is not None and current.sample_id == sample_id:
-            _last_remote_sticker_classifier_shadow = snapshot
+            record_failure_safely("sticker_classifier", "classify_intent", exc)
+            if is_current():
+                save_status("internal_error", "classifier_internal_error", "internal_error")
+            return
+        finally:
+            if _remote_sticker_classifier_tasks.get(scope_key) is asyncio.current_task():
+                _remote_sticker_classifier_tasks.pop(scope_key, None)
+        if is_current():
+            _remote_sticker_classifier_snapshots[scope_key] = snapshot
+        else:
+            expire_status()
 
-    _remote_sticker_classifier_task = asyncio.create_task(run_classifier())
+    _remote_sticker_classifier_tasks[scope_key] = asyncio.create_task(run_classifier())
+
+
+def schedule_chat_reply_sticker(
+    bot: Bot, event: MessageEvent, result: ChatRuntimeResult, *,
+    sent_count: int, classifier_user_text: str, reply_generation: int,
+) -> None:
+    """One post-send entry shared by Graph and ordinary text replies."""
+    if sent_count <= 0 or not result.interaction_success_eligible or result.reply == VISION_FAILURE_REPLY:
+        return
+    if current_chat_bubble_generation(chat_session_key(event)) != reply_generation:
+        return
+    schedule_remote_sticker_classifier_shadow(bot, event, classifier_user_text, result.reply)
 
 
 async def build_chat_weather_context(
@@ -5079,10 +5385,13 @@ async def generate_chat_text_response(
         return ChatRuntimeResult(
             reply=VISION_FAILURE_REPLY,
             stored_assistant=VISION_FAILURE_REPLY,
+            interaction_success_eligible=False,
         )
+    local_time_snapshot = build_local_time_snapshot(config.bot_timezone)
     local_time_request = resolve_local_time_request(
         clean_text(event),
         timezone_name=config.bot_timezone,
+        snapshot=local_time_snapshot,
     )
     llm_history = list(prompt_context.history)
     if local_time_request is not None:
@@ -5090,16 +5399,23 @@ async def generate_chat_text_response(
             prompt_context.history,
             local_time_request,
         )
+    reunion_hint, time_observation = reunion_context_for_chat(event, local_time_snapshot)
+    if reunion_hint:
+        llm_history.append({"role": "system", "content": reunion_hint})
     weather_context = await build_chat_weather_context(
         event,
         clean_text(event),
     )
+    tool_observation: dict[str, object] = {}
+    reply = None
+    encyclopedia_reply_error = None
     try:
         reply = await ask_llm(
             config,
             llm_history,
             llm_user_text(event, user_content.for_llm),
             extra_system_context=combine_ephemeral_chat_system_contexts(
+                current_message_identity_context(event),
                 (
                     STICKER_INTENT_SYSTEM_CONTEXT
                     if config.enable_chat_sticker_intent_shadow
@@ -5108,26 +5424,48 @@ async def generate_chat_text_response(
                 weather_context,
             ),
             role_card_key=role_card_key,
+            include_world_card=conversation_scope(event).routing_v2_active,
+            local_time_snapshot=local_time_snapshot,
+            encyclopedia_query_text=clean_text(event),
+            tool_observation=tool_observation,
         )
+    except asyncio.CancelledError as exc:
+        encyclopedia_reply_error = exc
+        raise
     except Exception as exc:
+        encyclopedia_reply_error = exc
         log_ai_event_error(exc, event)
         if local_time_request is not None:
             fallback = local_time_request.deterministic_reply
-            return ChatRuntimeResult(reply=fallback, stored_assistant=fallback)
+            return ChatRuntimeResult(reply=fallback, stored_assistant=fallback, time_observation=time_observation)
         await matcher.finish(f"AI 调用失败：{type(exc).__name__}")
         return None
+    finally:
+        write_encyclopedia_turn_log_safely(
+            tool_observation, role_card_key, reply=reply, error=encyclopedia_reply_error,
+        )
+        record_encyclopedia_observation_safely(tool_observation, role_card_key)
 
     extracted_intent = extract_sticker_intent(reply)
     reply = extracted_intent.visible_reply
+    interaction_success_eligible = bool(reply)
     if not reply:
         reply = "抱歉，刚才没有组织好回答，请再说一次。"
 
     if local_time_request is not None:
         reply = finalize_local_time_chat_reply(local_time_request, reply)
+        interaction_success_eligible = True
+    if time_observation.get("reunion_status") == "injected":
+        corrected = correct_capped_reunion_duration(reply, int(time_observation["reunion_elapsed_seconds"]))
+        time_observation["reunion_duration_corrected"] = corrected != reply
+        reply = corrected
 
     result = ChatRuntimeResult(
         reply=reply,
         stored_assistant=reply,
+        time_observation=time_observation,
+        interaction_success_eligible=interaction_success_eligible,
+        tool_observation=tool_observation,
         sticker_intent=(
             extracted_intent.intent
             if config.enable_chat_sticker_intent_shadow
@@ -5165,6 +5503,7 @@ async def generate_legacy_chat_response(
     reply = result.reply
 
     if options.semantic_voice:
+        assistant_sent_at = None
         try:
             voice_text = reply
             if send_voice:
@@ -5174,7 +5513,9 @@ async def generate_legacy_chat_response(
                     voice_text,
                     refresh_cache=options.tts_refresh_cache,
                     force_language="zh",
+                    counts_as_chat=result.interaction_success_eligible,
                 )
+                assistant_sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         except ValueError:
             await matcher.finish(
                 f"这段太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
@@ -5189,6 +5530,10 @@ async def generate_legacy_chat_response(
             stored_assistant=voice_text,
             voice_text=voice_text,
             sticker_intent=result.sticker_intent,
+            time_observation=result.time_observation,
+            interaction_success_eligible=result.interaction_success_eligible,
+            tool_observation=result.tool_observation,
+            assistant_sent_at=assistant_sent_at,
         )
 
     return result
@@ -5212,7 +5557,9 @@ async def send_semantic_voice_response(
             voice_text,
             refresh_cache=options.tts_refresh_cache,
             force_language="zh",
+            counts_as_chat=result.interaction_success_eligible,
         )
+        assistant_sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     except ValueError:
         await matcher.finish(
             f"语音文本太长了，当前中文语音最多支持 {config.tts_max_chars} 字。你可以让我读其中一小段。"
@@ -5227,7 +5574,126 @@ async def send_semantic_voice_response(
         stored_assistant=voice_text,
         voice_text=voice_text,
         sticker_intent=result.sticker_intent,
+        time_observation=result.time_observation,
+        interaction_success_eligible=result.interaction_success_eligible,
+        tool_observation=result.tool_observation,
+        assistant_sent_at=assistant_sent_at,
     )
+
+
+
+def reunion_context_for_chat(
+    event: MessageEvent, snapshot: LocalTimeSnapshot,
+) -> tuple[str, dict[str, object]]:
+    observation: dict[str, object] = {
+        "bot_local_datetime": snapshot.iso_datetime,
+        "chat_time_context_injected": True,
+        "reunion_status": "disabled_or_out_of_scope",
+    }
+    if not reunion_allowed(
+        config,
+        is_owner=is_owner(config, event),
+        is_private=isinstance(event, PrivateMessageEvent),
+    ):
+        return '', observation
+    key = owner_interaction_key(event)
+    if key is None:
+        observation["reunion_status"] = "invalid_identity"
+        return '', observation
+    try:
+        latest = _interaction_store.latest(key)
+    except Exception as exc:
+        log_background_error(exc, event)
+        observation["reunion_status"] = "storage_error"
+        return '', observation
+    last_at = parse_created_at(latest.succeeded_at if latest else None)
+    if last_at is None:
+        observation["reunion_status"] = "no_success_baseline"
+        return '', observation
+    current = datetime.fromisoformat(snapshot.iso_datetime)
+    # OneBot timestamps retain arrival time for messages queued behind a reply.
+    received_at = current
+    timestamp = getattr(event, "time", None)
+    if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and timestamp > 0:
+        try:
+            received_at = min(datetime.fromtimestamp(timestamp, timezone.utc), current)
+        except (ValueError, OverflowError, OSError):
+            pass
+    min_hours = int(getattr(config, 'chat_reunion_min_gap_hours', 3) or 0)
+    elapsed = int((received_at - last_at).total_seconds())
+    observation.update({
+        "reunion_last_success_at": last_at.astimezone(timezone_for_name(config.bot_timezone)).isoformat(),
+        "reunion_message_received_at": received_at.astimezone(timezone_for_name(config.bot_timezone)).isoformat(),
+        "reunion_elapsed_seconds": max(elapsed, 0),
+    })
+    gap = classify_reunion_gap(last_at, received_at, min_gap_hours=min_hours)
+    if gap is None:
+        observation["reunion_status"] = "below_threshold" if elapsed >= 0 else "queued_or_future_timestamp"
+        return '', observation
+    observation.update({"reunion_status": "injected", "reunion_bucket": gap.bucket})
+    return build_reunion_hint(gap), observation
+
+
+async def send_chat_reply_bubbles(
+    matcher: Matcher,
+    event: MessageEvent,
+    text: str,
+    *,
+    counts_as_chat: bool = True,
+) -> int:
+    session_key = chat_session_key(event)
+    enabled = chat_bubble_split_allowed(
+        config,
+        is_owner=is_owner(config, event),
+        is_private=isinstance(event, PrivateMessageEvent),
+    )
+    min_delay_ms, max_delay_ms, max_bubbles = normalize_bubble_limits(config)
+    bubbles = resolve_chat_bubbles(
+        text,
+        enabled=enabled,
+        max_bubbles=max_bubbles,
+    )
+    generation = current_chat_bubble_generation(session_key)
+    delays = next_bubble_delays(
+        list(bubbles),
+        min_delay_ms=min_delay_ms,
+        max_delay_ms=max_delay_ms,
+    )
+    sent = 0
+    for index, bubble in enumerate(bubbles):
+        if not current_chat_bubble_generation(session_key) == generation:
+            return sent
+        if index > 0:
+            delay = delays[index - 1] if index - 1 < len(delays) else 0
+            cancelled = await wait_for_bubble_delay(session_key, generation, delay)
+            if cancelled:
+                return sent
+        await matcher.send(bubble)
+        sent += 1
+        if sent == 1:
+            record_chat_message_delivery(event, text)
+        if counts_as_chat:
+            record_owner_interaction_success(event)
+    return sent
+
+
+def record_chat_message_delivery(event: MessageEvent, content: str, *, sent_at: str | None = None) -> None:
+    """A send receipt timestamps existing memory; it never inserts a new turn."""
+    try:
+        scope = conversation_scope(event)
+        key = chat_session_key(event)
+        if scope.configuration_error:
+            return
+        if scope.memory_v2_active:
+            with persona_memory_database_scope(scope.persona_id):
+                mark_assistant_sent(key, content, sent_at=sent_at)
+        elif not scope.routing_v2_active:
+            mark_assistant_sent(key, content, sent_at=sent_at)
+        else:
+            ephemeral_persona_history.mark_assistant_sent(key, content, sent_at=sent_at)
+    except Exception as exc:
+        log_background_error(exc, event)
+
 
 async def render_chat_result(
     bot: Bot,
@@ -5248,21 +5714,18 @@ async def render_chat_result(
         )
         await matcher.finish()
         return
-    await matcher.send(result.reply)
+    reply_generation = current_chat_bubble_generation(chat_session_key(event))
+    sent_count = await send_chat_reply_bubbles(matcher, event, result.reply, counts_as_chat=result.interaction_success_eligible)
     update_chat_commit(
         state,
-        qq_reply_sent=True,
-        reply_chars=len(result.reply),
+        qq_reply_sent=sent_count > 0,
+        reply_chars=len(result.reply) if sent_count else 0,
         should_reply_text=True,
     )
-    if result.reply != VISION_FAILURE_REPLY:
-        if not conversation_scope(event).routing_v2_active:
-            schedule_remote_sticker_classifier_shadow(
-                bot,
-                event,
-                classifier_user_text,
-                result.reply,
-            )
+    schedule_chat_reply_sticker(
+        bot, event, result, sent_count=sent_count,
+        classifier_user_text=classifier_user_text, reply_generation=reply_generation,
+    )
 
 
 async def finalize_chat_result(
@@ -5298,6 +5761,7 @@ async def finalize_chat_result(
             turn.stored_user,
             turn.stored_assistant,
             config.max_context_messages,
+            user_occurred_at=event_message_time(event),
         )
         update_chat_commit(
             state,
@@ -5309,6 +5773,8 @@ async def finalize_chat_result(
         stored_user_chars=len(turn.stored_user),
         stored_assistant_chars=len(turn.stored_assistant),
     )
+    if result.assistant_sent_at:
+        record_chat_message_delivery(event, turn.stored_assistant, sent_at=result.assistant_sent_at)
     if should_count_private_trial(event):
         increment_private_trial(prompt_context.user_id)
         update_chat_commit(state, trial_updated=True)
@@ -5335,21 +5801,18 @@ async def finalize_chat_result(
             update_chat_commit(state, compression_scheduled=True)
         await matcher.finish()
         return
-    await matcher.send(result.reply)
+    reply_generation = current_chat_bubble_generation(chat_session_key(event))
+    sent_count = await send_chat_reply_bubbles(matcher, event, result.reply, counts_as_chat=result.interaction_success_eligible)
     update_chat_commit(
         state,
-        qq_reply_sent=True,
-        reply_chars=len(result.reply),
+        qq_reply_sent=sent_count > 0,
+        reply_chars=len(result.reply) if sent_count else 0,
         should_reply_text=True,
     )
-    if result.reply != VISION_FAILURE_REPLY:
-        if not conversation_scope(event).routing_v2_active:
-            schedule_remote_sticker_classifier_shadow(
-                bot,
-                event,
-                classifier_user_text,
-                result.reply,
-            )
+    schedule_chat_reply_sticker(
+        bot, event, result, sent_count=sent_count,
+        classifier_user_text=classifier_user_text, reply_generation=reply_generation,
+    )
     if (
         tts_candidate_enabled
         and isinstance(event, PrivateMessageEvent)
@@ -5464,6 +5927,9 @@ async def run_chat_graph_session_runtime(
                 stored_assistant=voice_text,
                 voice_text=voice_text,
                 sticker_intent=result.sticker_intent,
+                time_observation=result.time_observation,
+                interaction_success_eligible=result.interaction_success_eligible,
+                tool_observation=result.tool_observation,
             )
         voice_result = await send_semantic_voice_response(
             bot,
@@ -5506,6 +5972,7 @@ async def run_chat_graph_session_runtime(
                 turn.stored_user,
                 turn.stored_assistant,
                 config.max_context_messages,
+                user_occurred_at=event_message_time(event),
             )
         update_chat_commit(
             chat_state,
@@ -5514,6 +5981,8 @@ async def run_chat_graph_session_runtime(
             stored_user_chars=len(turn.stored_user),
             stored_assistant_chars=len(turn.stored_assistant),
         )
+        if result.assistant_sent_at:
+            record_chat_message_delivery(event, turn.stored_assistant, sent_at=result.assistant_sent_at)
 
     def update_trial_accounting_node(
         chat_state: ChatState,
@@ -5594,6 +6063,9 @@ async def run_legacy_chat_session(
     options: ChatOptions,
     shadow_state: ChatState | None = None,
 ) -> ChatState | None:
+    if conversation_scope(event).configuration_error:
+        await matcher.finish(INVALID_PERSONA_MESSAGE)
+        return shadow_state
     if shadow_state is None:
         shadow_state = safe_build_shadow_chat_state(
             event,
@@ -5602,7 +6074,7 @@ async def run_legacy_chat_session(
             runtime_artifacts=persona_scope_runtime_artifacts(event),
         )
     safe_record_shadow_chat_snapshot(event, shadow_state)
-    async with session_lock(request.key):
+    async with chat_turn_scope(event, request.key):
         if config.enable_chat_graph_runtime and shadow_state is not None:
             try:
                 graph_session = await run_chat_graph_session_runtime(
@@ -5826,6 +6298,8 @@ async def handle_chat(
     preserve_original: bool = False,
     tts_language: str = "zh",
 ) -> None:
+    if isinstance(event, PrivateMessageEvent):
+        bump_chat_bubble_generation(chat_session_key(event))
     options = ChatOptions(
         silent_limit_rejection=silent_limit_rejection,
         semantic_voice=semantic_voice,
@@ -5851,8 +6325,8 @@ async def handle_chat(
 
 
 def group_auto_reply_decision(event: GroupMessageEvent, text: str) -> ReplyDecision:
-    card = active_role_card()
-    role_key = card.key if card is not None else ""
+    scope = conversation_scope(event)
+    role_key = scope.role_card_key if not scope.configuration_error else ""
     return decide_group_auto_reply(config, text, is_owner(config, event), role_key)
 
 
@@ -5879,7 +6353,8 @@ def check_group_auto_reply_cooldown(event: GroupMessageEvent) -> bool:
 
 
 async def should_group_auto_reply(event: GroupMessageEvent) -> bool:
-    if conversation_scope(event).routing_v2_active:
+    scope = conversation_scope(event)
+    if scope.configuration_error or scope.routing_v2_active:
         return False
     if event.is_tome():
         return False
@@ -5924,7 +6399,18 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
 
 @private_chat.handle()
 async def _(bot: Bot, event: MessageEvent, matcher: Matcher) -> None:
+    if isinstance(event, PrivateMessageEvent):
+        bump_chat_bubble_generation(chat_session_key(event))
     text = clean_text(event)
+    if (
+        isinstance(event, PrivateMessageEvent)
+        and is_owner(config, event)
+        and topic_switch_enabled(config)
+        and detect_topic_switch_intent(text) is not None
+    ):
+        ack = await run_owner_topic_scene_switch(event)
+        await matcher.finish(ack)
+        return
     intent = parse_voice_intent(text)
     if intent is not None:
         handled = await run_voice_graph_intent(bot, event, matcher, intent)
@@ -5967,7 +6453,7 @@ def _scene_event_dedupe_id(event: GroupMessageEvent, text: str) -> str:
 
 async def _scene_group_members(bot: Bot, group_id_value: str) -> set[str]:
     payload = await bot.call_api(
-        "get_group_member_list", group_id=int(group_id_value)
+        "get_group_member_list", group_id=int(group_id_value), no_cache=True
     )
     if isinstance(payload, dict) and isinstance(payload.get("data"), list):
         payload = payload["data"]
@@ -5997,6 +6483,7 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
         # V1 supports two OneBot connections in one NoneBot process only.
         return
     target_bots = {"aike": aike_bot, "linyin": linyin_bot}
+    actor_interaction_keys: dict[str, InteractionKey] = {}
     linyin_style_examples_status = "not_applicable"
     linyin_style_example_chars = 0
 
@@ -6012,6 +6499,22 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
 
     async def actor(request: SceneActorRequest) -> str:
         nonlocal linyin_style_examples_status, linyin_style_example_chars
+        settings = getattr(config, "persona_routing", PersonaRoutingSettings())
+        actor_bot_id = str(target_bots[request.speaker].self_id)
+        binding = next((item for item in settings.bindings if item.bot_self_id == actor_bot_id), None)
+        available = (frozenset({binding.role_card_key})
+                     if binding and role_card_by_key(binding.role_card_key) else frozenset())
+        actor_scope = resolve_conversation_scope(
+            settings, bot_self_id=actor_bot_id, user_id=config.bot_owner_qq,
+            chat_type="private", legacy_session_key=f"private:{config.bot_owner_qq}",
+            available_role_card_keys=available,
+        )
+        if actor_scope.configuration_error or actor_scope.persona_id != request.speaker:
+            raise RuntimeError("invalid_scene_persona_binding")
+        if request.turn_kind == "owner":
+            actor_interaction_keys[request.speaker] = InteractionKey(
+                actor_scope.bot_self_id, actor_scope.persona_id, config.bot_owner_qq,
+            )
         private_continuity_context = ""
         if request.turn_kind != "proactive":
             try:
@@ -6035,25 +6538,41 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
         if request.speaker == "linyin":
             linyin_style_examples_status = actor_profile.style_examples.status
             linyin_style_example_chars = actor_profile.style_examples.char_count
-        return await ask_llm(
-            config,
-            [],
-            build_scene_actor_user_prompt(request),
-            extra_system_context=combine_ephemeral_chat_system_contexts(
-                build_scene_actor_system_context(
-                    request,
-                    max_reply_sentences=config.scene_max_reply_sentences,
-                    max_reply_chars=config.scene_max_reply_chars,
+        tool_observation: dict[str, object] = {}
+        reply = None
+        encyclopedia_reply_error = None
+        try:
+            reply = await ask_llm(
+                config,
+                [],
+                build_scene_actor_user_prompt(request),
+                extra_system_context=combine_ephemeral_chat_system_contexts(
+                    build_scene_actor_system_context(
+                        request,
+                        max_reply_sentences=config.scene_max_reply_sentences,
+                        max_reply_chars=config.scene_max_reply_chars,
+                    ),
+                    actor_profile.style_examples.content,
+                    private_continuity_context,
                 ),
-                actor_profile.style_examples.content,
-                private_continuity_context,
-            ),
-            role_card_key=request.speaker,
-            max_tokens=config.scene_actor_max_tokens,
-            max_retries=0,
-            completion_route=actor_profile.completion_route,
-            reasoning_effort=actor_profile.reasoning_effort,
-        )
+                role_card_key=actor_scope.role_card_key,
+                max_tokens=config.scene_actor_max_tokens,
+                max_retries=0,
+                completion_route=actor_profile.completion_route,
+                reasoning_effort=actor_profile.reasoning_effort,
+                encyclopedia_query_text=request.owner_message,
+                allow_encyclopedia=request.turn_kind == "owner",
+                tool_observation=tool_observation,
+            )
+            return reply
+        except BaseException as exc:
+            encyclopedia_reply_error = exc
+            raise
+        finally:
+            write_encyclopedia_turn_log_safely(
+                tool_observation, actor_scope.role_card_key, reply=reply, error=encyclopedia_reply_error,
+            )
+            record_encyclopedia_observation_safely(tool_observation, actor_scope.role_card_key)
 
     async def sender(speaker: str, reply: str) -> bool:
         target_bot = target_bots.get(speaker)
@@ -6075,6 +6594,15 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
             style_examples_status=linyin_style_examples_status,
             style_example_chars=linyin_style_example_chars,
         )
+
+    def on_owner_reply_sent(speaker: str) -> None:
+        key = actor_interaction_keys.get(speaker)
+        if key is None:
+            return
+        try:
+            _interaction_store.record_success(key, source="group")
+        except Exception as exc:
+            log_background_error(exc, event)
 
     async def run_idle_chat(idle_event_id: str) -> None:
         nonlocal linyin_style_examples_status, linyin_style_example_chars
@@ -6122,17 +6650,24 @@ async def _(bot: Bot, event: GroupMessageEvent) -> None:
         log_result(result)
         return
 
-    result = await _scene_hub.handle_message(
-        group_id=event.group_id,
-        sender_id=event.user_id,
-        source_bot_id=bot.self_id,
-        event_id=_scene_event_dedupe_id(event, text),
-        owner_message=text,
-        member_provider=member_provider,
-        director=director,
-        actor=actor,
-        sender=sender,
-    )
+    async with AsyncExitStack() as interaction_guard:
+        # Same owner/account locks as private chat; stable order avoids deadlocks.
+        for actor_bot_id in sorted({str(aike_bot.self_id), str(linyin_bot.self_id)}):
+            await interaction_guard.enter_async_context(
+                session_lock(owner_interaction_lock_key(actor_bot_id, str(event.user_id)))
+            )
+        result = await _scene_hub.handle_message(
+            group_id=event.group_id,
+            sender_id=event.user_id,
+            source_bot_id=bot.self_id,
+            event_id=_scene_event_dedupe_id(event, text),
+            owner_message=text,
+            member_provider=member_provider,
+            director=director,
+            actor=actor,
+            sender=sender,
+            on_owner_reply_sent=on_owner_reply_sent,
+        )
     log_result(result)
     if result.status == "completed":
         await _scene_hub.arm_idle_chat(run_idle_chat, delay_seconds=60.0)
@@ -6186,8 +6721,22 @@ def _qwen_space_error_text(exc: ImageGenError) -> str:
         return _qwen_space_not_ready_text()
     if exc.code == "qwen_quota_exceeded":
         return "Hugging Face ZeroGPU额度暂时不足，请等待额度恢复后再试。"
+    if exc.code == "qwen_gpu_unavailable":
+        return "Qwen Space 的 ZeroGPU 队列在60秒内没有分配到GPU；请稍后重试，或登录 Hugging Face 提高队列优先级。"
+    if exc.code in {"qwen_auth_failed"}:
+        return "Qwen改图提交被 Hugging Face 拒绝（401/403），请检查 QWEN_SPACE_HF_TOKEN 或 Space权限。"
+    if exc.code == "qwen_endpoint_not_found":
+        return "Qwen改图接口地址不存在（404），请检查 Space 的 Gradio API 是否已变更。"
+    if exc.code == "qwen_rate_limited":
+        return "Qwen改图请求被限流（429），请稍后再试。"
+    if exc.code == "qwen_submit_timeout":
+        return "Qwen改图提交阶段网络超时，图片尚未进入模型推理。"
+    if exc.code in {"qwen_space_server_error", "qwen_submit_network_error"}:
+        return "Qwen Space 当前不可用或连接失败，图片尚未完成提交。"
     if exc.code in {"qwen_infer_timeout", "qwen_event_incomplete"}:
         return "Qwen改图排队或推理超时，本次没有自动重新生成。"
+    if exc.code in {"qwen_result_invalid", "qwen_result_base64_invalid", "qwen_response_json_invalid"}:
+        return "Qwen Space 已返回结果，但返回格式无法识别，未保存或发送异常图片。"
     if exc.code in {
         "qwen_preprocessed_image_too_large",
         "image_empty",
@@ -6576,9 +7125,59 @@ async def _(bot: Bot, event: PrivateMessageEvent, matcher: Matcher) -> None:
         await matcher.finish()
 
 
+
+async def run_owner_topic_scene_switch(event: MessageEvent) -> str:
+    """Owner-private topic switch; preserves LTM and formal summaries."""
+    if not isinstance(event, PrivateMessageEvent):
+        return "换话题目前只支持私聊。"
+    if not is_owner(config, event):
+        return "只有主人可以换话题。"
+    if not topic_switch_enabled(config):
+        return "换话题功能当前未开启。"
+
+    scope = conversation_scope(event)
+    if scope.configuration_error:
+        return INVALID_PERSONA_MESSAGE
+    key = scope.runtime_session_key
+    if scope.memory_v2_active:
+        with persona_memory_database_scope(scope.persona_id):
+            result = await switch_topic_scene(
+                config,
+                key,
+                message_type="private",
+                user_id=str(event.user_id),
+                group_id=None,
+            )
+        return result.ack_text
+    if scope.routing_v2_active:
+        ephemeral_persona_history.clear(key)
+        from .topic_scene_switch import mark_topic_switch_hint
+
+        mark_topic_switch_hint(
+            key,
+            summary_id=None,
+            turns=int(getattr(config, "topic_scene_hint_turns", 3) or 0),
+        )
+        return (
+            "好，当前人格的短时上下文已重置（试运行记忆不落库摘要）。长期记忆与人设还在。\n"
+            "你直接说下一句，我们开新的一段。"
+        )
+    result = await switch_topic_scene(
+        config,
+        key or session_key(event),
+        message_type="private",
+        user_id=str(event.user_id),
+        group_id=None,
+    )
+    return result.ack_text
+
+
 @reset_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     scope = conversation_scope(event)
+    if scope.configuration_error:
+        await matcher.finish(INVALID_PERSONA_MESSAGE)
+        return
     if scope.memory_v2_active:
         with persona_memory_database_scope(scope.persona_id):
             clear_session(scope.runtime_session_key)
@@ -6590,6 +7189,17 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
         "已清除当前会话的近期原始消息和空窗摘要；"
         "历史会话摘要已保留，并会继续用于后续对话。"
     )
+
+
+
+@topic_switch_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher) -> None:
+    await require_owner(event, matcher)
+    if not isinstance(event, PrivateMessageEvent):
+        await matcher.finish("换话题目前只支持私聊。")
+        return
+    ack = await run_owner_topic_scene_switch(event)
+    await matcher.finish(ack)
 
 
 @linyin_behavior_diagnostic_cmd.handle()
@@ -6644,7 +7254,7 @@ async def _(
 @status_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
-    await matcher.finish("\n".join(status_lines()))
+    await matcher.finish("\n".join([*persona_status_lines_for_event(event), *status_lines()]))
 
 
 @diagnostics_cmd.handle()
@@ -6659,6 +7269,14 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
     execution = await run_diagnostics_graph(event, DiagnosticsView.CONFIG)
     await matcher.finish(execution.result.reply_text)
+
+
+@config_detail_cmd.handle()
+async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
+    await require_owner(event, matcher)
+    await matcher.finish(
+        format_config_detail_status(config, arg.extract_plain_text())
+    )
 
 
 @vision_status_cmd.handle()
@@ -6837,10 +7455,9 @@ def main_agent_tool_status_reply() -> str:
             "可见性：LLM 可见 + 确定性语义优先",
             "审批：必须审批；确认后只恢复已注册且 approval_resume_enabled=true 的工具。",
             "用途：审批门控主人管理写工具。",
-            "当前开放：clear_image_cache、clear_error_log、select_persona、add_fact_memory、add_preference_memory、clear_session_summaries、delete_session_summary、allow_group、deny_group、allow_private、deny_private、block_user、unblock_user、create_txt_document、create_word_document、create_presentation",
+            "当前开放：clear_image_cache、clear_error_log、add_fact_memory、add_preference_memory、clear_session_summaries、delete_session_summary、allow_group、deny_group、allow_private、deny_private、block_user、unblock_user、create_txt_document、create_word_document、create_presentation",
             "例子：/agent 帮我清空图片缓存",
             "例子：/agent 帮我清空错误日志",
-            "例子：/agent 帮我选择角色卡 moyan",
             "例子：/agent 帮我添加事实记忆 主人喜欢先看结论",
             "例子：/agent 帮我添加偏好记忆 技术讨论先给结论",
             "例子：/agent 帮我清空当前摘要",
@@ -6916,7 +7533,7 @@ def main_agent_boundary_reply() -> str:
             "允许：主人私聊显式 /agent 执行系统诊断任务：语音，同步执行已注册的 system_diagnostics_report/voice；按首故障层返回确定性语音区详情，不生成或发送测试语音。",
             "允许：主人私聊显式 /agent 执行系统诊断任务：记忆与RAG，同步执行已注册的 system_diagnostics_report/memory_rag；按首故障层返回本地索引和安全观测，不执行 embedding、召回或重建。",
             "预留：主人私聊严格命令 /agent 执行外部只读查询：<问题>；必须同时启用 ENABLE_AGENT_WEB 并配置固定 provider，当前不由 Main LLM 选择，也不接受任意 URL。",
-            "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、选择角色卡、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
+            "允许：主人私聊通过 owner_write_command 语义请求清空图片缓存/错误日志、添加事实/偏好长期记忆、清空当前摘要、删除当前会话指定摘要、修改动态黑白名单，但必须先生成审批，确认后才恢复执行。",
             "允许：Main LLM 通过 owner_write_command 提议 TXT、Word 或 PPT 本地文档；必须携带完整 title/content 并经主人审批，只写 output/main-agent-workspace，该本地命令不通过 QQ 发送。",
             f"条件允许：ENABLE_AGENT_EXTERNAL_WRITE={'true' if config.enable_agent_external_write else 'false'} 时，Main LLM 可通过 document_delivery_command 提议“生成并发送” TXT/Word/PPT；仍需独立 write_external 审批，只向确认命令所在的当前主人私聊发送一个文件，不重试。",
             "允许：/agent 任务固定命令写入 agent_tasks / agent_task_events。",
@@ -7192,7 +7809,7 @@ async def run_system_diagnostics_report_for_event(
     return await _run_system_diagnostics_report_for_event_scoped(
         event,
         scope,
-        memory_storage_available=not conversation.routing_v2_active,
+        memory_storage_available=not conversation.routing_v2_active and not conversation.configuration_error,
     )
 
 
@@ -7269,11 +7886,7 @@ async def _run_system_diagnostics_report_for_event_scoped(
         core=CoreZoneEvidence(database_ok=database_ok),
         chat=ChatZoneEvidence(
             enabled=config.enable_private_chat or config.enable_group_chat,
-            model_configured=bool(
-                config.chat_llm_api_key
-                and config.chat_llm_base_url
-                and config.chat_llm_model
-            ),
+            model_configured=resolve_chat_completion_route(config).configured,
             recent_observation_present=bool(observation["chat_present"]),
             recent_error=bool(observation["chat_error"]),
         ),
@@ -7370,6 +7983,8 @@ def owner_runtime_factory(
         run_memory_admin_graph=run_memory_admin_graph,
         load_persona_prompt=load_persona_prompt,
         persona_status_lines=persona_status_lines,
+        load_persona_prompt_for_event=load_persona_prompt_for_event,
+        persona_status_lines_for_event=persona_status_lines_for_event,
         role_card_list_lines=role_card_list_lines,
         model_config_status_lines=model_config_status_lines,
         access_overview_lines=access_overview_lines,
@@ -7822,6 +8437,8 @@ async def run_main_agent_qq_command(
     raw_output: bool,
     bot: Bot | None = None,
 ) -> str:
+    if conversation_scope(event).configuration_error:
+        return INVALID_PERSONA_MESSAGE
     if not config.enable_main_agent:
         return "MainAgent is disabled. Set ENABLE_MAIN_AGENT=true to use /agent."
     if config.main_agent_owner_only and not is_owner(config, event):
@@ -7869,7 +8486,7 @@ async def run_main_agent_qq_command(
         user_id=user_id(event),
         actor_role=graph_actor_role_for_event(event),
         session_type=graph_session_type_for_event(event),
-        session_key=session_key(event),
+        session_key=chat_session_key(event),
         group_id=group_id(event) if isinstance(event, GroupMessageEvent) else None,
         message_id=event_message_id(event),
     )
@@ -8009,7 +8626,7 @@ async def run_main_agent_qq_command(
 @main_agent_cmd.handle()
 async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     query = arg.extract_plain_text().strip()
-    lock = main_agent_session_lock(session_key(event))
+    lock = main_agent_session_lock(chat_session_key(event))
     if lock.locked():
         await matcher.finish(
             "MainAgent 正在处理上一条 /agent 请求；当前消息未执行。"
@@ -8037,7 +8654,7 @@ async def _(bot: Bot, event: MessageEvent, matcher: Matcher, arg=CommandArg()) -
 
 @main_agent_debug_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
-    lock = main_agent_session_lock(session_key(event))
+    lock = main_agent_session_lock(chat_session_key(event))
     if lock.locked():
         await matcher.finish(
             "MainAgent 正在处理上一条请求；当前 /agent-debug 未执行。"
@@ -8169,36 +8786,19 @@ async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
 async def _(event: MessageEvent, matcher: Matcher) -> None:
     await require_owner(event, matcher)
     scope = conversation_scope(event)
-    prompt = load_persona_prompt(scope.role_card_key if scope.routing_v2_active else "")
+    if scope.configuration_error:
+        await matcher.finish(INVALID_PERSONA_MESSAGE)
+        return
+    prompt = load_persona_prompt(scope.role_card_key)
     if not prompt:
-        await matcher.finish("\n".join(persona_status_lines()))
+        await matcher.finish("\n".join(persona_status_lines_for_event(event)))
     await matcher.finish("当前角色卡内容：\n" + prompt)
 
 
 @select_persona_cmd.handle()
 async def _(event: MessageEvent, matcher: Matcher, arg=CommandArg()) -> None:
     await require_owner(event, matcher)
-    scope = conversation_scope(event)
-    if scope.routing_v2_active:
-        await matcher.finish(
-            f"当前账号已固定绑定角色卡：{scope.role_card_key}；"
-            "不会修改爱可账号的全局角色卡。"
-        )
-    target = arg.extract_plain_text().strip()
-    if not target:
-        cards = list_role_cards()
-        if not cards:
-            await matcher.finish("当前没有可用角色卡。")
-        lines = ["可选角色卡："]
-        lines.extend(f"- {card.key}：{card.title}" for card in cards)
-        lines.append("用法：/选择角色卡 角色卡名称")
-        lines.extend(persona_status_lines())
-        await matcher.finish("\n".join(lines))
-
-    card = select_role_card(target)
-    if card is None:
-        await matcher.finish(f"没有找到角色卡：{target}")
-    await matcher.finish(f"已选择角色卡：{card.key}，{card.title}")
+    await matcher.finish(FIXED_PERSONA_MESSAGE)
 
 
 @tell_owner_cmd.handle()
@@ -8540,7 +9140,9 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
     if not isinstance(event, PrivateMessageEvent):
         await matcher.finish("这个命令只能在主人私聊中使用。")
     if config.enable_remote_sticker_classifier:
-        remote_snapshot = _last_remote_sticker_classifier_shadow
+        remote_snapshot = _remote_sticker_classifier_snapshots.get(
+            remote_sticker_scope_key(resolve_chat_sticker_scope(event)),
+        )
         if remote_snapshot is None:
             await matcher.finish(
                 "C1 远程表情分类 shadow 尚无普通聊天样本，未发送图片。"
@@ -8565,6 +9167,9 @@ async def _(event: MessageEvent, matcher: Matcher) -> None:
             f"{mode_text}：\n"
             f"样本序号：{remote_snapshot.sample_id}\n"
             f"分类状态：{remote_snapshot.classifier_status}\n"
+            f"响应诊断：{remote_snapshot.finish_reason} / {remote_snapshot.response_chars} 字符 / {remote_snapshot.parse_reason or '无解析错误'}\n"
+            f"{format_sticker_classifier_diagnostics(remote_snapshot.diagnostics)}"
+            f"格式兼容：{'已去除完整代码围栏' if remote_snapshot.normalized_code_fence else '原始 JSON'}\n"
             f"意图：{remote_intent_text}\n"
             f"置信度：{remote_snapshot.confidence:.2f}\n"
             f"本地决策：{remote_snapshot.decision_reason}\n"
@@ -8600,55 +9205,23 @@ async def _(matcher: Matcher) -> None:
     await matcher.finish(
         "\n".join(
             [
-                "权限管理命令：",
-                "/启用本群",
-                "/禁用本群",
-                "/加入群白名单 群号",
-                "/移出群白名单 群号",
-                "/加入私聊白名单 QQ号",
-                "/移出私聊白名单 QQ号",
-                "/加入黑名单 QQ号",
-                "/移出黑名单 QQ号",
-                "/群白名单",
-                "/私聊白名单",
-                "/黑名单",
-                "/记忆状态",
-                "/RAG状态",
-                "/记忆检索 查询内容",
-                "/重建记忆索引",
-                "/诊断",
-                "/配置状态",
-                "/视觉状态",
-                "/最近错误",
-                "/清空错误日志",
-                "/图片缓存状态",
-                "/清空图片缓存",
-                "/清空全部上下文",
-                "/摘要状态",
-                "/查看摘要",
-                "/查看空窗摘要",
-                "/压缩当前会话",
-                "/压缩当前对话",
-                "/清空当前摘要",
-                "/删除摘要 摘要ID",
-                "/清空全部摘要",
-                "/添加事实记忆 内容",
-                "/添加偏好记忆 内容",
-                "/查看长期记忆",
-                "/删除长期记忆 记忆ID",
-                "/查看角色卡",
+                "主人维护命令（按用途查看）：",
+                "账号、固定人物、模型与音色：本地 Web 的“配置”页统一查看。",
+                "状态与排障：/状态 · /诊断 · /最近错误",
+                "配置与能力：/配置状态 · /配置详情 [分类] · /查看角色卡 · /视觉状态 · /语音状态",
+                "记忆索引：/记忆状态 · /RAG状态 · /记忆检索 查询内容 · /重建记忆索引",
+                "长期记忆：/添加事实记忆 内容 · /添加偏好记忆 内容 · /查看长期记忆 · /删除长期记忆 记忆ID",
+                "会话摘要：/摘要状态 · /查看摘要 · /查看空窗摘要 · /压缩当前会话",
+                "摘要清理：/清空当前摘要 · /删除摘要 摘要ID · /清空全部摘要",
+                "缓存与日志清理：/图片缓存状态 · /清空图片缓存 · /清空错误日志 · /清空全部上下文",
+                "群聊权限：/启用本群 · /禁用本群 · /加入群白名单 群号 · /移出群白名单 群号 · /群白名单",
+                "私聊权限：/加入私聊白名单 QQ号 · /移出私聊白名单 QQ号 · /私聊白名单",
+                "黑名单：/加入黑名单 QQ号 · /移出黑名单 QQ号 · /黑名单",
+                "表情维护：/表情检查 · /表情分析 candidate_<短哈希> · /表情草稿 · /表情意图状态",
+                "表情发布：/表情批准 candidate_<短哈希> <短哈希确认> · /表情撤销 sticker_id <最终文件短哈希确认> · /表情预览 sticker_id",
                 "/凛音行为诊断 测试消息（仅主人和凛音私聊；不写入上下文或记忆）",
-                "/选择角色卡",
                 "/转告主人 内容",
-                "/留言给主人 内容",
-                "/语音状态",
-                "/表情检查",
-                "/表情分析 candidate_<短哈希>",
-                "/表情草稿",
-                "/表情批准 candidate_<短哈希> <短哈希确认>",
-                "/表情撤销 sticker_id <最终文件短哈希确认>",
-                "/表情预览 sticker_id",
-                "/表情意图状态",
+                "兼容别名仍可用：/压缩当前对话、/留言给主人；帮助只展示主要入口。",
                 "除转告命令外，以上管理命令只有主人可用。",
                 "转告命令允许主人、私聊白名单用户和授权群成员使用。",
             ]

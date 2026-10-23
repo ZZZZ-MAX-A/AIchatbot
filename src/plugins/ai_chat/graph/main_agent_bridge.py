@@ -146,7 +146,6 @@ AGENT_TASK_COMMANDS: tuple[str, ...] = (
 OWNER_WRITE_COMMANDS: tuple[str, ...] = (
     "clear_image_cache",
     "clear_error_log",
-    "select_persona",
     "add_fact_memory",
     "add_preference_memory",
     "clear_session_summaries",
@@ -498,7 +497,6 @@ def create_read_only_main_agent_tool_registry(
                     "Request approval for a side-effecting owner QQ management command. "
                     "Use arguments.command as one of: "
                     f"{', '.join(OWNER_WRITE_COMMANDS)}. "
-                    "select_persona also requires arguments.target. "
                     "add_fact_memory and add_preference_memory also require arguments.content. "
                     "delete_session_summary also requires arguments.summary_id. "
                     "access-control commands also require numeric arguments.target. "
@@ -1504,12 +1502,14 @@ def classify_owner_write_command(query: str) -> str:
         return "add_fact_memory"
     if extract_owner_preference_memory_content(query):
         return "add_preference_memory"
-    if extract_owner_persona_target(query):
-        return "select_persona"
     return ""
 
 
 def owner_write_need_argument_message(query: str) -> str:
+    if is_owner_select_persona_intent(query):
+        from ..persona_maintenance import FIXED_PERSONA_MESSAGE
+
+        return FIXED_PERSONA_MESSAGE + "当前尚未创建审批，也没有切换角色卡。"
     if is_disallowed_owner_write_intent(query):
         return (
             "这个 /agent 写操作当前不开放。\n"
@@ -1521,12 +1521,6 @@ def owner_write_need_argument_message(query: str) -> str:
             "删除当前会话摘要需要明确的数字摘要 ID。\n"
             "请先用 /agent 查看摘要 找到要删除的 ID，然后发送：/agent 删除摘要 <摘要ID>。\n"
             "当前尚未创建审批，也没有删除任何摘要。"
-        )
-    if is_owner_select_persona_intent(query) and not extract_owner_persona_target(query):
-        return (
-            "选择角色卡需要明确的角色卡 key。\n"
-            "请先用 /agent 角色卡列表 查看可选项，然后发送：/agent 选择角色卡 <key>。\n"
-            "当前尚未创建审批，也没有切换角色卡。"
         )
     if is_owner_fact_memory_write_intent(query) and not extract_owner_fact_memory_content(query):
         return (
@@ -1675,8 +1669,6 @@ def owner_write_argument_error(arguments: dict[str, object]) -> str:
                 "已在审批前拒绝。请减少 `##` 章节或每节正文行；"
                 "标题页由渲染器自动生成，不要另建“封面”章节。"
             )
-    if command == "select_persona" and not str(arguments.get("target") or "").strip():
-        return "select_persona 需要明确的角色卡 key：/agent 选择角色卡 <key>。"
     if command in {"add_fact_memory", "add_preference_memory"} and not str(
         arguments.get("content") or ""
     ).strip():

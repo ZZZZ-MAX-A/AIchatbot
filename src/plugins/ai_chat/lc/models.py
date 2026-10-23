@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import AiChatConfig
+from ..completion_routes import resolve_chat_completion_route
 
 
 def _chat_openai(**kwargs: Any) -> Any:
@@ -34,10 +35,24 @@ def build_external_research_llm(config: AiChatConfig) -> Any:
     )
 
 
-def build_chat_llm(config: AiChatConfig) -> Any:
+def build_chat_llm(
+    config: AiChatConfig,
+    role_card_key: str = "",
+    *,
+    completion_route: str = "auto",
+) -> Any:
+    route = resolve_chat_completion_route(
+        config, role_card_key, completion_route=completion_route
+    )
+    route.require_configured()
+    if route.provider != "openai":
+        raise RuntimeError(
+            "build_chat_llm supports OpenAI-compatible routes only; "
+            "use ask_llm for the native Ollama route"
+        )
     return _chat_openai(
-        api_key=config.chat_llm_api_key,
-        base_url=config.chat_llm_base_url,
-        model=config.chat_llm_model,
-        timeout=config.chat_llm_timeout_seconds,
+        api_key=route.api_key,
+        base_url=route.base_url,
+        model=route.model,
+        timeout=route.timeout_seconds,
     )

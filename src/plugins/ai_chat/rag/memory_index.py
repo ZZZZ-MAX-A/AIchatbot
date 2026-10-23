@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from ..memory_audience import MemoryAudience
 from .documents import (
     find_rag_document,
     get_rag_document,
@@ -12,6 +13,7 @@ from .documents import (
 )
 from .embeddings import get_rag_embedding, upsert_rag_embedding
 from .memory_sources import manual_memory_document_fields, session_summary_document_fields
+from .memory_time import memory_document_time_context
 from .providers import EmbeddingProvider
 from .schema import (
     NAMESPACE_SEMANTIC_MEMORY,
@@ -206,6 +208,8 @@ def retrieve_memory(
     min_score: float = 0.55,
     max_context_chars: int = 1600,
     source_types: set[str] | None = None,
+    audience: MemoryAudience | None = None,
+    candidates: list[tuple[RagDocument, list[float]]] | None = None,
 ) -> list[RagSearchResult]:
     if not is_owner or not query.strip() or top_k <= 0 or max_context_chars <= 0:
         return []
@@ -220,15 +224,25 @@ def retrieve_memory(
         source_types=allowed_source_types,
         min_score=min_score,
         top_k=top_k,
+        document_filter=lambda document: memory_document_visible(
+            document, is_owner=is_owner, audience=audience
+        ),
+        **({"candidates": candidates} if candidates is not None else {}),
     )
-    visible = [result for result in results if memory_document_visible(result.document, is_owner=is_owner)]
-    return trim_results_to_context_chars(visible, max_context_chars)
+    return trim_results_to_context_chars(results, max_context_chars)
 
 
-def memory_document_visible(document: RagDocument, *, is_owner: bool) -> bool:
-    if document.visibility == VISIBILITY_OWNER_ONLY:
-        return is_owner
-    return False
+def memory_document_visible(
+    document: RagDocument,
+    *,
+    is_owner: bool,
+    audience: MemoryAudience | None = None,
+) -> bool:
+    if document.visibility != VISIBILITY_OWNER_ONLY or not is_owner:
+        return False
+    # An omitted audience preserves local owner-debug tools. QQ callers must
+    # supply their conversation audience, including memory debug commands.
+    return audience is None or audience.allows_document(document)
 
 
 def trim_results_to_context_chars(
@@ -265,6 +279,7 @@ def format_memory_results(results: list[RagSearchResult]) -> str:
             f"[{index}] {document.title} "
             f"(score={result.score:.3f}, source={document.source_type}:{document.source_id})"
         )
+        lines.append(memory_document_time_context(document))
         lines.append(document.content)
         lines.append("")
     return "\n".join(lines).strip()

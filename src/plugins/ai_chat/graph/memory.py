@@ -77,6 +77,7 @@ class MemoryContext:
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
+    bilibili_memory_status: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class MemoryContextGraphResult:
     rule_reminder_context: str = ""
     gap_scene_error: str = ""
     error: str = ""
+    bilibili_memory_status: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,7 @@ class MemoryContextGraphRunner:
             rule_reminder_context=current.rule_reminder_context,
             gap_scene_error=current.gap_scene_error,
             error=current.error,
+            bilibili_memory_status=dict(current.bilibili_memory_status),
         )
         return MemoryContextGraphExecution(current, result, tuple(node_trace))
 

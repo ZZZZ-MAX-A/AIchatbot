@@ -8,10 +8,10 @@ import tempfile
 import threading
 import unittest
 import wave
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -24,6 +24,16 @@ from pure_ai_chat_loader import (
 
 
 class OwnerConsoleManualDiagnosticsTests(unittest.TestCase):
+    @contextmanager
+    def fixed_memory_test_target(self):
+        # Security-contract tests inject counters; library selection is covered separately.
+        from src.plugins.ai_chat.memory_maintenance import MemoryMaintenanceScope
+        target = MemoryMaintenanceScope("2000000001", "aike", "爱可", "aike", "legacy_database",
+                                        "data/chatbot.db", "private:/group:", "test-scope-revision")
+        with patch.object(self.fastapi, "_owner_console_memory_target", return_value=target), patch.object(
+            self.fastapi, "memory_maintenance_database_scope", return_value=nullcontext()):
+            yield target
+
     @classmethod
     def setUpClass(cls) -> None:
         ensure_ai_chat_packages()
@@ -919,59 +929,132 @@ class OwnerConsoleManualDiagnosticsTests(unittest.TestCase):
         thread.join(timeout=2)
         self.assertEqual(len(completed), 1)
 
-    def test_memory_fastapi_action_requires_fixed_security_contract(self):
-        manual = self.manual
-        runtime = manual.OwnerConsoleManualDiagnosticsRuntime(
-            manual_diagnostic_actions_enabled=True,
-            project_doc_rag_probe_enabled=False,
-            project_doc_rag_probe_executor=lambda: None,
-            memory_rag_consistency_enabled=True,
-            memory_rag_consistency_executor=self.memory_evidence,
-        )
-        app = self.fastapi.create_owner_console_fastapi_app(
-            manual_diagnostics_runtime=runtime,
-            action_session_token="test-action-session",
-        )
-        client = TestClient(app, base_url="http://127.0.0.1:8090")
-        state = client.get("/api/v1/owner-console/manual-diagnostics")
-        self.assertTrue(state.json()["data"]["memory_rag_consistency_enabled"])
+    def test_all_fixed_runs_reject_cross_workflow_contracts_before_execution(self):
+        with self.fixed_memory_test_target() as target:
+            api = self.fastapi
+            contracts = [
+                ("project-doc-rag", "run_project_doc_rag_probe", "project_doc_rag_probe_enabled", api.PROJECT_DOC_RAG_PROBE_ACTION_HEADER, api.PROJECT_DOC_RAG_PROBE_CONFIRMATION),
+                ("memory-rag-consistency", "run_memory_rag_consistency", "memory_rag_consistency_enabled", api.MEMORY_RAG_CONSISTENCY_ACTION_HEADER, api.MEMORY_RAG_CONSISTENCY_CONFIRMATION),
+                ("main-llm-contract", "run_main_llm_contract", "main_llm_contract_enabled", api.MAIN_LLM_CONTRACT_ACTION_HEADER, api.MAIN_LLM_CONTRACT_CONFIRMATION),
+                ("tts-synthesis", "run_tts_synthesis", "tts_synthesis_enabled", api.TTS_SYNTHESIS_ACTION_HEADER, api.TTS_SYNTHESIS_CONFIRMATION),
+                ("vision-inference", "run_vision_inference", "vision_inference_enabled", api.VISION_INFERENCE_ACTION_HEADER, api.VISION_INFERENCE_CONFIRMATION),
+                ("cloud-vision-fixed-description", "run_cloud_vision_fixed_description", "cloud_vision_enabled", api.CLOUD_VISION_ACTION_HEADER, api.CLOUD_VISION_CONFIRMATION),
+            ]
+            snapshot = SimpleNamespace(**{row[2]: True for row in contracts})
+            executors = {row[1]: Mock(return_value={"workflow": row[0]}) for row in contracts}
+            runtime = SimpleNamespace(build_snapshot=lambda: snapshot, **executors)
+            client = TestClient(api.create_owner_console_fastapi_app(
+                manual_diagnostics_runtime=runtime, action_session_token="matrix-session",
+            ), base_url="http://127.0.0.1:8090")
 
-        path = "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency"
-        confirmation = {"confirmation": "run_registered_memory_rag_consistency"}
-        action_header = "manual-memory-rag-consistency-v1"
-        self.assertEqual(
-            client.post(
-                path,
-                headers={"X-Owner-Console-Action": action_header},
-                json=confirmation,
-            ).status_code,
-            403,
+            for index, (path, method, _, header, confirmation) in enumerate(contracts):
+                with self.subTest(workflow=path):
+                    endpoint = "/api/v1/owner-console/manual-diagnostics/" + path
+                    headers = {"Origin": "http://127.0.0.1:8090", api.OWNER_CONSOLE_ACTION_HEADER: header}
+                    body = {"confirmation": confirmation}
+                    other_header, other_confirmation = contracts[(index + 1) % len(contracts)][3:]
+                    client.cookies.clear()
+                    self.assertEqual(client.post(endpoint, headers=headers, json=body).status_code, 403)
+                    client.cookies.set(api.OWNER_CONSOLE_ACTION_COOKIE, "wrong-session")
+                    self.assertEqual(client.post(endpoint, headers=headers, json=body).status_code, 403)
+                    client.cookies.set(api.OWNER_CONSOLE_ACTION_COOKIE, "matrix-session")
+                    for bad_headers in (
+                        {api.OWNER_CONSOLE_ACTION_HEADER: header},
+                        {**headers, "Origin": "http://example.invalid"},
+                        {**headers, "Host": "example.invalid"},
+                        {**headers, api.OWNER_CONSOLE_ACTION_HEADER: other_header},
+                    ):
+                        self.assertEqual(client.post(endpoint, headers=bad_headers, json=body).status_code, 403)
+                    for bad_body in (
+                        {"confirmation": other_confirmation},
+                        {**body, "query": "unregistered request"},
+                        None, [],
+                    ):
+                        self.assertEqual(client.post(endpoint, headers=headers, json=bad_body).status_code, 400)
+                    self.assertEqual(client.post(endpoint, headers={**headers, "Content-Type": "application/json"}, content="{").status_code, 400)
+                    self.assertEqual(client.post(endpoint, headers={**headers, "Content-Type": "text/plain"}, content=json.dumps(body)).status_code, 400)
+                    executors[method].assert_not_called()
+                    response = client.post(endpoint, headers=headers, json=body)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["data"]["workflow"], path)
+                    if method == "run_memory_rag_consistency":
+                        executors[method].assert_called_once_with(memory_scope=target)
+                    else:
+                        executors[method].assert_called_once_with()
+                    executors[method].side_effect = api.OwnerConsoleManualDiagnosticBusy()
+                    self.assertEqual(client.post(endpoint, headers=headers, json=body).status_code, 409)
+                    executors[method].side_effect = api.OwnerConsoleManualDiagnosticDisabled()
+                    self.assertEqual(client.post(endpoint, headers=headers, json=body).status_code, 403)
+
+    def test_disabled_fixed_runs_do_not_resolve_unavailable_executors(self):
+        snapshot = SimpleNamespace(
+            project_doc_rag_probe_enabled=False, memory_rag_consistency_enabled=False,
+            main_llm_contract_enabled=False, tts_synthesis_enabled=False,
+            vision_inference_enabled=False, cloud_vision_enabled=False,
         )
-        headers = {
-            "Origin": "http://127.0.0.1:8090",
-            "X-Owner-Console-Action": action_header,
-        }
-        self.assertEqual(
-            client.post(
-                path,
-                headers=headers,
-                json={"confirmation": "anything-else"},
-            ).status_code,
-            400,
-        )
-        response = client.post(path, headers=headers, json=confirmation)
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["data"]["outcome"], "attention")
-        self.assertEqual(
-            payload["data"]["code"],
-            "memory_rag_active_embedding_gap",
-        )
-        self.assertFalse(payload["data"]["memory_content_read"])
-        self.assertFalse(payload["data"]["embedding_called"])
-        rendered = json.dumps(payload, ensure_ascii=False)
-        self.assertNotIn("private-fact", rendered)
-        self.assertNotIn("private-summary", rendered)
+        runtime = SimpleNamespace(build_snapshot=lambda: snapshot)
+        client = TestClient(self.fastapi.create_owner_console_fastapi_app(
+            manual_diagnostics_runtime=runtime,
+        ), base_url="http://127.0.0.1:8090")
+        for path in ("project-doc-rag", "memory-rag-consistency", "main-llm-contract", "tts-synthesis", "vision-inference", "cloud-vision-fixed-description"):
+            with self.subTest(workflow=path):
+                response = client.post("/api/v1/owner-console/manual-diagnostics/" + path, json={})
+                self.assertEqual(response.status_code, 403)
+
+    def test_memory_fastapi_action_requires_fixed_security_contract(self):
+        with self.fixed_memory_test_target() as target:
+            manual = self.manual
+            runtime = manual.OwnerConsoleManualDiagnosticsRuntime(
+                manual_diagnostic_actions_enabled=True,
+                project_doc_rag_probe_enabled=False,
+                project_doc_rag_probe_executor=lambda: None,
+                memory_rag_consistency_enabled=True,
+                memory_rag_consistency_executor=self.memory_evidence,
+            )
+            app = self.fastapi.create_owner_console_fastapi_app(
+                manual_diagnostics_runtime=runtime,
+                action_session_token="test-action-session",
+            )
+            client = TestClient(app, base_url="http://127.0.0.1:8090")
+            state = client.get("/api/v1/owner-console/manual-diagnostics")
+            self.assertTrue(state.json()["data"]["memory_rag_consistency_enabled"])
+
+            path = "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency"
+            confirmation = {"confirmation": "run_registered_memory_rag_consistency"}
+            action_header = "manual-memory-rag-consistency-v1"
+            self.assertEqual(
+                client.post(
+                    path,
+                    headers={"X-Owner-Console-Action": action_header},
+                    json=confirmation,
+                ).status_code,
+                403,
+            )
+            headers = {
+                "Origin": "http://127.0.0.1:8090",
+                "X-Owner-Console-Action": action_header,
+            }
+            self.assertEqual(
+                client.post(
+                    path,
+                    headers=headers,
+                    json={"confirmation": "anything-else"},
+                ).status_code,
+                400,
+            )
+            response = client.post(path, headers=headers, json=confirmation)
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["data"]["outcome"], "attention")
+            self.assertEqual(
+                payload["data"]["code"],
+                "memory_rag_active_embedding_gap",
+            )
+            self.assertFalse(payload["data"]["memory_content_read"])
+            self.assertFalse(payload["data"]["embedding_called"])
+            rendered = json.dumps(payload, ensure_ascii=False)
+            self.assertNotIn("private-fact", rendered)
+            self.assertNotIn("private-summary", rendered)
 
     def test_main_llm_fastapi_action_uses_fixed_security_contract_and_safe_result(self):
         manual = self.manual

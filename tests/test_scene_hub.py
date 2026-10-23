@@ -46,7 +46,7 @@ class SceneHubTests(unittest.IsolatedAsyncioTestCase):
         )
         return self.director.SceneDirectorResult("ready", plan)
 
-    async def run_turn(self, hub, *, sender_result=True, event_id="event-1", actor=None):
+    async def run_turn(self, hub, *, sender_result=True, event_id="event-1", actor=None, observer=None):
         timeline = []
 
         async def members():
@@ -82,8 +82,46 @@ class SceneHubTests(unittest.IsolatedAsyncioTestCase):
             director=director,
             actor=actor or default_actor,
             sender=sender,
+            on_owner_reply_sent=observer,
         )
         return result, timeline
+
+    async def test_owner_observer_records_only_successfully_sent_roles(self):
+        observed = []
+        hub = self.hub_module.SceneHub(self.make_settings())
+        result, _ = await self.run_turn(hub, sender_result={"aike": True, "linyin": False}, observer=observed.append)
+        self.assertEqual(result.sent_speakers, ("aike",))
+        self.assertEqual(observed, ["aike"])
+
+    async def test_failed_sends_do_not_notify_owner_observer(self):
+        observed = []
+        hub = self.hub_module.SceneHub(self.make_settings())
+        result, _ = await self.run_turn(hub, sender_result=False, observer=observed.append)
+        self.assertEqual(result.sent_speakers, ())
+        self.assertEqual(observed, [])
+
+    async def test_duplicate_event_does_not_notify_observer_again(self):
+        observed = []
+        hub = self.hub_module.SceneHub(self.make_settings())
+        await self.run_turn(hub, observer=observed.append)
+        await self.run_turn(hub, observer=observed.append)
+        self.assertEqual(observed, ["aike", "linyin"])
+
+    async def test_observer_failure_does_not_undo_delivery_or_skip_next_role(self):
+        def failed_observer(speaker):
+            raise RuntimeError("metadata failed")
+        hub = self.hub_module.SceneHub(self.make_settings())
+        result, _ = await self.run_turn(hub, observer=failed_observer)
+        self.assertEqual(result.sent_speakers, ("aike", "linyin"))
+
+    async def test_emergency_notice_is_not_counted_as_role_interaction(self):
+        observed = []
+        async def failed_actor(request):
+            raise RuntimeError("actor failed")
+        hub = self.hub_module.SceneHub(self.make_settings())
+        result, _ = await self.run_turn(hub, actor=failed_actor, observer=observed.append)
+        self.assertEqual(result.sent_speakers, ())
+        self.assertEqual(observed, [])
 
     async def test_interaction_waits_for_successful_send_and_passes_actual_text(self):
         hub = self.hub_module.SceneHub(self.make_settings())

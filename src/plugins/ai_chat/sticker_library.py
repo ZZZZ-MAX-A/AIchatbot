@@ -31,7 +31,18 @@ MEDIA_TYPE_BY_FORMAT = {
     "JPEG": "image/jpeg",
     "WEBP": "image/webp",
 }
-ALLOWED_PERSONA_KEYS = frozenset({"aike"})
+ALLOWED_PERSONA_KEYS = frozenset({"aike", "linyin"})
+# Shared is an explicit asset audience, never a conversational persona or fallback.
+SHARED_STICKER_PERSONA_KEY = "shared"
+ALLOWED_STICKER_ASSET_PERSONA_KEYS = ALLOWED_PERSONA_KEYS | {SHARED_STICKER_PERSONA_KEY}
+
+
+def sticker_asset_supports_persona(asset_persona_key: str, persona_key: str) -> bool:
+    return persona_key in ALLOWED_PERSONA_KEYS and asset_persona_key in {
+        persona_key, SHARED_STICKER_PERSONA_KEY,
+    }
+
+
 ALLOWED_MOODS = frozenset(
     {
         "affection",
@@ -44,12 +55,14 @@ ALLOWED_MOODS = frozenset(
         "embarrassed",
         "excited",
         "expectant",
+        "flustered",
         "happy",
         "hurt",
         "mixed",
         "neutral",
         "playful",
         "pleading",
+        "proud",
         "resigned",
         "sad",
         "shy",
@@ -135,6 +148,7 @@ ALLOWED_USAGE_TAGS = frozenset(
         "sharing_snack",
         "success",
         "teasing",
+        "thinking",
         "unexpected_statement",
     }
 )
@@ -969,7 +983,7 @@ def _parse_asset(
     if media_type not in MEDIA_TYPE_BY_FORMAT.values():
         raise StickerLibraryError("invalid_media_type")
     persona_key = _required_string(entry, "persona_key")
-    if persona_key not in ALLOWED_PERSONA_KEYS:
+    if persona_key not in ALLOWED_STICKER_ASSET_PERSONA_KEYS:
         raise StickerLibraryError("invalid_persona_key")
     scope = _required_string(entry, "scope")
     if scope not in ALLOWED_SCOPES:

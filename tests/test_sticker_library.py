@@ -108,6 +108,19 @@ class StickerLibraryTests(unittest.TestCase):
         self.assertEqual(library.disabled_count, 1)
         self.assertIsNone(library.enabled_asset("aike_happy_001"))
 
+    def test_explicit_shared_and_linyin_audiences_load_but_unknown_is_rejected(self):
+        path = self.write_png()
+        for persona in ('aike', 'linyin', 'shared'):
+            with self.subTest(persona=persona):
+                self.write_manifest([self.entry(path, persona_key=persona)])
+                library = self.module.load_approved_sticker_library(self.root)
+                self.assertFalse(library.issues)
+                self.assertEqual(library.assets[0].persona_key, persona)
+        self.write_manifest([self.entry(path, persona_key='unknown')])
+        library = self.module.load_approved_sticker_library(self.root)
+        self.assertEqual(library.assets, ())
+        self.assertEqual(library.issues[0].code, 'invalid_persona_key')
+
     def test_path_traversal_and_absolute_paths_are_entry_issues(self):
         for relative_file in ("../outside.png", "sub/file.png", "C:/escape.png"):
             with self.subTest(relative_file=relative_file):

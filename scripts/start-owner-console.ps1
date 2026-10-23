@@ -158,20 +158,13 @@ $errLog = Join-Path $logDir "owner-console.err.log"
 
 $env:OWNER_CONSOLE_STATIC_ENABLED = "true"
 $env:OWNER_CONSOLE_STATIC_DIR = $StaticDir
-$manualDiagnosticsEnabled = (
-    $EnableProjectDocRagProbe -or
-    $EnableMemoryRagConsistencyProbe -or
-    $EnableMainLlmContractProbe -or
-    $EnableTtsSynthesisProbe -or
-    $EnableCloudVisionProbe
-)
-$env:OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED = if ($manualDiagnosticsEnabled) { "true" } else { "false" }
-$env:OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED = if ($EnableProjectDocRagProbe) { "true" } else { "false" }
-$env:OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED = if ($EnableMemoryRagConsistencyProbe) { "true" } else { "false" }
-$env:OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = if ($EnableMainLlmContractProbe) { "true" } else { "false" }
-$env:OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED = if ($EnableTtsSynthesisProbe) { "true" } else { "false" }
-$env:OWNER_CONSOLE_VISION_INFERENCE_ENABLED = "false"
-$env:OWNER_CONSOLE_CLOUD_VISION_ENABLED = if ($EnableCloudVisionProbe) { "true" } else { "false" }
+$env:OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED = "true"
+$env:OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED = "true"
+$env:OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED = "true"
+$env:OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = "true"
+$env:OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED = "true"
+$env:OWNER_CONSOLE_VISION_INFERENCE_ENABLED = "true"
+$env:OWNER_CONSOLE_CLOUD_VISION_ENABLED = "true"
 $env:OWNER_CONSOLE_APPROVAL_ACTIONS_ENABLED = if ($EnableApprovalActions) { "true" } else { "false" }
 $env:OWNER_CONSOLE_TASK_ACTIONS_ENABLED = if ($EnableTaskActions) { "true" } else { "false" }
 $env:OWNER_CONSOLE_ACCESS_ACTIONS_ENABLED = if ($EnableAccessActions) { "true" } else { "false" }

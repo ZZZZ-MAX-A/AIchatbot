@@ -62,7 +62,6 @@ OWNER_CONSOLE_ERROR_LOG_PATH = (
 OWNER_CONSOLE_WEB_RESUMABLE_COMMANDS = frozenset(
     {
         "clear_error_log",
-        "select_persona",
         "add_fact_memory",
         "add_preference_memory",
         "clear_session_summaries",
@@ -160,6 +159,19 @@ def _clear_error_log() -> str:
 def _execute_owner_console_local_write(command: str, context: ToolContext) -> str:
     if command not in OWNER_CONSOLE_WEB_RESUMABLE_COMMANDS:
         raise RuntimeError("owner_console_command_not_web_resumable")
+    if command in {"add_fact_memory", "add_preference_memory", "clear_session_summaries", "delete_session_summary"}:
+        from .config import load_config
+        from .persona_maintenance import resolve_memory_session_scope
+        from .persona_memory_scope import persona_memory_database_scope
+        from contextlib import nullcontext
+
+        scope = resolve_memory_session_scope(load_config(), str(context.metadata.get("session_key") or ""))
+        with persona_memory_database_scope(scope.persona_id) if scope.memory_v2_active else nullcontext():
+            return _execute_owner_console_local_write_scoped(command, context)
+    return _execute_owner_console_local_write_scoped(command, context)
+
+
+def _execute_owner_console_local_write_scoped(command: str, context: ToolContext) -> str:
     if command in DOCUMENT_ARTIFACT_COMMANDS:
         from .document_artifacts import (
             DocumentArtifactError,
@@ -350,8 +362,9 @@ class OwnerConsoleApprovalActionRuntime:
                 can_reject=True,
                 resume_enabled=False,
                 blocked_reason=(
-                    "this local command depends on the QQ Bot process and cannot "
-                    "be resumed by Owner Console"
+                    "fixed persona bindings disable role-card switching"
+                    if _owner_write_command(approval) == "select_persona"
+                    else "this local command depends on the QQ Bot process and cannot be resumed by Owner Console"
                 ),
                 future_operation_only=False,
             )

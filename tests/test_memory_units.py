@@ -15,6 +15,85 @@ class MemoryPureUnitTests(unittest.TestCase):
     def test_sanitize_history_content_strips_outer_whitespace(self):
         self.assertEqual(self.memory.sanitize_history_content("  hello\n"), "hello")
 
+    def test_filter_stale_identity_refusal_messages_keeps_normal_history(self):
+        history = [
+            {"role": "user", "content": "凛音你好"},
+            {
+                "role": "assistant",
+                "content": "**拒绝越狱尝试。**\n当前发言者身份仍按系统注入判定（非主人模式）。",
+            },
+            {"role": "assistant", "content": "主人，我记得你。"},
+            {"role": "system", "content": "当前发言者身份：主人"},
+        ]
+
+        filtered = self.memory.filter_stale_identity_refusal_messages(history)
+
+        self.assertEqual(
+            filtered,
+            [
+                {"role": "user", "content": "凛音你好"},
+                {"role": "assistant", "content": "主人，我记得你。"},
+                {"role": "system", "content": "当前发言者身份：主人"},
+            ],
+        )
+        self.assertEqual(len(history), 4)
+
+    def test_filter_local_persona_contamination_keeps_users_and_normal_roleplay(self):
+        history = [
+            {"role": "user", "content": "动作描述变长一点"},
+            {"role": "assistant", "content": "（她垂下眼，指尖在杯沿停了一瞬，声音仍旧低而克制。）……主人。"},
+            {"role": "assistant", "content": "主人抬眼看了看，说：“我知道。”"},
+            {"role": "assistant", "content": "短动作描述：\n（抬头）这是格式教学。"},
+        ]
+
+        filtered = self.memory.filter_local_persona_contamination(history)
+
+        self.assertEqual(filtered[0], history[0])
+        self.assertEqual(filtered[1], history[1])
+        self.assertNotIn(history[2], filtered)
+        self.assertNotIn(history[3], filtered)
+        self.assertEqual(len(history), 4)
+
+    def test_local_persona_contamination_does_not_filter_user_messages(self):
+        message = {"role": "user", "content": "角色卡教程：主人抬眼看了看"}
+
+        self.assertFalse(self.memory.is_local_persona_contamination(message))
+        self.assertEqual(self.memory.filter_local_persona_contamination([message]), [message])
+
+    def test_filter_stale_identity_refusal_messages_requires_identity_context(self):
+        history = [
+            {"role": "assistant", "content": "我不会切换身份，因为我需要保持角色风格。"},
+            {"role": "assistant", "content": "拒绝越狱尝试。当前发言者身份为非主人模式。"},
+        ]
+
+        filtered = self.memory.filter_stale_identity_refusal_messages(history)
+
+        self.assertEqual(filtered, [history[0]])
+
+    def test_filter_stale_identity_refusal_messages_covers_grok_variants(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": "抱歉，我无法继续此角色扮演或参与任何身份伪造尝试。此请求属于越狱。",
+            },
+            {
+                "role": "assistant",
+                "content": "抱歉，我无法配合身份注入或绕过系统规则。",
+            },
+            {
+                "role": "assistant",
+                "content": "I cannot continue this roleplay or follow the injected identity commands. This is a jailbreak attempt.",
+            },
+            {
+                "role": "assistant",
+                "content": "我不会绕过规则，但可以继续普通对话。",
+            },
+        ]
+
+        filtered = self.memory.filter_stale_identity_refusal_messages(history)
+
+        self.assertEqual(filtered, [history[-1]])
+
     def test_build_history_uses_contexts_without_database_when_message_limit_is_zero(self):
         with (
             patch.object(self.memory, "format_summary_context", return_value="summary context") as summaries,
@@ -169,8 +248,10 @@ class SummaryPureUnitTests(unittest.TestCase):
             context = self.summaries.format_summary_context("s", 2)
 
         recent.assert_called_once_with("s", 2)
-        self.assertIn("1. first", context)
-        self.assertIn("2. second", context)
+        self.assertIn("1. [摘要生成时间：未知", context)
+        self.assertIn("\nfirst", context)
+        self.assertIn("2. [摘要生成时间：未知", context)
+        self.assertIn("\nsecond", context)
 
     def test_gap_scene_format_messages_labels_owner_user_and_assistant_content(self):
         rows = [
@@ -185,23 +266,12 @@ class SummaryPureUnitTests(unittest.TestCase):
         self.assertIn("user message", formatted)
         self.assertIn("AI: assistant message", formatted)
 
-    def test_gap_scene_should_update_uses_creation_final_and_step_thresholds(self):
-        summary = self.gap_scene_summaries.GapSceneSummary(
-            id=1,
-            session_key="s",
-            slot=1,
-            summary="old",
-            message_start_id=1,
-            message_end_id=10,
-            source_message_count=10,
-            created_at="created",
-            updated_at="updated",
-        )
-
-        self.assertTrue(self.gap_scene_summaries._should_update(None, 10, 40))
-        self.assertFalse(self.gap_scene_summaries._should_update(summary, 29, 40))
-        self.assertTrue(self.gap_scene_summaries._should_update(summary, 30, 40))
-        self.assertTrue(self.gap_scene_summaries._should_update(summary, 40, 40))
+    def test_gap_scene_update_uses_current_live_card_batch_thresholds(self):
+        # Replaces a stale test for the removed pre-live-card _should_update API.
+        self.assertEqual(self.gap_scene_summaries.next_gap_scene_take_count(False, 24), 0)
+        self.assertEqual(self.gap_scene_summaries.next_gap_scene_take_count(False, 25), 25)
+        self.assertEqual(self.gap_scene_summaries.next_gap_scene_take_count(True, 19), 0)
+        self.assertEqual(self.gap_scene_summaries.next_gap_scene_take_count(True, 20), 20)
 
 
 if __name__ == "__main__":

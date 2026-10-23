@@ -9,6 +9,7 @@
 | 查看当前阶段 | [current-development-status.md](current-development-status.md) | 唯一权威快照：主人批准方向、完成度、待办优先级、授权边界和唯一下一步；带时间的运行态不替代实时核对 |
 | 查看实际完成记录 | [version-runlog.md](version-runlog.md) | 按日期记录实现、测试、live 验收和补丁；历史“当前/下一步”不是当前授权 |
 | 启动和维护 Bot | [runbook.md](runbook.md) | 环境、启动、诊断、维护和常见故障 |
+| 使用 B 站私聊回复 | [bilibili-inbox-runbook.md](bilibili-inbox-runbook.md) | 专用浏览器收件、文字回复、独立启停和记忆边界 |
 | 使用或维护 RAG | [project-rag-usage.md](project-rag-usage.md) | MemoryRAG、ProjectDocRAG、DevContextGraph 和索引维护 |
 | 了解整体架构 | [architecture.md](architecture.md) | 基础架构草案 |
 | 了解未来方向 | [future-runtime-architecture.md](future-runtime-architecture.md) | 未来运行时方向，不等于已批准计划 |
@@ -27,7 +28,26 @@
 
 该顺序是阅读约定。普通 ProjectDocRAG 仍按语义相似度检索；只有正式主人研发上下文报告对 `current-development-status.md` 使用代码固定的当前状态锚点。
 
-### 1.1 权威快照内容合同
+### 1.3 配置与诊断阅读入口
+
+运行中的配置和诊断分为四个层级，不能把“配置已读取”当成“端到端已验证”：
+
+```text
+/配置状态       常用配置总览，显示当前生效链路和安全状态
+/配置详情 <区域> 分区安全配置视图：运行、聊天、人格、Agent、视觉、图片、Qwen、语音、记忆、访问、能力
+/诊断           数据库、聊天连通性、适用本地服务和最近错误的运行诊断
+/视觉状态       本地 Ollama 提供方下执行视觉自检；云端提供方默认只展示配置，不主动外呼
+```
+
+Owner Console 的只读配置快照使用同一组语义，并补充 `chat_effective_route`、人格角色数量、图片/Qwen/TTS/天气/SceneHub/RAG 开关等结构化字段。所有入口只显示“已配置/未配置”、模型名、开关、数量和脱敏地址；角色卡正文、私聊内容、Token、API Key、QQ 号、真实位置和路径原值不进入输出、文档或 Git。
+
+### 1.1 公开仓库隐私边界
+
+角色卡正文、人格设定、私聊内容、长期记忆、个人偏好、联系人信息、真实 API Key、签名 URL 和可识别个人的运行记录不得写入 Git。真实角色卡只保存在 `prompts/persona-cards/private/` 或其他被忽略的本地位置；仓库只允许提交脱敏说明和示例模板。状态快照、运行日志和设计文档只能记录通用行为、接口合同、测试计数和不含内容的错误类别。
+
+Git 忽略规则只能阻止未来文件被加入，不能删除已经存在于历史提交的内容。若需处理历史公开内容，必须单独审计、确定受影响的远端和分支后，再决定是否进行历史重写；本项目日常变更不自动执行该操作。
+
+### 1.2 权威快照内容合同
 
 `current-development-status.md` 不是缩短版运行日志。它必须固定包含：
 
@@ -120,6 +140,13 @@ CURRENT_DEVELOPMENT_STATUS_SOURCE_ID=docs/current-development-status.md
 
 - [runbook.md](runbook.md)、[project-rag-usage.md](project-rag-usage.md)
 - [napcatqq-setup.md](napcatqq-setup.md)、[push-to-github.md](push-to-github.md)
+- [bilibili-connection-runbook.md](bilibili-connection-runbook.md)：独立 B 站账号接入、主人 UID 绑定与私信预检/发送，主人已确认测试私信送达。
+- [bilibili-browser-runbook.md](bilibili-browser-runbook.md)：默认人格专用固定 Edge、扫码与重开保留验收、原生字幕及默认浏览会话后端；原 inspect/diagnose 尚未迁移。
+- [bilibili-browsing-runbook.md](bilibili-browsing-runbook.md)：首页/关注候选、默认人格筛选、字幕校验、自然分享文案、本机报告和显式单条私信，含真实送达、日志与用量边界。
+- [bilibili-memory-runbook.md](bilibili-memory-runbook.md)：B 站与 QQ 主人映射、共用只读记忆入口、完整近期窗口、已有状态卡和语义召回，含数量与用量审计。
+- [bilibili-history-runbook.md](bilibili-history-runbook.md)：B 站真实对话全文/时间留存、QQ 最新 3 轮背景、独立最多 5 条召回、预算及成功发送回填。
+- [bilibili-daily-note-runbook.md](bilibili-daily-note-runbook.md)：当天字幕阅读内容与角色感想、未分享视频的复用、隔日替换及 QQ 原预算内的经历背景。
+- [bilibili-autobrowse-runbook.md](bilibili-autobrowse-runbook.md)：随机间隔自动浏览、每日 3 条分享额度、浏览预算、前台/后台启动、查看状态及停止。
 - [web-owner-console-v0-runbook.md](web-owner-console-v0-runbook.md)
 - [owner-console-fastapi-smoke-runbook.md](owner-console-fastapi-smoke-runbook.md)
 

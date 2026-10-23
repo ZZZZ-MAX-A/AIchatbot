@@ -31,6 +31,12 @@ from .agent_tasks import (
 )
 from .access_store import AccessStore
 from .config import AiChatConfig
+from .completion_routes import resolve_chat_completion_route
+from .persona_maintenance import build_persona_binding_report
+from .account_persona_settings import build_account_persona_profiles
+from .memory_maintenance import (
+    resolve_memory_maintenance_scope, memory_maintenance_database_scope, read_memory_maintenance_counts,
+)
 from .database import utc_now
 from . import database as database_module
 from .external_read_status import latest_external_read_task_snapshot
@@ -191,6 +197,7 @@ OWNER_CONSOLE_READ_ROUTE_SPECS = (
         runtime_method="build_memory_snapshot",
         read_model="OwnerConsoleMemorySnapshot",
         requires_context=False,
+        optional_params=("bot_self_id", "scope_revision"),
     ),
     OwnerConsoleReadRouteSpec(
         page="access_control",
@@ -524,6 +531,7 @@ class OwnerConsoleReadRuntime:
     task_actions_enabled: bool = False
     access_actions_enabled: bool = False
     dynamic_access_provider: AccessProvider | None = None
+    memory_counts_provider: Callable[[], dict[str, dict[str, int]]] | None = None
 
     def build_route_contract_snapshot(self) -> OwnerConsoleReadRouteContractSnapshot:
         return build_owner_console_route_contract_snapshot()
@@ -644,7 +652,25 @@ class OwnerConsoleReadRuntime:
             active_role_card_key=self.active_role_card_key_provider(),
         )
 
-    def build_memory_snapshot(self) -> OwnerConsoleMemorySnapshot:
+    def read_account_voice_sample(self, bot_self_id: str) -> bytes:
+        from .account_persona_settings import read_account_voice_sample
+        return read_account_voice_sample(self.config_provider(), bot_self_id)
+
+    def build_account_memory_snapshot(self, bot_self_id: str | None = None,
+                                      revision: str | None = None) -> OwnerConsoleMemorySnapshot:
+        from dataclasses import replace
+        config = self.config_provider()
+        target = resolve_memory_maintenance_scope(config, bot_self_id, revision)
+        with memory_maintenance_database_scope(config, target):
+            snapshot = build_owner_console_memory_snapshot(config, **read_memory_maintenance_counts())
+        return replace(snapshot, memory_scope=target.as_dict())
+
+    def build_memory_snapshot(self, *, bot_self_id: str | None = None,
+                              scope_revision: str | None = None) -> OwnerConsoleMemorySnapshot:
+        if bot_self_id is not None or scope_revision is not None:
+            return self.build_account_memory_snapshot(bot_self_id, scope_revision)
+        if self.memory_counts_provider is not None:
+            return build_owner_console_memory_snapshot(self.config_provider(), **self.memory_counts_provider())
         return build_owner_console_memory_snapshot(
             self.config_provider(),
             memory_stats=self.memory_stats_provider(),
@@ -1177,14 +1203,18 @@ def build_owner_console_settings_snapshot(
     active_role_card_key: str = "",
 ) -> OwnerConsoleSettingsSnapshot:
     cards = role_cards or []
-    active_key = active_role_card_key.strip()
+    settings = getattr(config, "persona_routing", None)
+    active_key = getattr(settings, "legacy_role_card_key", "")
+    # This global snapshot has no QQ event/persona scope. It describes the
+    # default route; active_role_card_key is a card-selection indicator only.
+    chat_route = resolve_chat_completion_route(config)
     return OwnerConsoleSettingsSnapshot(
         generated_at=utc_now(),
         chat_model=_model_snapshot(
-            model_name=config.chat_llm_model or config.openai_model,
-            base_url=config.chat_llm_base_url or config.openai_base_url,
-            api_key=config.chat_llm_api_key or config.openai_api_key,
-            timeout_seconds=config.chat_llm_timeout_seconds,
+            model_name=chat_route.model,
+            base_url=chat_route.base_url,
+            api_key=chat_route.api_key,
+            timeout_seconds=chat_route.timeout_seconds,
         ),
         main_agent_model=_model_snapshot(
             model_name=config.main_llm_model,
@@ -1207,6 +1237,8 @@ def build_owner_console_settings_snapshot(
             for card in cards
         ],
         active_role_card_key=active_key,
+        persona_bindings=build_persona_binding_report(config),
+        account_personas=build_account_persona_profiles(config),
         feature_flags={
             "enable_main_agent": config.enable_main_agent,
             "main_agent_use_llm": config.main_agent_use_llm,

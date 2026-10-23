@@ -610,11 +610,11 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "OPENAI_API_KEY": "sk-secret-openai",
-                "OPENAI_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
-                "OPENAI_MODEL": "fallback-chat",
-                "CHAT_LLM_MODEL": "chat-model",
-                "CHAT_LLM_TIMEOUT_SECONDS": "31",
+                "AIKE_LLM_API_KEY": "sk-secret-aike",
+                "AIKE_LLM_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
+                "AIKE_LLM_MODEL": "fallback-chat",
+                "CHAT_LLM_API_KEY": "sk-secret-chat",
+                "CHAT_LLM_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
                 "MAIN_LLM_API_KEY": "main-secret",
                 "MAIN_LLM_BASE_URL": "https://main.example.com/v1?token=hidden",
                 "MAIN_LLM_MODEL": "main-model",
@@ -644,10 +644,10 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
             active_role_card_key="aike",
         )
 
-        self.assertEqual(snapshot.chat_model.model_name, "chat-model")
+        self.assertEqual(snapshot.chat_model.model_name, "fallback-chat")
         self.assertEqual(snapshot.chat_model.base_url_redacted, "https://example.com/v1")
         self.assertTrue(snapshot.chat_model.api_key_configured)
-        self.assertEqual(snapshot.chat_model.timeout_seconds, 31)
+        self.assertEqual(snapshot.chat_model.timeout_seconds, 60)
         self.assertEqual(snapshot.main_agent_model.base_url_redacted, "https://main.example.com/v1")
         self.assertTrue(snapshot.main_agent_model.api_key_configured)
         self.assertEqual(snapshot.embedding.base_url_redacted, "http://127.0.0.1:11434/private")
@@ -664,7 +664,7 @@ class OwnerConsoleReadRuntimeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(snapshot.feature_flags["enable_agent_web"])
         self.assertFalse(snapshot.feature_flags["enable_agent_shell"])
         rendered = repr(snapshot)
-        self.assertNotIn("sk-secret-openai", rendered)
+        self.assertNotIn("sk-secret-aike", rendered)
         self.assertNotIn("main-secret", rendered)
         self.assertNotIn("hidden", rendered)
 

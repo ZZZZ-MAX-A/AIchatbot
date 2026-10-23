@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .sticker_intent import StickerIntent
 
@@ -22,6 +22,7 @@ class ChatPromptContext:
     semantic_memory_context_chars: int = 0
     semantic_memory_error: str = ""
     semantic_memory_hits: tuple[dict[str, object], ...] = ()
+    bilibili_memory_status: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -66,3 +67,7 @@ class ChatRuntimeResult:
     stored_assistant: str
     voice_text: str | None = None
     sticker_intent: StickerIntent | None = None
+    time_observation: dict[str, object] | None = None
+    interaction_success_eligible: bool = True
+    tool_observation: dict[str, object] | None = None
+    assistant_sent_at: str | None = None

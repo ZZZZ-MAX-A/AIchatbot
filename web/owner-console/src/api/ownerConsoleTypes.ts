@@ -243,6 +243,7 @@ export type OwnerConsoleManualDiagnosticRun = {
 };
 
 export type OwnerConsoleMemoryRagConsistencyRun = {
+  memory_scope?: import("./memoryScopeTypes").MemoryMaintenanceScope | null;
   run_id: number;
   workflow: string;
   status: string;
@@ -753,6 +754,7 @@ export type OwnerConsoleProjectDocRagSnapshot = {
 };
 
 export type OwnerConsoleMemorySnapshot = {
+  memory_scope?: import("./memoryScopeTypes").MemoryMaintenanceScope | null;
   generated_at: string;
   counts: OwnerConsoleMemoryCounts;
   context_policy: OwnerConsoleMemoryContextPolicy;
@@ -972,6 +974,7 @@ export type OwnerConsoleRoleCardRow = {
 };
 
 export type OwnerConsoleSettingsSnapshot = {
+  account_personas?: import("./accountPersonaTypes").AccountPersonaProfile[];
   generated_at: string;
   chat_model: OwnerConsoleModelConfigSnapshot;
   main_agent_model: OwnerConsoleModelConfigSnapshot;
@@ -980,6 +983,23 @@ export type OwnerConsoleSettingsSnapshot = {
   active_role_card_key: string;
   feature_flags: Record<string, boolean>;
   boundary: OwnerConsoleRuntimeBoundary;
+  persona_bindings?: {
+    fixed_binding: boolean;
+    ready: boolean;
+    errors: string[];
+    rows: {
+      account_label: string;
+      persona_id: string;
+      role_card_key: string;
+      role_card_available: boolean;
+      chat_model: string;
+      chat_route: string;
+      memory_mode: string;
+      memory_storage: string;
+      ready: boolean;
+      errors: string[];
+    }[];
+  };
 };
 
 export type OwnerConsoleSettingsEnvelope =

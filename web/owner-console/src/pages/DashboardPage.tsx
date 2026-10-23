@@ -14,7 +14,6 @@ import type {
   OwnerConsoleReliabilityEnvelope,
   OwnerConsoleSnapshot,
   OwnerConsoleTaskRow,
-  OwnerConsoleTextSnapshotSection,
 } from "../api/ownerConsoleTypes";
 import {
   classifyOwnerConsoleAutoRefreshError,
@@ -104,29 +103,6 @@ function apiErrorDescription(error: Error): string {
 
 function toError(reason: unknown, fallback: string): Error {
   return reason instanceof Error ? reason : new Error(fallback);
-}
-
-function SnapshotSection({ section }: { section: OwnerConsoleTextSnapshotSection }) {
-  return (
-    <section className="diagnostic-section">
-      <header>
-        <h3>{section.title}</h3>
-        <StatusBadge
-          label="快照"
-          value={section.ok ? "可读取" : "读取异常"}
-          tone={section.ok ? "success" : "warning"}
-        />
-      </header>
-      {section.summary_text ? <p>{section.summary_text}</p> : null}
-      {section.display_lines.length > 0 ? (
-        <ul>
-          {section.display_lines.slice(0, 4).map((line, index) => (
-            <li key={`${index}:${line}`}>{line}</li>
-          ))}
-        </ul>
-      ) : null}
-    </section>
-  );
 }
 
 function RecentTaskList({ rows }: { rows: OwnerConsoleTaskRow[] }) {
@@ -743,20 +719,19 @@ export function DashboardPage() {
               <section className="dashboard-panel">
                 <div className="detail-panel__header">
                   <div>
-                    <h2>诊断快照解读</h2>
-                    <p className="panel-note">可读取只表示快照成功，不证明外部服务持续健康。</p>
+                    <h2>检查与维护</h2>
+                    <p className="panel-note">异常已汇总在上方；按维护目的进入对应页面。</p>
                   </div>
                   <Link className="dashboard-action-link" to="/owner-console/diagnostics">
-                    查看全部
+                    执行手动检查
                     <ArrowRight aria-hidden="true" size={15} />
                   </Link>
                 </div>
-                <div className="diagnostic-grid dashboard-diagnostic-grid">
-                  <SnapshotSection section={diagnostics.bot_status} />
-                  <SnapshotSection section={diagnostics.diagnostics} />
-                  <SnapshotSection section={diagnostics.memory} />
-                  <SnapshotSection section={diagnostics.recent_errors} />
-                </div>
+                <nav className="maintenance-links" aria-label="维护入口">
+                  <Link to="/owner-console/settings">账号、人物、模型与音色配置</Link>
+                  <Link to="/owner-console/memory">按账号查看人格记忆统计与策略</Link>
+                  <Link to="/owner-console/reliability">历史故障与恢复记录</Link>
+                </nav>
               </section>
             ) : null}
           </section>

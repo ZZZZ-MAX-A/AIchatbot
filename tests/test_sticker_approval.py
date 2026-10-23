@@ -134,6 +134,28 @@ class StickerApprovalTests(unittest.TestCase):
         self.assertEqual(asset.actions, ("act_cute",))
         self.assertEqual(asset.source_sha256, self.sha256(source))
 
+    def test_confirmed_shared_draft_approves_one_asset_for_both_personas(self):
+        source = self.write_png(metadata=True)
+        entry = self.draft_entry(source, persona_key='shared', sticker_id='shared_sticker_001')
+        self.write_drafts([entry])
+        candidate_id = entry['candidate_id']
+        self.approval.approve_sticker_candidate(self.root, candidate_id, candidate_id.removeprefix('candidate_'))
+        loaded = self.library.load_approved_sticker_library(self.root)
+        self.assertFalse(loaded.issues)
+        self.assertEqual(len(loaded.assets), 1)
+        asset = loaded.assets[0]
+        self.assertEqual(asset.persona_key, 'shared')
+        self.assertTrue(self.library.sticker_asset_supports_persona(asset.persona_key, 'aike'))
+        self.assertTrue(self.library.sticker_asset_supports_persona(asset.persona_key, 'linyin'))
+        self.assertFalse(self.library.sticker_asset_supports_persona(asset.persona_key, 'unknown'))
+
+    def test_shared_draft_still_requires_owner_confirmation(self):
+        source = self.write_png()
+        entry = self.draft_entry(source, persona_key='shared', owner_confirmed=False)
+        self.write_drafts([entry])
+        self.assert_error_code('owner_confirmation_required', lambda: self.approval.load_sticker_approval_drafts(self.root))
+        self.assertFalse((self.root / 'library.json').exists())
+
     def test_dynamic_gif_approval_preserves_animation_and_total_duration(self):
         source = self.write_gif()
 

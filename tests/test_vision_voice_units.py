@@ -623,14 +623,17 @@ class VisionPureUnitTests(unittest.TestCase):
         render_start = plugin_source.index("async def render_chat_result(")
         render_end = plugin_source.index("async def finalize_chat_result(", render_start)
         render = plugin_source[render_start:render_end]
-        self.assertIn("if result.reply != VISION_FAILURE_REPLY:", render)
+        self.assertIn("schedule_chat_reply_sticker(", render)
 
         finalize_start = render_end
         finalize_end = plugin_source.index(
             "async def run_chat_graph_session_runtime(", finalize_start
         )
         finalize = plugin_source[finalize_start:finalize_end]
-        self.assertIn("if result.reply != VISION_FAILURE_REPLY:", finalize)
+        self.assertIn("schedule_chat_reply_sticker(", finalize)
+        helper_start = plugin_source.index("def schedule_chat_reply_sticker(")
+        helper_end = plugin_source.index("\n\nasync def ", helper_start)
+        self.assertIn("result.reply == VISION_FAILURE_REPLY", plugin_source[helper_start:helper_end])
 
     def test_diagnostic_vision_probe_does_not_emit_runtime_event(self):
         config = types.SimpleNamespace(

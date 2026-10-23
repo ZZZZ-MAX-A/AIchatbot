@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,9 +19,10 @@ class RoleCard:
 
 
 def _read_text(path: Path) -> str:
-    if not path.exists():
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
         return ""
-    return path.read_text(encoding="utf-8").strip()
 
 
 def _title_from_content(content: str, fallback: str) -> str:
@@ -66,30 +66,11 @@ def list_role_cards() -> list[RoleCard]:
     return cards
 
 
-def _load_active_key() -> str:
-    if not ACTIVE_ROLE_CARD_PATH.exists():
-        return ""
-    try:
-        data = json.loads(ACTIVE_ROLE_CARD_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    return str(data.get("active", "")).strip()
-
-
 def active_role_card() -> RoleCard | None:
-    cards = list_role_cards()
-    if not cards:
-        return None
+    """Compatibility default-card view; never consult the old selection file."""
+    from .config import load_config
 
-    active_key = _load_active_key()
-    if active_key:
-        for card in cards:
-            if active_key in {card.key, card.title, str(card.path)}:
-                return card
-
-    return cards[0]
+    return role_card_by_key(load_config().persona_routing.legacy_role_card_key)
 
 
 def role_card_by_key(key: str) -> RoleCard | None:
@@ -98,7 +79,20 @@ def role_card_by_key(key: str) -> RoleCard | None:
     target = key.strip()
     if not target:
         return None
-    return next((card for card in list_role_cards() if card.key == target), None)
+    from .persona_scope import valid_role_card_key
+
+    if not valid_role_card_key(target):
+        return None
+    for directory in (PRIVATE_ROLE_CARD_DIR, ROLE_CARD_DIR, PUBLIC_ROLE_CARD_DIR):
+        path = directory / f"{target}.md"
+        if not path.exists():
+            continue
+        # A broken private override must not borrow another copy's identity.
+        if not _is_selectable_role_card_file(path):
+            return None
+        content = _read_text(path)
+        return RoleCard(target, _title_from_content(content, target), path) if content else None
+    return None
 
 
 def load_role_card_prompt(key: str) -> str:
@@ -116,22 +110,4 @@ def load_active_role_card_prompt() -> str:
 
 
 def select_role_card(value: str) -> RoleCard | None:
-    target = value.strip().lower()
-    if not target:
-        return None
-
-    for card in list_role_cards():
-        candidates = {
-            card.key.lower(),
-            card.title.lower(),
-            card.path.name.lower(),
-            str(card.path).lower(),
-        }
-        if target in candidates:
-            ACTIVE_ROLE_CARD_PATH.parent.mkdir(parents=True, exist_ok=True)
-            ACTIVE_ROLE_CARD_PATH.write_text(
-                json.dumps({"active": card.key}, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            return card
-    return None
+    raise RuntimeError("fixed_persona_binding: runtime role-card switching is disabled")

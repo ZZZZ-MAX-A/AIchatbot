@@ -14,6 +14,9 @@ import type {
 } from "../api/ownerConsoleTypes";
 import { ErrorState } from "../components/ErrorState";
 import { StatusBadge } from "../components/StatusBadge";
+import { MemoryScopePanel } from "../components/MemoryScopePanel";
+import { useMemoryMaintenanceScope } from "../hooks/useMemoryMaintenanceScope";
+import { sameMemoryScope } from "../api/memoryScopeTypes";
 
 type MemoryPageState = {
   loading: boolean;
@@ -278,6 +281,8 @@ function ProjectDocRagPanel({
 }
 
 export function MemoryPage() {
+  const selection = useMemoryMaintenanceScope();
+  const scope = selection.scope;
   const [state, setState] = useState<MemoryPageState>({
     loading: true,
     memory: null,
@@ -285,6 +290,10 @@ export function MemoryPage() {
   });
 
   const load = useCallback(async (signal?: AbortSignal) => {
+    if (!scope) {
+      setState({ loading: false, memory: null, error: null });
+      return;
+    }
     setState((current) => ({
       ...current,
       loading: true,
@@ -292,17 +301,18 @@ export function MemoryPage() {
     }));
 
     try {
-      const memory = await ownerConsoleApi.getMemory(signal);
+      const memory = await ownerConsoleApi.getMemory(signal, scope);
       if (signal?.aborted) {
         return;
       }
+      if (!sameMemoryScope(memory.data?.memory_scope, scope)) throw new Error("记忆快照范围与当前账号不一致，请刷新绑定。");
       setState({
         loading: false,
         memory,
         error: null,
       });
     } catch (exc) {
-      if (exc instanceof DOMException && exc.name === "AbortError") {
+      if (signal?.aborted || exc instanceof DOMException && exc.name === "AbortError") {
         return;
       }
       setState({
@@ -311,7 +321,7 @@ export function MemoryPage() {
         error: exc instanceof Error ? exc : new Error("记忆快照加载失败"),
       });
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -319,7 +329,7 @@ export function MemoryPage() {
     return () => controller.abort();
   }, [load]);
 
-  const memory = state.memory?.data;
+  const memory = sameMemoryScope(state.memory?.data?.memory_scope, scope) && !selection.loading ? state.memory?.data : null;
 
   return (
     <section className="page memory-page">
@@ -331,15 +341,17 @@ export function MemoryPage() {
         <button
           className="refresh-button"
           type="button"
-          onClick={() => void load()}
-          disabled={state.loading}
+          onClick={() => void selection.reload()}
+          disabled={selection.loading || Boolean(scope && state.loading)}
         >
           <RefreshCw aria-hidden="true" size={16} />
           <span>刷新记忆</span>
         </button>
       </header>
 
-      {state.loading ? (
+      <MemoryScopePanel {...selection} onSelect={selection.select} />
+
+      {selection.loading || Boolean(scope && state.loading) ? (
         <section className="loading-panel" role="status">
           正在加载记忆快照
         </section>

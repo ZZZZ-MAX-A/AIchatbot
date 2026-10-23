@@ -8,7 +8,7 @@ from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_PATH = PROJECT_ROOT / "data" / "chatbot.db"
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 _DATABASE_PATH_OVERRIDE: ContextVar[Path | None] = ContextVar(
     "ai_chat_database_path_override",
     default=None,
@@ -21,6 +21,13 @@ def utc_now() -> str:
 
 def current_database_path() -> Path:
     return _DATABASE_PATH_OVERRIDE.get() or DATABASE_PATH
+
+
+def current_persona_memory_id() -> str:
+    path = current_database_path().resolve()
+    if path == DATABASE_PATH.resolve():
+        return ""
+    return path.stem
 
 
 @contextmanager
@@ -65,6 +72,102 @@ def connect_read_only() -> Iterator[sqlite3.Connection]:
         yield connection
     finally:
         connection.close()
+
+
+def _ensure_reliability_event_schema(connection: sqlite3.Connection) -> None:
+    # The Python event contract and SQLite constraints must share one registry.
+    # Import lazily: reliability_events imports this module's connection helpers.
+    from .reliability_events import CODE_CONTRACTS, COMPONENT_OPERATIONS
+
+    def literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    operations = " OR ".join(
+        f"(component = {literal(component)} AND operation IN ({', '.join(literal(op) for op in sorted(allowed))}))"
+        for component, allowed in sorted(COMPONENT_OPERATIONS.items())
+    )
+    codes = ", ".join(literal(code) for code in sorted(CODE_CONTRACTS))
+    schema_sql = f"""CREATE TABLE reliability_event_buckets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schema_version INTEGER NOT NULL,
+        bucket_start TEXT NOT NULL,
+        runtime_id TEXT NOT NULL,
+        component TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        category TEXT NOT NULL,
+        code TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        occurrence_count INTEGER NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        CHECK (schema_version = 1),
+        CHECK (length(runtime_id) = 36),
+        CHECK ({operations}),
+        CHECK (category IN ('', 'configuration', 'model', 'permission', 'network', 'data')),
+        CHECK (code IN ({codes})),
+        CHECK (outcome IN ('succeeded', 'failed', 'degraded', 'skipped')),
+        CHECK (occurrence_count >= 1),
+        CHECK (first_seen_at <= last_seen_at),
+        UNIQUE (bucket_start, runtime_id, component, operation, category, code, outcome)
+    )"""
+    existing = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'reliability_event_buckets'"
+    ).fetchone()
+    if existing is None:
+        connection.execute(schema_sql)
+        return
+    if existing[0].strip() == schema_sql.strip():
+        return
+    # Upgrade only the diagnostic table, preserving every row, ID and sequence.
+    # A savepoint restores the old table if any row cannot be copied safely.
+    sequence = connection.execute("SELECT seq FROM sqlite_sequence WHERE name = 'reliability_event_buckets'").fetchone()
+    columns = "id, schema_version, bucket_start, runtime_id, component, operation, category, code, outcome, occurrence_count, first_seen_at, last_seen_at"
+    connection.execute("SAVEPOINT reliability_contract_upgrade")
+    try:
+        connection.execute("ALTER TABLE reliability_event_buckets RENAME TO reliability_event_buckets_previous")
+        connection.execute(schema_sql)
+        connection.execute(f"INSERT INTO reliability_event_buckets ({columns}) SELECT {columns} FROM reliability_event_buckets_previous")
+        connection.execute("DROP TABLE reliability_event_buckets_previous")
+        if sequence is not None:
+            updated = connection.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'reliability_event_buckets'", (sequence[0],))
+            if not updated.rowcount:
+                connection.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('reliability_event_buckets', ?)", (sequence[0],))
+        connection.execute("RELEASE reliability_contract_upgrade")
+    except Exception:
+        connection.execute("ROLLBACK TO reliability_contract_upgrade")
+        connection.execute("RELEASE reliability_contract_upgrade")
+        raise
+
+
+def _ensure_memory_time_schema(connection: sqlite3.Connection) -> None:
+    """Upgrade atomically, holding a writer lock before inspecting columns."""
+    connection.execute("SAVEPOINT memory_time_upgrade")
+    try:
+        # Serializes concurrent startup/writes before their PRAGMA snapshots.
+        connection.execute("UPDATE messages SET id = id WHERE 0")
+        for table, fields in {
+            "messages": ("occurred_at", "time_kind"),
+            "session_summaries": ("source_start_at", "source_end_at"),
+            "gap_scene_summaries": ("source_start_at", "source_end_at"),
+        }.items():
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            added = False
+            for name in fields:
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT")
+                    added = True
+            if added and table != "messages":
+                # Only exact session/ID matches can recover a source endpoint.
+                for column, boundary in (("source_start_at", "message_start_id"), ("source_end_at", "message_end_id")):
+                    connection.execute(f"""UPDATE {table} SET {column} = (
+                        SELECT COALESCE(m.occurred_at, m.created_at) FROM messages m
+                        WHERE m.session_key = {table}.session_key AND m.id = {table}.{boundary}
+                    ) WHERE {column} IS NULL""")
+        connection.execute("RELEASE memory_time_upgrade")
+    except Exception:
+        connection.execute("ROLLBACK TO memory_time_upgrade")
+        connection.execute("RELEASE memory_time_upgrade")
+        raise
 
 
 def ensure_database() -> None:
@@ -327,76 +430,8 @@ def ensure_database() -> None:
             ON agent_approvals (status, id)
             """
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reliability_event_buckets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                schema_version INTEGER NOT NULL,
-                bucket_start TEXT NOT NULL,
-                runtime_id TEXT NOT NULL,
-                component TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                category TEXT NOT NULL,
-                code TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                occurrence_count INTEGER NOT NULL,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                CHECK (schema_version = 1),
-                CHECK (length(runtime_id) = 36),
-                CHECK (
-                    (component = 'bot_runtime' AND operation = 'lifecycle') OR
-                    (component = 'chat_llm' AND operation = 'generate_reply') OR
-                    (component = 'main_llm' AND operation = 'plan_action') OR
-                    (component = 'sticker_classifier' AND operation = 'classify_intent') OR
-                    (component = 'document_artifact' AND operation = 'render_document') OR
-                    (component = 'document_delivery' AND operation = 'send_document') OR
-                    (component = 'project_doc_rag' AND operation IN ('rebuild_index', 'retrieve')) OR
-                    (component = 'memory_rag' AND operation = 'retrieve') OR
-                    (component = 'vision' AND operation = 'infer') OR
-                    (component = 'tts' AND operation = 'synthesize') OR
-                    (component = 'qq_adapter' AND operation = 'send_message') OR
-                    (component = 'database' AND operation IN ('read', 'write'))
-                ),
-                CHECK (category IN ('', 'configuration', 'model', 'permission', 'network', 'data')),
-                CHECK (
-                    code IN (
-                        'request_timeout',
-                        'connection_failed',
-                        'model_rate_limited',
-                        'model_not_found',
-                        'invalid_model_response',
-                        'authorization_failed',
-                        'invalid_configuration',
-                        'data_validation_failed',
-                        'presentation_slide_limit_exceeded',
-                        'artifact_integrity_failed',
-                        'document_delivery_failed',
-                        'approval_context_invalid',
-                        'required_arguments_unavailable',
-                        'unexpected_runtime_state',
-                        'suspected_abnormal_exit',
-                        'operation_succeeded',
-                        'operation_skipped',
-                        'runtime_started',
-                        'runtime_stopped'
-                    )
-                ),
-                CHECK (outcome IN ('succeeded', 'failed', 'degraded', 'skipped')),
-                CHECK (occurrence_count >= 1),
-                CHECK (first_seen_at <= last_seen_at),
-                UNIQUE (
-                    bucket_start,
-                    runtime_id,
-                    component,
-                    operation,
-                    category,
-                    code,
-                    outcome
-                )
-            )
-            """
-        )
+        _ensure_memory_time_schema(connection)
+        _ensure_reliability_event_schema(connection)
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_reliability_event_buckets_window

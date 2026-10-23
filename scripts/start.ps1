@@ -7,45 +7,12 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $botEntry = Join-Path $RepoRoot "bot.py"
-$dotEnvPath = Join-Path $RepoRoot ".env"
 
 Set-Location -LiteralPath $RepoRoot
 
-function Normalize-DotEnvValue {
-    param([string]$Value)
-
-    $trimmed = $Value.Trim()
-    if (
-        ($trimmed.StartsWith('"') -and $trimmed.EndsWith('"')) -or
-        ($trimmed.StartsWith("'") -and $trimmed.EndsWith("'"))
-    ) {
-        return $trimmed.Substring(1, $trimmed.Length - 2)
-    }
-    return $trimmed
-}
-
 function Get-BotPort {
-    $rawPort = [Environment]::GetEnvironmentVariable("PORT", "Process")
-    if ([string]::IsNullOrWhiteSpace($rawPort) -and (Test-Path -LiteralPath $dotEnvPath)) {
-        $line = Select-String -LiteralPath $dotEnvPath -Pattern "^PORT=" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($line) {
-            $rawPort = Normalize-DotEnvValue (($line.Line -split "=", 2)[1])
-        }
-    }
-    if ([string]::IsNullOrWhiteSpace($rawPort)) {
-        return 8080
-    }
-
-    $parsedPort = 0
-    if (
-        -not [int]::TryParse($rawPort.Trim(), [ref]$parsedPort) -or
-        $parsedPort -lt 1 -or
-        $parsedPort -gt 65535
-    ) {
-        throw "Invalid NoneBot PORT value: $rawPort"
-    }
-    return $parsedPort
+    param([object]$ConfigurationReport)
+    return [int]$ConfigurationReport.nonebot_port
 }
 
 function Get-PortListener {
@@ -160,7 +127,24 @@ if (-not (Test-Path -LiteralPath $python)) {
     exit 1
 }
 
-$botPort = Get-BotPort
+$configurationJson = & $python (Join-Path $PSScriptRoot "check_configuration.py") --json
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ($configurationJson -join "`n")
+    exit 1
+}
+$configurationReport = ($configurationJson -join "`n") | ConvertFrom-Json
+if (-not $configurationReport.persona_bindings.ready) {
+    Write-Host "Fixed persona bindings are invalid. Check BOT_PERSONA_BINDINGS, role cards and routing configuration."
+    exit 1
+}
+if ($configurationReport.issues.Count -gt 0) {
+    foreach ($issue in $configurationReport.issues) {
+        Write-Host ("Configuration {0}: {1} ({2})" -f $issue.severity, $issue.key, $issue.message)
+    }
+}
+
+$botPort = Get-BotPort $configurationReport
+
 $listeners = @(Get-PortListener -LocalPort $botPort)
 if ($listeners.Count -gt 0) {
     $chatbotListeners = @($listeners | Where-Object { Test-ChatbotProcess $_ })
@@ -175,10 +159,13 @@ if ($listeners.Count -gt 0) {
     exit 1
 }
 
-if (-not $SkipOllamaEnsure -and $env:SKIP_OLLAMA_ENSURE -notin @("1", "true", "yes", "on")) {
-    & .\scripts\ensure-ollama.ps1
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+
+if ($configurationReport.ollama_auto_ensure -and -not $SkipOllamaEnsure -and $env:SKIP_OLLAMA_ENSURE -notin @("1", "true", "yes", "on")) {
+    foreach ($plan in $configurationReport.ollama_local_plans) {
+        if (-not $plan.standard_local) { continue }
+        $ensureArguments = @{ BaseUrl = $plan.base_url; RequiredModels = @($plan.models) }
+        & .\scripts\ensure-ollama.ps1 @ensureArguments
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }
 

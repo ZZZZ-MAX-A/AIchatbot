@@ -1,10 +1,11 @@
+from .memory_time import message_time_context
 from dataclasses import dataclass
 from typing import Any
 
 from .config import AiChatConfig
-from .database import connect, ensure_database
+from .database import connect, current_persona_memory_id, ensure_database
 from .gap_scene_summaries import clear_gap_scene_summaries
-from .llm import summarize_messages
+from .llm import summarize_messages_with_detail
 from .summaries import add_summary
 
 
@@ -14,6 +15,8 @@ class CompressionResult:
     reason: str
     summary_id: int | None = None
     source_message_count: int = 0
+    notify_owner: bool = False
+    failure_detail: str = ""
 
 
 def _message_count(session_key: str) -> int:
@@ -37,7 +40,7 @@ def _oldest_messages(session_key: str, limit: int) -> list[Any]:
                 user_id,
                 group_id,
                 role,
-                content
+                content, created_at, occurred_at, time_kind
             FROM messages
             WHERE session_key = ?
             ORDER BY id ASC
@@ -71,7 +74,7 @@ def _format_messages(rows: list[Any], owner_qq: str) -> str:
             role = "主人"
         else:
             role = "用户"
-        lines.append(f"{role}: {row['content']}")
+        lines.append(f"{message_time_context(row)} {role}: {row['content']}")
     return "\n".join(lines)
 
 
@@ -115,9 +118,20 @@ async def compress_session(
         return CompressionResult(False, "没有可压缩消息")
 
     message_text = _format_messages(rows, config.bot_owner_qq)
-    summary = await summarize_messages(config, message_text)
-    if not summary:
-        return CompressionResult(False, "摘要为空")
+    summary_result = await summarize_messages_with_detail(
+        config,
+        message_text,
+        role_card_key=current_persona_memory_id(),
+    )
+    if not summary_result.succeeded:
+        return CompressionResult(
+            False,
+            "摘要不可用，已保留原文",
+            source_message_count=len(rows),
+            notify_owner=True,
+            failure_detail=summary_result.failure_detail,
+        )
+    summary = summary_result.summary
 
     first = rows[0]
     last = rows[-1]

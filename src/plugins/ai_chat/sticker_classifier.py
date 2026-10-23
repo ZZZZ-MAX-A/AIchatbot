@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import re
+import time
 from urllib.parse import urlsplit
 
 from openai import AsyncOpenAI
@@ -15,6 +17,7 @@ from .sticker_library import ALLOWED_INTENSITIES, ALLOWED_MOODS, ALLOWED_USAGE_T
 MAX_CLASSIFIER_RESPONSE_CHARS = 1200
 MAX_CLASSIFIER_TIMEOUT_SECONDS = 30
 MAX_CLASSIFIER_INPUT_CHARS = 5000
+CLASSIFIER_MAX_TOKENS = 500
 _SAFE_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 
 
@@ -36,6 +39,7 @@ STICKER_CLASSIFIER_SYSTEM_PROMPT = f"""
 4. attach=true 时三个标签必须各选一个白名单值。明确卖萌且回复确实在卖萌时使用 playful / medium / acting_cute。
 5. 不得输出 sticker ID、文件名、路径、URL、哈希、理由、Markdown、代码围栏或任何额外字段。
 6. 该输出只是建议，本地策略仍会执行置信度、精确标签、范围、冷却和频率门控；不要声称图片已经发送。
+7. proud 表示得意、自信；flustered 表示慌乱、不知所措；thinking 表示安静思考的场景。情绪方向与强度分别判断，轻微得意可为 soft，无奈回应使用 resigned；按回复实际语义选择，不将它们统一归为 happy 或 dizzy。
 """.strip()
 
 
@@ -50,10 +54,71 @@ class RemoteStickerClassifierSettings:
 
 
 @dataclass(frozen=True)
+class StickerClassifierDiagnostics:
+    request_started: bool = False
+    max_tokens: int | None = None
+    timeout_ms: int | None = None
+    elapsed_ms: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    reasoning_chars: int | None = None
+
+
+def _diagnostic_count(value: object) -> int | None:
+    return value if type(value) is int and 0 <= value <= 1_000_000_000 else None
+
+
+def _response_diagnostics(response: object) -> StickerClassifierDiagnostics:
+    usage = getattr(response, "usage", None)
+    choices = getattr(response, "choices", None) or []
+    message = getattr(choices[0], "message", None) if choices else None
+    reasoning = getattr(message, "reasoning_content", None)
+    return StickerClassifierDiagnostics(
+        prompt_tokens=_diagnostic_count(getattr(usage, "prompt_tokens", None)),
+        completion_tokens=_diagnostic_count(getattr(usage, "completion_tokens", None)),
+        total_tokens=_diagnostic_count(getattr(usage, "total_tokens", None)),
+        reasoning_tokens=_diagnostic_count(getattr(
+            getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None)),
+        reasoning_chars=len(reasoning) if isinstance(reasoning, str) else None,
+    )
+
+
+def format_sticker_classifier_diagnostics(diagnostics: StickerClassifierDiagnostics | None) -> str:
+    if diagnostics is None or not diagnostics.request_started:
+        return "分类请求：未调用分类模型或尚无结果\n"
+
+    def count(value):
+        safe = _diagnostic_count(value)
+        return str(safe) if safe is not None else "未提供"
+
+    return (
+        f"请求额度：max_tokens={count(diagnostics.max_tokens)}；超时 {count(diagnostics.timeout_ms)} 毫秒\n"
+        "思考设置：未显式指定（服务端默认；实际消耗以返回用量为准）\n"
+        f"Token 用量：输入 {count(diagnostics.prompt_tokens)} / 输出 {count(diagnostics.completion_tokens)} / 总计 {count(diagnostics.total_tokens)}\n"
+        f"其中思考 token：{count(diagnostics.reasoning_tokens)}；思考内容：{count(diagnostics.reasoning_chars)} 字符\n"
+        f"分类耗时：{count(diagnostics.elapsed_ms)} 毫秒\n"
+    )
+
+
+@dataclass(frozen=True)
 class StickerClassifierResult:
     status: str
     intent: StickerIntent | None
     input_chars: int = 0
+    response_chars: int = 0
+    finish_reason: str = "unknown"
+    parse_reason: str = ""
+    normalized_code_fence: bool = False
+    diagnostics: StickerClassifierDiagnostics = field(default_factory=StickerClassifierDiagnostics)
+
+
+@dataclass(frozen=True)
+class StickerClassifierResponse:
+    content: str = field(repr=False)
+    finish_reason: str = "unknown"
+    diagnostics: StickerClassifierDiagnostics = field(default_factory=StickerClassifierDiagnostics)
 
 
 def format_remote_sticker_attachment_status(
@@ -73,14 +138,16 @@ def format_remote_sticker_attachment_status(
         "suspended": "已熔断",
         "sent_commit_failed": "图片已发送，但状态提交失败并已熔断",
         "send_failed": "发送失败，未重试",
+        "send_timeout": "发送确认超时，结果未知，已暂时冷却且未重试",
         "preflight_blocked": "频率门控中，未调用分类模型",
+        "expired": "对话已更新，已丢弃过期表情",
     }
     return labels.get(attachment_status, f"未发送（{attachment_status}）")
 
 
 StickerClassifierTransport = Callable[
     [RemoteStickerClassifierSettings, list[dict[str, str]]],
-    Awaitable[str],
+    Awaitable[str | StickerClassifierResponse],
 ]
 
 
@@ -111,6 +178,8 @@ def classifier_settings_status(settings: RemoteStickerClassifierSettings) -> str
 def build_sticker_classifier_messages(
     user_message: str,
     assistant_reply: str,
+    *,
+    available_combinations: tuple[tuple[str, str, str], ...] | None = None,
 ) -> list[dict[str, str]]:
     payload = json.dumps(
         {
@@ -120,21 +189,68 @@ def build_sticker_classifier_messages(
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    prompt = STICKER_CLASSIFIER_SYSTEM_PROMPT
+    if available_combinations is not None:
+        # Only finite tags are included, never asset IDs, paths or descriptions.
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for mood, intensity, scene in sorted(set(available_combinations)):
+            if mood not in ALLOWED_MOODS or intensity not in ALLOWED_INTENSITIES or scene not in ALLOWED_USAGE_TAGS:
+                raise ValueError("invalid_sticker_combinations")
+            grouped.setdefault((mood, intensity), []).append(scene)
+        options = [
+            {"mood": mood, "intensity": intensity, "scenes": scenes}
+            for (mood, intensity), scenes in grouped.items()
+        ]
+        prompt += (
+            "\n当前正式表情库实际可用的组合如下（每项 scenes 中只能选一个）：\n"
+            + json.dumps(options, ensure_ascii=False, separators=(",", ":"))
+            + "\nattach=true 必须选取其中一项的 mood、intensity 和对应 scene；"
+            "不得将不同项拼成新组合。没有贴合本轮情绪的可用组合就 attach=false；"
+            "不得为了发图夸大情绪或改写正文。"
+        )
     return [
-        {"role": "system", "content": STICKER_CLASSIFIER_SYSTEM_PROMPT},
+        {"role": "system", "content": prompt},
         {"role": "user", "content": payload},
     ]
 
 
 def parse_sticker_classifier_response(content: str) -> StickerClassifierResult:
+    response_chars = len(content) if isinstance(content, str) else 0
+    normalized = False
+
+    def result(status: str, intent: StickerIntent | None = None, reason: str = ""):
+        return StickerClassifierResult(
+            status, intent, response_chars=response_chars,
+            parse_reason=reason, normalized_code_fence=normalized,
+        )
+
     if not isinstance(content, str) or not content.strip():
-        return StickerClassifierResult("empty_response", None)
+        return result("empty_response", reason="empty")
     if len(content) > MAX_CLASSIFIER_RESPONSE_CHARS:
-        return StickerClassifierResult("response_too_large", None)
+        return result("response_too_large", reason="too_large")
+    content = content.strip().lstrip("\ufeff").strip()
+    fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", content, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        content = fenced.group(1).strip()
+        normalized = True
+
+    def unique_object(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate_fields")
+            obj[key] = value
+        return obj
+
+    def reject_constant(value):
+        raise ValueError("nonfinite_number")
+
     try:
-        payload = json.loads(content)
+        payload = json.loads(content, object_pairs_hook=unique_object, parse_constant=reject_constant)
     except json.JSONDecodeError:
-        return StickerClassifierResult("json_invalid", None)
+        return result("json_invalid", reason="invalid_json")
+    except ValueError as exc:
+        return result("contract_invalid", reason=str(exc))
     if not isinstance(payload, dict) or set(payload) != {
         "attach",
         "mood",
@@ -142,25 +258,30 @@ def parse_sticker_classifier_response(content: str) -> StickerClassifierResult:
         "scene",
         "confidence",
     }:
-        return StickerClassifierResult("contract_invalid", None)
+        return result("contract_invalid", reason="fields_invalid")
 
     attach = payload.get("attach")
     confidence = payload.get("confidence")
+    try:
+        valid_confidence = (
+            isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            and 0.0 <= float(confidence) <= 1.0
+        )
+    except (ValueError, OverflowError):
+        valid_confidence = False
     if (
         type(attach) is not bool
-        or not isinstance(confidence, (int, float))
-        or isinstance(confidence, bool)
-        or not 0.0 <= float(confidence) <= 1.0
+        or not valid_confidence
     ):
-        return StickerClassifierResult("contract_invalid", None)
+        return result("contract_invalid", reason="types_or_confidence_invalid")
 
     mood = payload.get("mood")
     intensity = payload.get("intensity")
     scene = payload.get("scene")
     if not attach:
         if mood is not None or intensity is not None or scene is not None:
-            return StickerClassifierResult("contract_invalid", None)
-        return StickerClassifierResult("not_requested", None)
+            return result("contract_invalid", reason="null_tags_required")
+        return result("not_requested")
     if (
         not isinstance(mood, str)
         or mood not in ALLOWED_MOODS
@@ -169,8 +290,8 @@ def parse_sticker_classifier_response(content: str) -> StickerClassifierResult:
         or not isinstance(scene, str)
         or scene not in ALLOWED_USAGE_TAGS
     ):
-        return StickerClassifierResult("contract_invalid", None)
-    return StickerClassifierResult(
+        return result("contract_invalid", reason="tags_invalid")
+    return result(
         "requested",
         StickerIntent(mood, intensity, scene, float(confidence)),
     )
@@ -190,22 +311,32 @@ def _safe_transport_error_status(exc: Exception) -> str:
 async def _openai_compatible_transport(
     settings: RemoteStickerClassifierSettings,
     messages: list[dict[str, str]],
-) -> str:
+) -> StickerClassifierResponse:
     client = AsyncOpenAI(
         api_key=settings.api_key,
         base_url=settings.base_url,
         timeout=settings.timeout_seconds,
         max_retries=0,
     )
-    response = await client.chat.completions.create(
-        model=settings.model,
-        messages=messages,
-        temperature=0,
-        max_tokens=180,
-        response_format={"type": "json_object"},
-    )
-    content = response.choices[0].message.content
-    return content.strip() if content else ""
+    try:
+        response = await client.chat.completions.create(
+            model=settings.model,
+            messages=messages,
+            temperature=0,
+            max_tokens=CLASSIFIER_MAX_TOKENS,
+            response_format={"type": "json_object"},
+        )
+        if not response.choices:
+            return StickerClassifierResponse("", diagnostics=_response_diagnostics(response))
+        choice = response.choices[0]
+        content = choice.message.content
+        return StickerClassifierResponse(
+            content if isinstance(content, str) else "",
+            getattr(choice, "finish_reason", "unknown"),
+            diagnostics=_response_diagnostics(response),
+        )
+    finally:
+        await client.close()
 
 
 async def classify_sticker_intent(
@@ -214,6 +345,7 @@ async def classify_sticker_intent(
     assistant_reply: str,
     *,
     transport: StickerClassifierTransport | None = None,
+    available_combinations: tuple[tuple[str, str, str], ...] | None = None,
 ) -> StickerClassifierResult:
     settings_status = classifier_settings_status(settings)
     if settings_status != "ready":
@@ -230,15 +362,48 @@ async def classify_sticker_intent(
     ):
         return StickerClassifierResult("input_invalid", None, input_chars)
 
-    messages = build_sticker_classifier_messages(user_message, assistant_reply)
-    request = transport or _openai_compatible_transport
+    if available_combinations == ():
+        return StickerClassifierResult("no_available_stickers", None, input_chars)
     try:
-        content = await request(settings, messages)
+        messages = build_sticker_classifier_messages(
+            user_message, assistant_reply, available_combinations=available_combinations,
+        )
+    except (TypeError, ValueError):
+        return StickerClassifierResult("invalid_config", None, input_chars)
+    request = transport or _openai_compatible_transport
+    started = time.monotonic()
+    diagnostics = StickerClassifierDiagnostics(
+        request_started=True, max_tokens=CLASSIFIER_MAX_TOKENS,
+        timeout_ms=settings.timeout_seconds * 1000,
+    )
+    try:
+        response = await asyncio.wait_for(request(settings, messages), timeout=settings.timeout_seconds)
     except Exception as exc:
         return StickerClassifierResult(
             _safe_transport_error_status(exc),
             None,
             input_chars,
+            diagnostics=replace(diagnostics, elapsed_ms=round((time.monotonic() - started) * 1000)),
         )
-    parsed = parse_sticker_classifier_response(content)
-    return StickerClassifierResult(parsed.status, parsed.intent, input_chars)
+    raw_diagnostics = response.diagnostics if isinstance(response, StickerClassifierResponse) else None
+    if isinstance(raw_diagnostics, StickerClassifierDiagnostics):
+        diagnostics = replace(diagnostics, **{
+            name: _diagnostic_count(getattr(raw_diagnostics, name))
+            for name in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "reasoning_chars")
+        })
+    diagnostics = replace(diagnostics, elapsed_ms=round((time.monotonic() - started) * 1000))
+    content = response.content if isinstance(response, StickerClassifierResponse) else response
+    finish_reason = response.finish_reason if isinstance(response, StickerClassifierResponse) else "unknown"
+    if not isinstance(finish_reason, str) or finish_reason not in {"stop", "length", "content_filter", "tool_calls", "function_call"}:
+        finish_reason = "unknown"
+    response_chars = len(content) if isinstance(content, str) else 0
+    if finish_reason in {"length", "content_filter"}:
+        status = "response_truncated" if finish_reason == "length" else "response_filtered"
+        return StickerClassifierResult(status, None, input_chars, response_chars, finish_reason, diagnostics=diagnostics)
+    parsed = replace(parse_sticker_classifier_response(content), input_chars=input_chars,
+                     finish_reason=finish_reason, diagnostics=diagnostics)
+    if parsed.intent is not None and available_combinations is not None:
+        combination = (parsed.intent.mood, parsed.intent.intensity, parsed.intent.scene)
+        if combination not in available_combinations:
+            return replace(parsed, status="unsupported_combination", intent=None, parse_reason="unavailable_tags")
+    return parsed

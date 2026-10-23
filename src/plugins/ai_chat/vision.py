@@ -12,6 +12,7 @@ import ssl
 import struct
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 from urllib.error import HTTPError, URLError
 from urllib.parse import ParseResult, urljoin, urlparse, urlunsplit
 from urllib.request import Request, url2pathname, urlopen
@@ -22,11 +23,18 @@ from nonebot.adapters.onebot.v11 import MessageEvent
 from openai import AsyncOpenAI
 
 from .config import AiChatConfig
+from .vision_routes import (
+    VisionError, VisionProviderRoute, resolve_vision_provider_route,
+    resolve_private_image_wait_seconds,
+)
 from .aliyun_bailian_vision import (
     AliyunBailianVisionError,
     request_aliyun_bailian_vision,
 )
 from .media_reliability import observe_vision_infer_safely
+from .vision_observability import (
+    image_source_kind, record_image, record_response, vision_log_scope,
+)
 
 
 VISION_PROMPT = """
@@ -89,10 +97,6 @@ SENSITIVE_PATTERNS = (
 )
 
 
-class VisionError(RuntimeError):
-    pass
-
-
 DIRECT_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
 IMAGE_REF_FIELDS = ("url", "file_id", "file", "path")
 IMAGE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
@@ -107,74 +111,6 @@ _DIAGNOSTIC_IMAGE_BASE64: str | None = None
 class VisionInferenceCheck:
     ok: bool
     detail: str
-
-
-@dataclass(frozen=True)
-class VisionProviderRoute:
-    provider: str
-    api_key: str = field(default="", repr=False)
-    base_url: str = ""
-    model: str = ""
-    timeout_seconds: int = 0
-
-
-def resolve_vision_provider_route(
-    config: AiChatConfig,
-    role_card_key: str = "",
-) -> VisionProviderRoute:
-    normalized_role_card_key = role_card_key.strip()
-    if not (
-        getattr(config, "enable_persona_vision_routing", False)
-        and normalized_role_card_key
-        and normalized_role_card_key
-        in getattr(config, "persona_vision_role_card_keys", frozenset())
-    ):
-        return VisionProviderRoute(provider="aliyun_bailian")
-
-    values = {
-        "PERSONA_LLM_API_KEY": getattr(config, "persona_llm_api_key", "").strip(),
-        "PERSONA_LLM_BASE_URL": getattr(config, "persona_llm_base_url", "").strip(),
-        "PERSONA_VISION_MODEL": getattr(config, "persona_vision_model", "").strip(),
-    }
-    missing = [name for name, value in values.items() if not value]
-    timeout_seconds = int(getattr(config, "persona_vision_timeout_seconds", 0))
-    if timeout_seconds <= 0:
-        missing.append("PERSONA_VISION_TIMEOUT_SECONDS")
-    if missing:
-        raise VisionError(
-            "persona vision route is enabled but incomplete: "
-            + ", ".join(missing)
-        )
-    return VisionProviderRoute(
-        provider="persona_grok",
-        api_key=values["PERSONA_LLM_API_KEY"],
-        base_url=values["PERSONA_LLM_BASE_URL"],
-        model=values["PERSONA_VISION_MODEL"],
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def resolve_private_image_wait_seconds(
-    config: AiChatConfig,
-    role_card_key: str = "",
-) -> int:
-    legacy_wait_seconds = max(
-        int(getattr(config, "vision_private_image_wait_seconds", 0)),
-        0,
-    )
-    normalized_role_card_key = role_card_key.strip()
-    if not (
-        normalized_role_card_key
-        and normalized_role_card_key
-        in getattr(config, "persona_vision_role_card_keys", frozenset())
-    ):
-        return legacy_wait_seconds
-    persona_wait_seconds = int(
-        getattr(config, "persona_vision_private_image_wait_seconds", -1)
-    )
-    if persona_wait_seconds < 0:
-        return legacy_wait_seconds
-    return persona_wait_seconds
 
 
 def _segment_type(segment: Any) -> str:
@@ -376,23 +312,36 @@ async def describe_images(
     attempted_count = 0
     successful_count = 0
     first_error: Exception | None = None
-    for url in urls[:max_images]:
+    batch = str(uuid4())
+    for image_index, url in enumerate(urls[:max_images], 1):
         attempted_count += 1
         try:
-            image_base64 = await _image_url_to_base64(
-                url,
-                config.vision_timeout_seconds,
-                config.vision_max_image_bytes,
-                getattr(config, "vision_trusted_local_roots", ()),
-            )
-            if role_card_key.strip():
-                description = await _describe_image_base64(
-                    config,
-                    image_base64,
-                    role_card_key=role_card_key,
-                )
-            else:
-                description = await _describe_image_base64(config, image_base64)
+            with vision_log_scope(
+                persona=role_card_key.strip(), batch=batch,
+                image_index=image_index, source_kind=image_source_kind(url),
+            ) as diagnostic:
+                diagnostic["stage"] = "download"
+                download_started = time.monotonic()
+                try:
+                    image_base64 = await _image_url_to_base64(
+                        url,
+                        config.vision_timeout_seconds,
+                        config.vision_max_image_bytes,
+                        getattr(config, "vision_trusted_local_roots", ()),
+                    )
+                finally:
+                    diagnostic["download_ms"] = round((time.monotonic() - download_started) * 1000)
+                record_image(diagnostic, image_base64)
+                diagnostic["stage"] = "route"
+                if role_card_key.strip():
+                    description = await _describe_image_base64(
+                        config,
+                        image_base64,
+                        role_card_key=role_card_key,
+                    )
+                else:
+                    description = await _describe_image_base64(config, image_base64)
+                diagnostic["summary"] = description
         except VisionError as exc:
             if first_error is None:
                 first_error = exc
@@ -685,17 +634,20 @@ async def _describe_image_base64(
     *,
     role_card_key: str = "",
 ) -> str:
-    route = resolve_vision_provider_route(config, role_card_key)
-    if route.provider == "persona_grok":
-        return await _grok_chat_vision(route, image_base64)
-    return await asyncio.to_thread(_bailian_chat_vision, config, image_base64)
+    with vision_log_scope(persona=role_card_key.strip()) as diagnostic:
+        diagnostic["stage"] = "route"
+        route = resolve_vision_provider_route(config, role_card_key)
+        diagnostic["provider"] = route.provider
+        if route.provider in {"persona_grok", "persona_deepseek"}:
+            return await _openai_chat_vision(route, image_base64)
+        return await asyncio.to_thread(_bailian_chat_vision, config, image_base64)
 
 
 def _image_media_type(image_base64: str) -> str:
     try:
         content = base64.b64decode(image_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise VisionError("Grok视觉图片Base64无效") from exc
+        raise VisionError("视觉图片Base64无效") from exc
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if content.startswith(b"\xff\xd8\xff"):
@@ -704,80 +656,136 @@ def _image_media_type(image_base64: str) -> str:
         return "image/gif"
     if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
         return "image/webp"
-    raise VisionError("Grok视觉图片格式不受支持")
+    raise VisionError("视觉图片格式不受支持")
 
 
-async def _grok_chat_vision(
+async def _openai_chat_vision(
     route: VisionProviderRoute,
     image_base64: str,
 ) -> str:
-    media_type = _image_media_type(image_base64)
-    client = AsyncOpenAI(
-        api_key=route.api_key,
-        base_url=route.base_url,
-        timeout=route.timeout_seconds,
-        max_retries=0,
-    )
-    try:
-        response = await client.chat.completions.create(
-            model=route.model,
-            messages=[
-                {"role": "system", "content": VISION_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "请仔细观察图片，并严格按照系统要求输出客观事实摘要。",
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": (
-                                    f"data:{media_type};base64,{image_base64}"
-                                ),
-                                "detail": "high",
-                            },
-                        },
-                    ],
-                },
-            ],
-            temperature=0,
-            max_tokens=400,
+    label = "DeepSeek视觉" if route.provider == "persona_deepseek" else "Grok视觉"
+    with vision_log_scope() as diagnostic:
+        diagnostic.update(
+            provider=route.provider, requested_model=route.model,
+            base_url=route.base_url, timeout_seconds=route.timeout_seconds,
+            max_tokens=route.max_tokens, reasoning_effort=route.reasoning_effort, stage="validation",
         )
-    except Exception as exc:
-        status_code = getattr(exc, "status_code", None)
-        status_suffix = f"，HTTP {status_code}" if status_code else ""
-        raise VisionError(
-            f"Grok视觉请求失败（{type(exc).__name__}{status_suffix}）"
-        ) from exc
+        record_image(diagnostic, image_base64)
+        media_type = _image_media_type(image_base64)
+        diagnostic["stage"] = "request"
+        client = AsyncOpenAI(
+            api_key=route.api_key,
+            base_url=route.base_url,
+            timeout=route.timeout_seconds,
+            max_retries=0,
+        )
+        request_started = time.monotonic()
+        try:
+            diagnostic["request_started"] = True
+            options = {"reasoning_effort": route.reasoning_effort} if route.reasoning_effort else {}
+            response = await client.chat.completions.create(
+                model=route.model,
+                messages=[
+                    {"role": "system", "content": VISION_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "请仔细观察图片，并严格按照系统要求输出客观事实摘要。",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{image_base64}",
+                                    "detail": "high",
+                                },
+                            },
+                        ],
+                    },
+                ],
+                temperature=0,
+                max_tokens=route.max_tokens,
+                **options,
+            )
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            diagnostic.update(
+                http_status=status_code,
+                error_code="request_timeout" if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower() else "request_failed",
+            )
+            status_suffix = f"，HTTP {status_code}" if status_code else ""
+            raise VisionError(
+                f"{label}请求失败（{type(exc).__name__}{status_suffix}）"
+            ) from exc
+        finally:
+            diagnostic["request_ms"] = round((time.monotonic() - request_started) * 1000)
+            # Closing the SDK must not turn a valid response or cancellation into a failure.
+            close = getattr(client, "close", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
 
-    content = response.choices[0].message.content
-    description = sanitize_vision_description(
-        content if isinstance(content, str) else ""
+        diagnostic.update(stage="response", response_received=True)
+        record_response(diagnostic, response)
+        if not response.choices:
+            diagnostic["error_code"] = "empty_choices"
+            raise VisionError(f"{label}没有返回候选结果")
+        if diagnostic.get("finish_reason") == "length":
+            diagnostic["status"] = "response_truncated"
+        return _validated_vision_description(
+            response.choices[0].message.content, diagnostic, label,
+        )
+
+
+def _validated_vision_description(content, diagnostic: dict, label: str) -> str:
+    raw = content if isinstance(content, str) else ""
+    diagnostic.update(stage="filter", raw_description_chars=len(raw))
+    description = sanitize_vision_description(raw)
+    filter_markers = [marker for marker in PROMPT_INJECTION_MARKERS if marker in raw.lower()]
+    diagnostic.update(
+        description_chars=len(description), filter_changed=description != raw,
+        filter_reason="prompt_marker" if filter_markers else "sanitized" if description != raw else "unchanged",
+        filter_markers=filter_markers,
+        summary=description,
     )
     if not description:
-        raise VisionError("Grok视觉返回空描述")
+        diagnostic["error_code"] = "empty_description"
+        raise VisionError(f"{label}返回空描述")
     if is_low_quality_vision_description(description):
-        raise VisionError("Grok视觉返回低质量重复内容")
+        diagnostic["error_code"] = "repetitive_description"
+        raise VisionError(f"{label}返回低质量重复内容")
     return description
 
 
 def _bailian_chat_vision(config: AiChatConfig, image_base64: str) -> str:
-    try:
-        result = request_aliyun_bailian_vision(
-            config,
-            image_base64,
-            VISION_PROMPT,
+    with vision_log_scope() as diagnostic:
+        diagnostic.update(
+            provider="aliyun_bailian", requested_model=getattr(config, "vision_cloud_model", ""),
+            base_url=getattr(config, "aliyun_bailian_base_url", ""),
+            max_tokens=256, timeout_seconds=min(max(getattr(config, "vision_timeout_seconds", 1), 1), 60),
+            stage="request",
         )
-    except AliyunBailianVisionError as exc:
-        raise VisionError(f"{exc.code}：{exc}") from exc
-    content = sanitize_vision_description(result.content)
-    if not content:
-        raise VisionError("阿里云百炼返回空描述")
-    if is_low_quality_vision_description(content):
-        raise VisionError("阿里云百炼返回低质量重复内容")
-    return content
+        record_image(diagnostic, image_base64)
+        started = time.monotonic()
+        try:
+            result = request_aliyun_bailian_vision(config, image_base64, VISION_PROMPT)
+        except AliyunBailianVisionError as exc:
+            diagnostic.update(error_code=exc.code, request_started=exc.request_executed)
+            raise VisionError(f"{exc.code}：{exc}") from exc
+        finally:
+            diagnostic["request_ms"] = round((time.monotonic() - started) * 1000)
+        diagnostic.update(
+            stage="response", request_started=True, response_received=True,
+            requested_model=getattr(result, "configured_model", diagnostic["requested_model"]),
+            returned_model=getattr(result, "returned_model", ""),
+            prompt_tokens=getattr(result, "input_tokens", None),
+            completion_tokens=getattr(result, "output_tokens", None),
+            total_tokens=getattr(result, "total_tokens", None),
+        )
+        return _validated_vision_description(result.content, diagnostic, "阿里云百炼")
 
 
 def _ollama_chat_vision(config: AiChatConfig, image_base64: str) -> str:

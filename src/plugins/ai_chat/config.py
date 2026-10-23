@@ -1,61 +1,135 @@
 import os
-from dataclasses import dataclass, field
+import math
+from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from .local_time import DEFAULT_BOT_TIMEZONE, timezone_for_name
 from .persona_scope import PersonaRoutingSettings, build_persona_routing_settings
+from .vision_routes import persona_vision_provider
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+@dataclass(frozen=True)
+class ConfigIssue:
+    key: str
+    code: str
+    message: str
+    severity: str = "warning"
+
+
+class ConfigValidationError(ValueError):
+    def __init__(self, issues: tuple[ConfigIssue, ...]):
+        self.issues = issues
+        super().__init__("配置校验失败：" + "; ".join(
+            f"{item.key}: {item.message}" for item in issues if item.severity == "error"
+        ))
+
+
+@dataclass
+class _ConfigReadContext:
+    values: Mapping[str, str]
+    issues: list[ConfigIssue] = field(default_factory=list)
+    sources: dict[str, str] = field(default_factory=dict)
+
+
+_CONFIG_READ: ContextVar[_ConfigReadContext | None] = ContextVar("config_read", default=None)
+
+
+def _env_get(name: str, default=None):
+    context = _CONFIG_READ.get()
+    values = context.values if context is not None else os.environ
+    if context is not None:
+        context.sources[name] = (
+            "explicit_empty" if name in values and not values[name].strip()
+            else "environment_snapshot" if name in values else "default_or_inherited"
+        )
+    return values.get(name, default)
+
+
+def _issue(name: str, code: str, message: str, *, severity: str = "warning") -> None:
+    item = ConfigIssue(name, code, message, severity)
+    context = _CONFIG_READ.get()
+    if context is None:
+        if severity == "error":
+            raise ConfigValidationError((item,))
+        return
+    if item not in context.issues:
+        context.issues.append(item)
+
+
 def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
+    value = _env_get(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    _issue(name, "invalid_boolean", "必须为 true/false、1/0、yes/no 或 on/off", severity="error")
+    return default
 
 
 def _int_env(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    return int(value)
-
-
-def _security_int_env(name: str, default: int) -> int:
-    """Return an invalid fail-closed sentinel instead of breaking startup."""
-    value = os.getenv(name)
+    value = _env_get(name)
     if value is None or not value.strip():
         return default
     try:
         return int(value)
     except ValueError:
+        _issue(name, "invalid_integer", "必须为整数", severity="error")
+        return default
+
+
+def _security_int_env(name: str, default: int) -> int:
+    """Return an invalid fail-closed sentinel instead of breaking startup."""
+    value = _env_get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        _issue(name, "invalid_integer", "必须为整数；已保留既有 0 哨兵，请修正相关能力参数")
         return 0
 
 
 def _security_float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
+    value = _env_get(name)
     if value is None or not value.strip():
         return default
     try:
-        return float(value)
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError
+        return result
     except ValueError:
+        _issue(name, "invalid_float", "必须为有限数字；已保留既有 0 哨兵，请修正相关能力参数")
         return 0.0
 
 
 def _float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
+    value = _env_get(name)
     if value is None or not value.strip():
         return default
-    return float(value)
+    try:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError
+        return result
+    except ValueError:
+        _issue(name, "invalid_float", "必须为有限数字", severity="error")
+        return default
 
 
 def _csv_env(name: str) -> frozenset[str]:
-    value = os.getenv(name, "")
+    value = _env_get(name, "")
     items = [item.strip() for item in value.split(",")]
     return frozenset(item for item in items if item)
 
@@ -67,11 +141,14 @@ def _trusted_path_roots_env(name: str) -> tuple[Path, ...]:
     Environment placeholders such as ``%USERPROFILE%`` are supported without
     committing machine-specific absolute paths.
     """
-    raw_value = os.getenv(name, "")
+    raw_value = _env_get(name, "")
     roots: list[Path] = []
     for raw_item in raw_value.split(";"):
         item = os.path.expandvars(raw_item.strip())
-        if not item or "%" in item:
+        if not item:
+            continue
+        if "%" in item:
+            _issue(name, "unresolved_path", "路径变量未解析；已忽略该允许列表项")
             continue
         candidate = Path(item).expanduser()
         if not candidate.is_absolute():
@@ -79,6 +156,7 @@ def _trusted_path_roots_env(name: str) -> tuple[Path, ...]:
         try:
             resolved = candidate.resolve(strict=False)
         except OSError:
+            _issue(name, "invalid_path", "路径无法解析；已忽略该允许列表项")
             continue
         if resolved not in roots:
             roots.append(resolved)
@@ -86,15 +164,28 @@ def _trusted_path_roots_env(name: str) -> tuple[Path, ...]:
 
 
 def _timezone_env(name: str) -> str:
-    value = os.getenv(name, DEFAULT_BOT_TIMEZONE).strip() or DEFAULT_BOT_TIMEZONE
-    timezone_for_name(value)
+    value = _env_get(name, DEFAULT_BOT_TIMEZONE).strip() or DEFAULT_BOT_TIMEZONE
+    try:
+        timezone_for_name(value)
+    except ValueError:
+        _issue(name, "unsupported_timezone", "unsupported bot timezone；仅支持 Asia/Shanghai", severity="error")
+        return DEFAULT_BOT_TIMEZONE
     return value
 
 
 def _chat_weather_mode_env(name: str, default: str = "off") -> str:
-    value = os.getenv(name, default).strip().lower() or default
+    value = _env_get(name, default).strip().lower() or default
     if value not in {"off", "shadow", "owner_explicit", "owner_auto"}:
+        _issue(name, "unsupported_mode", "不支持的天气模式；已关闭天气注入")
         return "off"
+    return value
+
+
+def _reasoning_effort_env(name: str, default: str = "high") -> str:
+    value = _env_get(name, default).strip().lower() or default
+    if value not in {"low", "high", "max"}:
+        _issue(name, "unsupported_reasoning_effort", "思考强度必须为 low、high 或 max", severity="error")
+        return default
     return value
 
 
@@ -106,11 +197,18 @@ class AiChatConfig:
     bot_owner_public_name: str
     bot_timezone: str
     persona_routing: PersonaRoutingSettings
-    openai_api_key: str = field(repr=False)
-    openai_base_url: str
-    openai_model: str
+    aike_llm_api_key: str = field(repr=False)
+    aike_llm_base_url: str
+    aike_llm_model: str
+    aike_llm_reasoning_effort: str
     ai_temperature: float
-    ai_timeout_seconds: int
+    aike_llm_timeout_seconds: int
+    enable_unknown_slang_tool: bool
+    enable_aike_encyclopedia: bool
+    enable_linyin_encyclopedia: bool
+    linyin_encyclopedia_auto: bool
+    encyclopedia_plan_timeout_seconds: int
+    encyclopedia_lookup_timeout_seconds: int
     enable_main_agent: bool
     main_agent_use_llm: bool
     main_agent_owner_only: bool
@@ -127,18 +225,29 @@ class AiChatConfig:
     main_llm_base_url: str
     main_llm_model: str
     main_llm_timeout_seconds: int
+    # Compatibility-only fields. ChatGraph selects flow, not the model route.
     chat_llm_api_key: str = field(repr=False)
     chat_llm_base_url: str
     chat_llm_model: str
     chat_llm_timeout_seconds: int
+    summary_llm_api_key: str = field(repr=False)
+    summary_llm_base_url: str
+    summary_llm_model: str
+    summary_llm_timeout_seconds: int
     enable_persona_llm_routing: bool
     persona_llm_role_card_keys: frozenset[str]
+    persona_llm_provider: str
     persona_llm_api_key: str = field(repr=False)
     persona_llm_base_url: str
     persona_llm_model: str
     persona_llm_timeout_seconds: int
+    persona_llm_num_ctx: int
+    persona_llm_max_tokens: int
+    persona_llm_keep_alive_seconds: int
     enable_persona_vision_routing: bool
     persona_vision_role_card_keys: frozenset[str]
+    persona_vision_api_key: str = field(repr=False)
+    persona_vision_base_url: str
     persona_vision_model: str
     persona_vision_timeout_seconds: int
     persona_vision_private_image_wait_seconds: int
@@ -221,6 +330,19 @@ class AiChatConfig:
     gap_scene_summary_1_threshold: int
     gap_scene_summary_2_threshold: int
     max_gap_scene_summaries_in_context: int
+    enable_topic_scene_switch: bool
+    topic_scene_switch_owner_only: bool
+    topic_scene_switch_private_only: bool
+    topic_scene_min_source_messages: int
+    topic_scene_hint_turns: int
+    enable_chat_bubble_split: bool
+    chat_bubble_split_owner_private_only: bool
+    chat_bubble_min_delay_ms: int
+    chat_bubble_max_delay_ms: int
+    chat_bubble_max_bubbles: int
+    enable_chat_reunion: bool
+    chat_reunion_owner_private_only: bool
+    chat_reunion_min_gap_hours: int
     enable_long_term_memory_context: bool
     max_long_term_memories_in_context: int
     rule_reminder_interval_messages: int
@@ -276,6 +398,8 @@ class AiChatConfig:
     tts_startup_wait_seconds: int
     user_blacklist: frozenset[str]
     vision_provider: str = "aliyun_bailian"
+    persona_vision_max_tokens: int = 400
+    persona_vision_reasoning_effort: str = "high"
     vision_cloud_model: str = "qwen3.7-flash"
     aliyun_bailian_base_url: str = field(default="", repr=False)
     aliyun_bailian_api_key: str = field(default="", repr=False)
@@ -285,8 +409,8 @@ class AiChatConfig:
     enable_image_gen: bool = False
     image_gen_api_key: str = field(default="", repr=False)
     image_gen_base_url: str = field(default="", repr=False)
-    image_gen_model: str = "grok-imagine-1.0"
-    image_edit_model: str = "grok-imagine-1.0-edit"
+    image_gen_model: str = "grok-imagine-image-quality"
+    image_edit_model: str = "grok-imagine-image-quality"
     image_gen_timeout_seconds: int = 120
     image_gen_max_prompt_chars: int = 1000
     image_gen_max_input_bytes: int = 10_485_760
@@ -306,30 +430,98 @@ class AiChatConfig:
     qwen_space_result_ttl_seconds: int = 1800
     qwen_space_max_side: int = 1024
     qwen_space_jpeg_quality: int = 90
+    configuration_issues: tuple[ConfigIssue, ...] = ()
+    configuration_sources: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    configuration_snapshot_kind: str = "process_environment_snapshot"
+    nonebot_port: int = 8080
+    bilibili_history_enabled: bool = True
+    bilibili_history_rag_enabled: bool = True
+    bilibili_background_max_tokens: int = 1200
+    bilibili_background_qq_ratio: float = 0.20
 
 
-def load_config() -> AiChatConfig:
+def load_config(environ: Mapping[str, str] | None = None) -> AiChatConfig:
+    """Read one stable snapshot without mutating environment or reloading .env.
+
+    Import-time dotenv loading is preserved for production compatibility.
+    Explicit mappings support isolated preflight and tests. Their values and
+    issue details are never included in validation errors or source metadata.
+    """
+    values = dict(os.environ if environ is None else environ)
+    context = _ConfigReadContext(values)
+    token = _CONFIG_READ.set(context)
+    try:
+        for old, new in (
+            ("OPENAI_API_KEY", "AIKE_LLM_API_KEY"),
+            ("OPENAI_BASE_URL", "AIKE_LLM_BASE_URL"),
+            ("OPENAI_MODEL", "AIKE_LLM_MODEL"),
+            ("OPENAI_TIMEOUT_SECONDS", "AIKE_LLM_TIMEOUT_SECONDS"),
+        ):
+            if old in values:
+                _issue(old, "legacy_ignored", f"旧变量不再读取；请迁移到 {new}，新变量（含显式空值）优先")
+        if any(values.get(key, "").strip() for key in (
+            "CHAT_LLM_API_KEY", "CHAT_LLM_BASE_URL", "CHAT_LLM_MODEL", "CHAT_LLM_TIMEOUT_SECONDS"
+        )):
+            _issue("CHAT_LLM_*", "compatibility_unused", "兼容字段不参与生产聊天路由；使用 AIKE_LLM_* 或 PERSONA_LLM_*")
+        config = _load_config_values()
+        if config.persona_routing.binding_errors:
+            _issue("BOT_PERSONA_BINDINGS", "invalid_bindings", "人格绑定存在错误；相关路由保持失败关闭")
+        port = _int_env("PORT", 8080)
+        if not 1 <= port <= 65535:
+            _issue("PORT", "invalid_port", "必须在 1 到 65535 之间", severity="error")
+        for key in ("VISION_PROVIDER", "VISION_CLOUD_MODEL"):
+            if key in values:
+                _issue(key, "fixed_contract", "当前云端视觉提供方和模型使用固定合同；此变量不改变实际线路")
+        if any(item.severity == "error" for item in context.issues):
+            raise ConfigValidationError(tuple(context.issues))
+        return replace(
+            config,
+            configuration_issues=tuple(context.issues),
+            configuration_sources=tuple(sorted(context.sources.items())),
+            configuration_snapshot_kind=("explicit_mapping" if environ is not None else "process_environment_snapshot"),
+            nonebot_port=port,
+        )
+    finally:
+        _CONFIG_READ.reset(token)
+
+
+def _load_config_values() -> AiChatConfig:
+    vision_model = _env_get("PERSONA_VISION_MODEL", _env_get("PERSONA_LLM_MODEL", "")).strip()
+    vision_base_url = _env_get(
+        "PERSONA_VISION_BASE_URL",
+        _env_get("AIKE_LLM_BASE_URL", "https://api.deepseek.com")
+        if persona_vision_provider(vision_model) == "persona_deepseek"
+        else _env_get("PERSONA_LLM_BASE_URL", ""),
+    ).strip()
+    deepseek_vision = persona_vision_provider(vision_model, vision_base_url) == "persona_deepseek"
     persona_routing = build_persona_routing_settings(
         routing_v2_enabled=_bool_env("ENABLE_PERSONA_ROUTING_V2", False),
         memory_v2_enabled=_bool_env("ENABLE_PERSONA_MEMORY_V2", False),
         routing_v2_bot_ids=_csv_env("PERSONA_ROUTING_V2_BOT_IDS"),
         memory_v2_bot_ids=_csv_env("PERSONA_MEMORY_V2_BOT_IDS"),
-        legacy_persona_id=os.getenv("LEGACY_PERSONA_ID", "aike"),
-        legacy_role_card_key=os.getenv("LEGACY_ROLE_CARD_KEY", "aike"),
-        raw_bindings=os.getenv("BOT_PERSONA_BINDINGS", ""),
+        legacy_persona_id=_env_get("LEGACY_PERSONA_ID", "aike"),
+        legacy_role_card_key=_env_get("LEGACY_ROLE_CARD_KEY", "aike"),
+        raw_bindings=_env_get("BOT_PERSONA_BINDINGS", ""),
     )
     return AiChatConfig(
-        bot_name=os.getenv("BOT_NAME", "AI Assistant"),
+        bot_name=_env_get("BOT_NAME", "AI Assistant"),
         bot_aliases=_csv_env("BOT_ALIASES"),
-        bot_owner_qq=os.getenv("BOT_OWNER_QQ", "").strip(),
-        bot_owner_public_name=os.getenv("BOT_OWNER_PUBLIC_NAME", "").strip(),
+        bot_owner_qq=_env_get("BOT_OWNER_QQ", "").strip(),
+        bot_owner_public_name=_env_get("BOT_OWNER_PUBLIC_NAME", "").strip(),
         bot_timezone=_timezone_env("BOT_TIMEZONE"),
         persona_routing=persona_routing,
-        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"),
-        openai_model=os.getenv("OPENAI_MODEL", "deepseek-v4-flash"),
+        aike_llm_api_key=_env_get("AIKE_LLM_API_KEY", ""),
+        aike_llm_base_url=_env_get("AIKE_LLM_BASE_URL", "https://api.deepseek.com"),
+        aike_llm_model=_env_get("AIKE_LLM_MODEL", "deepseek-v4-flash"),
+        aike_llm_reasoning_effort=_reasoning_effort_env("AIKE_LLM_REASONING_EFFORT"),
         ai_temperature=_float_env("AI_TEMPERATURE", 0.7),
-        ai_timeout_seconds=_int_env("AI_TIMEOUT_SECONDS", 60),
+        aike_llm_timeout_seconds=_int_env("AIKE_LLM_TIMEOUT_SECONDS", 60),
+        enable_unknown_slang_tool=_bool_env("ENABLE_UNKNOWN_SLANG_TOOL", True),
+        enable_aike_encyclopedia=_bool_env("ENABLE_AIKE_ENCYCLOPEDIA", True),
+        enable_linyin_encyclopedia=_bool_env("ENABLE_LINYIN_ENCYCLOPEDIA", True),
+        linyin_encyclopedia_auto=_bool_env("LINYIN_ENCYCLOPEDIA_AUTO", True),
+        encyclopedia_plan_timeout_seconds=_security_int_env("ENCYCLOPEDIA_PLAN_TIMEOUT_SECONDS", 8),
+        encyclopedia_lookup_timeout_seconds=_security_int_env("ENCYCLOPEDIA_LOOKUP_TIMEOUT_SECONDS", 8),
         enable_main_agent=_bool_env("ENABLE_MAIN_AGENT", False),
         main_agent_use_llm=_bool_env("MAIN_AGENT_USE_LLM", False),
         main_agent_owner_only=_bool_env("MAIN_AGENT_OWNER_ONLY", True),
@@ -337,27 +529,47 @@ def load_config() -> AiChatConfig:
         main_agent_max_steps=_int_env("MAIN_AGENT_MAX_STEPS", 5),
         main_agent_require_approval_for_writes=_bool_env("MAIN_AGENT_REQUIRE_APPROVAL_FOR_WRITES", True),
         enable_agent_web=_bool_env("ENABLE_AGENT_WEB", False),
-        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+        tavily_api_key=_env_get("TAVILY_API_KEY", "").strip(),
         tavily_timeout_seconds=_security_int_env("TAVILY_TIMEOUT_SECONDS", 10),
         enable_agent_local_write=_bool_env("ENABLE_AGENT_LOCAL_WRITE", False),
         enable_agent_external_write=_bool_env("ENABLE_AGENT_EXTERNAL_WRITE", False),
         enable_agent_shell=_bool_env("ENABLE_AGENT_SHELL", False),
-        main_llm_api_key=os.getenv("MAIN_LLM_API_KEY", ""),
-        main_llm_base_url=os.getenv("MAIN_LLM_BASE_URL", "https://api.openai.com/v1"),
-        main_llm_model=os.getenv("MAIN_LLM_MODEL", "gpt-4.1-mini"),
+        main_llm_api_key=_env_get("MAIN_LLM_API_KEY", ""),
+        main_llm_base_url=_env_get("MAIN_LLM_BASE_URL", "https://api.openai.com/v1"),
+        main_llm_model=_env_get("MAIN_LLM_MODEL", "gpt-4.1-mini"),
         main_llm_timeout_seconds=_int_env("MAIN_LLM_TIMEOUT_SECONDS", 60),
-        chat_llm_api_key=os.getenv("CHAT_LLM_API_KEY", os.getenv("OPENAI_API_KEY", "")),
-        chat_llm_base_url=os.getenv("CHAT_LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
-        chat_llm_model=os.getenv("CHAT_LLM_MODEL", os.getenv("OPENAI_MODEL", "deepseek-v4-flash")),
-        chat_llm_timeout_seconds=_int_env("CHAT_LLM_TIMEOUT_SECONDS", _int_env("AI_TIMEOUT_SECONDS", 60)),
+        chat_llm_api_key=_env_get("CHAT_LLM_API_KEY", ""),
+        chat_llm_base_url=_env_get("CHAT_LLM_BASE_URL", "https://api.deepseek.com"),
+        chat_llm_model=_env_get("CHAT_LLM_MODEL", "deepseek-v4-flash"),
+        chat_llm_timeout_seconds=_int_env("CHAT_LLM_TIMEOUT_SECONDS", 60),
+        summary_llm_api_key=_env_get("SUMMARY_LLM_API_KEY", "").strip(),
+        summary_llm_base_url=_env_get("SUMMARY_LLM_BASE_URL", "https://api.deepseek.com").strip(),
+        summary_llm_model=_env_get("SUMMARY_LLM_MODEL", "deepseek-v4-flash").strip(),
+        summary_llm_timeout_seconds=_int_env(
+            "SUMMARY_LLM_TIMEOUT_SECONDS",
+            60,
+        ),
         enable_persona_llm_routing=_bool_env("ENABLE_PERSONA_LLM_ROUTING", False),
         persona_llm_role_card_keys=_csv_env("PERSONA_LLM_ROLE_CARD_KEYS"),
-        persona_llm_api_key=os.getenv("PERSONA_LLM_API_KEY", "").strip(),
-        persona_llm_base_url=os.getenv("PERSONA_LLM_BASE_URL", "").strip(),
-        persona_llm_model=os.getenv("PERSONA_LLM_MODEL", "").strip(),
+        persona_llm_provider=_env_get(
+            "PERSONA_LLM_PROVIDER",
+            "openai",
+        ).strip().lower(),
+        persona_llm_api_key=_env_get("PERSONA_LLM_API_KEY", "").strip(),
+        persona_llm_base_url=_env_get("PERSONA_LLM_BASE_URL", "").strip(),
+        persona_llm_model=_env_get("PERSONA_LLM_MODEL", "").strip(),
         persona_llm_timeout_seconds=_security_int_env(
             "PERSONA_LLM_TIMEOUT_SECONDS",
-            _int_env("AI_TIMEOUT_SECONDS", 60),
+            60,
+        ),
+        persona_llm_num_ctx=_security_int_env("PERSONA_LLM_NUM_CTX", 4096),
+        persona_llm_max_tokens=_security_int_env(
+            "PERSONA_LLM_MAX_TOKENS",
+            640,
+        ),
+        persona_llm_keep_alive_seconds=_security_int_env(
+            "PERSONA_LLM_KEEP_ALIVE_SECONDS",
+            0,
         ),
         enable_persona_vision_routing=_bool_env(
             "ENABLE_PERSONA_VISION_ROUTING",
@@ -366,15 +578,19 @@ def load_config() -> AiChatConfig:
         persona_vision_role_card_keys=_csv_env(
             "PERSONA_VISION_ROLE_CARD_KEYS"
         ),
-        persona_vision_model=os.getenv(
-            "PERSONA_VISION_MODEL",
-            os.getenv("PERSONA_LLM_MODEL", ""),
+        persona_vision_api_key=_env_get(
+            "PERSONA_VISION_API_KEY",
+            _env_get("AIKE_LLM_API_KEY" if deepseek_vision else "PERSONA_LLM_API_KEY", ""),
         ).strip(),
+        persona_vision_base_url=vision_base_url,
+        persona_vision_model=vision_model,
+        persona_vision_max_tokens=_security_int_env("PERSONA_VISION_MAX_TOKENS", 4096 if deepseek_vision else 400),
+        persona_vision_reasoning_effort=_reasoning_effort_env("PERSONA_VISION_REASONING_EFFORT", "high"),
         persona_vision_timeout_seconds=_security_int_env(
             "PERSONA_VISION_TIMEOUT_SECONDS",
             _security_int_env(
                 "PERSONA_LLM_TIMEOUT_SECONDS",
-                _int_env("AI_TIMEOUT_SECONDS", 60),
+                60,
             ),
         ),
         persona_vision_private_image_wait_seconds=_int_env(
@@ -383,11 +599,11 @@ def load_config() -> AiChatConfig:
         ),
         enable_chat_weather=_bool_env("ENABLE_CHAT_WEATHER", False),
         chat_weather_mode=_chat_weather_mode_env("CHAT_WEATHER_MODE"),
-        chat_weather_provider=os.getenv(
+        chat_weather_provider=_env_get(
             "CHAT_WEATHER_PROVIDER",
             "open_meteo",
         ).strip().lower(),
-        chat_weather_default_location=os.getenv(
+        chat_weather_default_location=_env_get(
             "CHAT_WEATHER_DEFAULT_LOCATION",
             "",
         ).strip(),
@@ -405,8 +621,8 @@ def load_config() -> AiChatConfig:
         ),
         enable_chat_graph_runtime=_bool_env("ENABLE_CHAT_GRAPH_RUNTIME", False),
         enable_vision=_bool_env("ENABLE_VISION", True),
-        vision_ollama_base_url=os.getenv("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-        vision_model=os.getenv("VISION_MODEL", "qwen2.5vl:3b"),
+        vision_ollama_base_url=_env_get("VISION_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        vision_model=_env_get("VISION_MODEL", "qwen2.5vl:3b"),
         vision_timeout_seconds=_int_env("VISION_TIMEOUT_SECONDS", 180),
         vision_num_ctx=_int_env("VISION_NUM_CTX", 16384),
         vision_max_images=_int_env("VISION_MAX_IMAGES", 1),
@@ -470,15 +686,15 @@ def load_config() -> AiChatConfig:
             "ENABLE_REMOTE_STICKER_CLASSIFIER",
             False,
         ),
-        sticker_classifier_api_key=os.getenv(
+        sticker_classifier_api_key=_env_get(
             "STICKER_CLASSIFIER_API_KEY",
             "",
         ).strip(),
-        sticker_classifier_base_url=os.getenv(
+        sticker_classifier_base_url=_env_get(
             "STICKER_CLASSIFIER_BASE_URL",
             "",
         ).strip(),
-        sticker_classifier_model=os.getenv(
+        sticker_classifier_model=_env_get(
             "STICKER_CLASSIFIER_MODEL",
             "",
         ).strip(),
@@ -517,23 +733,23 @@ def load_config() -> AiChatConfig:
         enable_private_chat=_bool_env("ENABLE_PRIVATE_CHAT", True),
         enable_group_chat=_bool_env("ENABLE_GROUP_CHAT", True),
         enable_shared_scene_hub=_bool_env("ENABLE_SHARED_SCENE_HUB", False),
-        shared_scene_group_id=os.getenv("SHARED_SCENE_GROUP_ID", "").strip(),
-        shared_scene_aike_bot_id=os.getenv(
+        shared_scene_group_id=_env_get("SHARED_SCENE_GROUP_ID", "").strip(),
+        shared_scene_aike_bot_id=_env_get(
             "SHARED_SCENE_AIKE_BOT_ID", ""
         ).strip(),
-        shared_scene_linyin_bot_id=os.getenv(
+        shared_scene_linyin_bot_id=_env_get(
             "SHARED_SCENE_LINYIN_BOT_ID", ""
         ).strip(),
-        scene_director_provider=os.getenv(
+        scene_director_provider=_env_get(
             "SCENE_DIRECTOR_PROVIDER", "qwen"
         ).strip().lower(),
-        scene_director_api_key=os.getenv(
+        scene_director_api_key=_env_get(
             "SCENE_DIRECTOR_API_KEY", ""
         ).strip(),
-        scene_director_base_url=os.getenv(
+        scene_director_base_url=_env_get(
             "SCENE_DIRECTOR_BASE_URL", ""
         ).strip(),
-        scene_director_model=os.getenv("SCENE_DIRECTOR_MODEL", "").strip(),
+        scene_director_model=_env_get("SCENE_DIRECTOR_MODEL", "").strip(),
         scene_director_timeout_seconds=_security_int_env(
             "SCENE_DIRECTOR_TIMEOUT_SECONDS", 15
         ),
@@ -585,14 +801,31 @@ def load_config() -> AiChatConfig:
         gap_scene_summary_1_threshold=_int_env("GAP_SCENE_SUMMARY_1_THRESHOLD", 40),
         gap_scene_summary_2_threshold=_int_env("GAP_SCENE_SUMMARY_2_THRESHOLD", 80),
         max_gap_scene_summaries_in_context=_int_env("MAX_GAP_SCENE_SUMMARIES_IN_CONTEXT", 2),
+        enable_topic_scene_switch=_bool_env("ENABLE_TOPIC_SCENE_SWITCH", True),
+        topic_scene_switch_owner_only=_bool_env("TOPIC_SCENE_SWITCH_OWNER_ONLY", True),
+        topic_scene_switch_private_only=_bool_env("TOPIC_SCENE_SWITCH_PRIVATE_ONLY", True),
+        topic_scene_min_source_messages=_int_env("TOPIC_SCENE_MIN_SOURCE_MESSAGES", 4),
+        topic_scene_hint_turns=_int_env("TOPIC_SCENE_HINT_TURNS", 3),
+        enable_chat_bubble_split=_bool_env("ENABLE_CHAT_BUBBLE_SPLIT", False),
+        chat_bubble_split_owner_private_only=_bool_env(
+            "CHAT_BUBBLE_SPLIT_OWNER_PRIVATE_ONLY", True
+        ),
+        chat_bubble_min_delay_ms=_int_env("CHAT_BUBBLE_MIN_DELAY_MS", 700),
+        chat_bubble_max_delay_ms=_int_env("CHAT_BUBBLE_MAX_DELAY_MS", 1200),
+        chat_bubble_max_bubbles=_int_env("CHAT_BUBBLE_MAX_BUBBLES", 3),
+        enable_chat_reunion=_bool_env("ENABLE_CHAT_REUNION", True),
+        chat_reunion_owner_private_only=_bool_env(
+            "CHAT_REUNION_OWNER_PRIVATE_ONLY", True
+        ),
+        chat_reunion_min_gap_hours=_int_env("CHAT_REUNION_MIN_GAP_HOURS", 3),
         enable_long_term_memory_context=_bool_env("ENABLE_LONG_TERM_MEMORY_CONTEXT", True),
         max_long_term_memories_in_context=_int_env("MAX_LONG_TERM_MEMORIES_IN_CONTEXT", 8),
         rule_reminder_interval_messages=_int_env("RULE_REMINDER_INTERVAL_MESSAGES", 40),
         enable_memory_rag=_bool_env("ENABLE_MEMORY_RAG", False),
         enable_project_doc_rag=_bool_env("ENABLE_PROJECT_DOC_RAG", False),
-        memory_rag_embedding_provider=os.getenv("MEMORY_RAG_EMBEDDING_PROVIDER", "ollama"),
-        memory_rag_embedding_model=os.getenv("MEMORY_RAG_EMBEDDING_MODEL", "bge-m3"),
-        memory_rag_embedding_base_url=os.getenv("MEMORY_RAG_EMBEDDING_BASE_URL", "http://127.0.0.1:11434"),
+        memory_rag_embedding_provider=_env_get("MEMORY_RAG_EMBEDDING_PROVIDER", "ollama"),
+        memory_rag_embedding_model=_env_get("MEMORY_RAG_EMBEDDING_MODEL", "bge-m3"),
+        memory_rag_embedding_base_url=_env_get("MEMORY_RAG_EMBEDDING_BASE_URL", "http://127.0.0.1:11434"),
         memory_rag_embedding_dimension=_int_env("MEMORY_RAG_EMBEDDING_DIMENSION", 1024),
         memory_rag_embedding_timeout_seconds=_int_env("MEMORY_RAG_EMBEDDING_TIMEOUT_SECONDS", 60),
         memory_rag_embedding_num_gpu=_int_env("MEMORY_RAG_EMBEDDING_NUM_GPU", -1),
@@ -609,6 +842,10 @@ def load_config() -> AiChatConfig:
         memory_rag_include_gap_scene_summaries=_bool_env("MEMORY_RAG_INCLUDE_GAP_SCENE_SUMMARIES", False),
         memory_rag_owner_only_debug=_bool_env("MEMORY_RAG_OWNER_ONLY_DEBUG", True),
         memory_rag_inject_in_chat=_bool_env("MEMORY_RAG_INJECT_IN_CHAT", False),
+        bilibili_history_enabled=_bool_env("BILIBILI_HISTORY_ENABLED", True),
+        bilibili_history_rag_enabled=_bool_env("BILIBILI_HISTORY_RAG_ENABLED", True),
+        bilibili_background_max_tokens=_int_env("BILIBILI_BACKGROUND_MAX_TOKENS", 1200),
+        bilibili_background_qq_ratio=_float_env("BILIBILI_BACKGROUND_QQ_RATIO", 0.20),
         private_whitelist=_csv_env("PRIVATE_WHITELIST"),
         allow_unknown_private_chat=_bool_env("ALLOW_UNKNOWN_PRIVATE_CHAT", False),
         private_trial_messages=_int_env("PRIVATE_TRIAL_MESSAGES", 3),
@@ -632,9 +869,9 @@ def load_config() -> AiChatConfig:
         owner_notification_group_cooldown_seconds=_int_env("OWNER_NOTIFICATION_GROUP_COOLDOWN_SECONDS", 120),
         owner_notification_user_cooldown_seconds=_int_env("OWNER_NOTIFICATION_USER_COOLDOWN_SECONDS", 300),
         enable_tts=_bool_env("ENABLE_TTS", False),
-        tts_service_url=os.getenv("TTS_SERVICE_URL", "http://127.0.0.1:7861"),
-        tts_voice=os.getenv("TTS_VOICE", "zh_kelin_raw_20260625_222137"),
-        tts_emotion=os.getenv("TTS_EMOTION", "affection"),
+        tts_service_url=_env_get("TTS_SERVICE_URL", "http://127.0.0.1:7861"),
+        tts_voice=_env_get("TTS_VOICE", "zh_kelin_raw_20260625_222137"),
+        tts_emotion=_env_get("TTS_EMOTION", "affection"),
         tts_timeout_seconds=_int_env("TTS_TIMEOUT_SECONDS", 180),
         tts_max_chars=_int_env("TTS_MAX_CHARS", 260),
         tts_max_total_seconds=_int_env("TTS_MAX_TOTAL_SECONDS", 60),
@@ -644,31 +881,32 @@ def load_config() -> AiChatConfig:
         user_blacklist=_csv_env("USER_BLACKLIST"),
         vision_provider="aliyun_bailian",
         vision_cloud_model="qwen3.7-flash",
-        aliyun_bailian_base_url=os.getenv(
+        aliyun_bailian_base_url=_env_get(
             "ALIYUN_BAILIAN_BASE_URL",
             "",
         ).strip(),
-        aliyun_bailian_api_key=os.getenv(
+        aliyun_bailian_api_key=_env_get(
             "ALIYUN_BAILIAN_API_KEY",
             "",
         ).strip(),
         enable_linyin_tts=_bool_env("ENABLE_LINYIN_TTS", False),
-        linyin_tts_voice=os.getenv("LINYIN_TTS_VOICE", "").strip(),
-        linyin_tts_emotion=os.getenv("LINYIN_TTS_EMOTION", "").strip(),
+        linyin_tts_voice=_env_get("LINYIN_TTS_VOICE", "").strip(),
+        linyin_tts_emotion=_env_get("LINYIN_TTS_EMOTION", "").strip(),
         enable_image_gen=_bool_env("ENABLE_IMAGE_GEN", False),
-        image_gen_api_key=os.getenv(
+        image_gen_api_key=_env_get(
             "IMAGE_GEN_API_KEY",
-            os.getenv("PERSONA_LLM_API_KEY", ""),
+            _env_get("PERSONA_LLM_API_KEY", ""),
         ).strip(),
-        image_gen_base_url=os.getenv(
+        image_gen_base_url=_env_get(
             "IMAGE_GEN_BASE_URL",
-            os.getenv("PERSONA_LLM_BASE_URL", ""),
+            _env_get("PERSONA_LLM_BASE_URL", ""),
         ).strip(),
-        image_gen_model=os.getenv(
-            "IMAGE_GEN_MODEL", "grok-imagine-1.0"
+        image_gen_model=_env_get(
+            "IMAGE_GEN_MODEL", "grok-imagine-image-quality"
         ).strip(),
-        image_edit_model=os.getenv(
-            "IMAGE_EDIT_MODEL", "grok-imagine-1.0-edit"
+        image_edit_model=_env_get(
+            "IMAGE_EDIT_MODEL",
+            _env_get("IMAGE_GEN_MODEL", "grok-imagine-image-quality"),
         ).strip(),
         image_gen_timeout_seconds=_security_int_env(
             "IMAGE_GEN_TIMEOUT_SECONDS", 120
@@ -692,11 +930,11 @@ def load_config() -> AiChatConfig:
             "IMAGE_GEN_MAX_REQUESTS_PER_HOUR", 10
         ),
         enable_qwen_space_edit=_bool_env("ENABLE_QWEN_SPACE_EDIT", False),
-        qwen_space_base_url=os.getenv(
+        qwen_space_base_url=_env_get(
             "QWEN_SPACE_BASE_URL",
             "https://prithivmlmods-qwen-image-edit-2511-loras-fast.hf.space",
         ).strip(),
-        qwen_space_hf_token=os.getenv("QWEN_SPACE_HF_TOKEN", "").strip(),
+        qwen_space_hf_token=_env_get("QWEN_SPACE_HF_TOKEN", "").strip(),
         qwen_space_submit_timeout_seconds=_security_int_env(
             "QWEN_SPACE_SUBMIT_TIMEOUT_SECONDS", 60
         ),

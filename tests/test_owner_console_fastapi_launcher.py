@@ -26,11 +26,13 @@ class OwnerConsoleFastApiLauncherTests(unittest.TestCase):
         self.assertIn("[switch]$EnableApprovalActions", script)
         self.assertIn("[switch]$EnableTaskActions", script)
         self.assertIn("[switch]$EnableAccessActions", script)
-        self.assertIn("$EnableProjectDocRagProbe -or", script)
-        self.assertIn("$EnableMemoryRagConsistencyProbe -or", script)
-        self.assertIn("$EnableMainLlmContractProbe", script)
-        self.assertIn("$EnableTtsSynthesisProbe", script)
-        self.assertIn("$EnableCloudVisionProbe", script)
+        self.assertIn('OWNER_CONSOLE_MANUAL_DIAGNOSTICS_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_PROJECT_DOC_RAG_PROBE_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_VISION_INFERENCE_ENABLED = "true"', script)
+        self.assertIn('OWNER_CONSOLE_CLOUD_VISION_ENABLED = "true"', script)
         self.assertIn("OWNER_CONSOLE_MEMORY_RAG_CONSISTENCY_ENABLED", script)
         self.assertIn("OWNER_CONSOLE_MAIN_LLM_CONTRACT_ENABLED", script)
         self.assertIn("OWNER_CONSOLE_TTS_SYNTHESIS_ENABLED", script)
@@ -104,6 +106,7 @@ print(json.dumps(payload, sort_keys=True))
                 "/api/v1/owner-console/access-control/user-blacklist/add",
                 "/api/v1/owner-console/access-control/user-blacklist/remove",
                 "/api/v1/owner-console/settings",
+                "/api/v1/owner-console/settings/accounts/{bot_self_id}/voice-sample",
                 "/api/v1/owner-console/memory",
                 "/api/v1/owner-console/external-read",
                 "/api/v1/owner-console/diagnostics",

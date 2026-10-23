@@ -45,14 +45,14 @@ copy .env.example .env
 然后把 `.env` 里的这一行改成你的真实 Key：
 
 ```text
-OPENAI_API_KEY=你的 DeepSeek API Key
+AIKE_LLM_API_KEY=你的 DeepSeek API Key
 ```
 
 默认 DeepSeek 配置：
 
 ```text
-OPENAI_BASE_URL=https://api.deepseek.com
-OPENAI_MODEL=deepseek-v4-flash
+AIKE_LLM_BASE_URL=https://api.deepseek.com
+AIKE_LLM_MODEL=deepseek-v4-flash
 ```
 
 ### 3. NapCatQQ

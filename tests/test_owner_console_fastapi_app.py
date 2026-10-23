@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -82,11 +83,11 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(payload["approval_actions_enabled"])
         self.assertFalse(payload["task_actions_enabled"])
         self.assertFalse(payload["access_control_actions_enabled"])
-        self.assertFalse(payload["manual_diagnostic_actions_enabled"])
+        self.assertTrue(payload["manual_diagnostic_actions_enabled"])
         self.assertFalse(payload["automatic_diagnostics_enabled"])
         self.assertFalse(payload["configuration_write_enabled"])
         self.assertFalse(payload["business_data_write_enabled"])
-        self.assertEqual(
+        self.assertCountEqual(
             payload["enabled_routes"],
             [
                 "/healthz",
@@ -98,11 +99,24 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "/api/v1/owner-console/approvals/{approval_id}",
                 "/api/v1/owner-console/access-control",
                 "/api/v1/owner-console/settings",
+                "/api/v1/owner-console/settings/accounts/{bot_self_id}/voice-sample",
                 "/api/v1/owner-console/memory",
                 "/api/v1/owner-console/diagnostics",
                 "/api/v1/owner-console/reliability",
                 "/api/v1/owner-console/external-read",
                 "/api/v1/owner-console/manual-diagnostics",
+                "/api/v1/owner-console/manual-diagnostics/project-doc-rag",
+                "/api/v1/owner-console/manual-diagnostics/memory-rag-consistency",
+                "/api/v1/owner-console/manual-diagnostics/main-llm-contract",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-preview/{run_id}",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/tts-synthesis/audio-quality/reject",
+                "/api/v1/owner-console/manual-diagnostics/vision-inference",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/reference-preview",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/accept",
+                "/api/v1/owner-console/manual-diagnostics/cloud-vision-fixed-description/response-quality/reject",
             ],
         )
 
@@ -129,7 +143,7 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertEqual(data["allowed_methods"], ["GET", "POST"])
         self.assertFalse(data["context_override_allowed"])
         self.assertFalse(data["write_routes_enabled"])
-        self.assertEqual(data["route_count"], 37)
+        self.assertEqual(data["route_count"], 38)
         self.assertFalse(data["task_action_routes_enabled"])
         self.assertFalse(data["access_action_routes_enabled"])
         rows = {row["name"]: row for row in data["rows"]}
@@ -167,31 +181,31 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertTrue(rows["reliability"]["http_api_enabled"])
         self.assertTrue(rows["external-read"]["http_api_enabled"])
         self.assertTrue(rows["manual-diagnostics"]["http_api_enabled"])
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.project-doc-rag"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.memory-rag-consistency"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.main-llm-contract"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.tts-synthesis"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.tts-audio-preview"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.tts-audio-quality-accept"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.tts-audio-quality-reject"]["http_api_enabled"]
         )
-        self.assertFalse(
+        self.assertTrue(
             rows["manual-diagnostics.vision-inference"]["http_api_enabled"]
         )
-        self.assertFalse(data["manual_runtime_action_routes_enabled"])
+        self.assertTrue(data["manual_runtime_action_routes_enabled"])
         self.assertEqual(
             rows["manual-diagnostics.project-doc-rag"]["method"],
             "POST",
@@ -1672,11 +1686,11 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
                 "PRIVATE_WHITELIST": "10001,20002",
                 "GROUP_WHITELIST": "90001",
                 "USER_BLACKLIST": "30003",
-                "OPENAI_API_KEY": "sk-http-secret",
-                "OPENAI_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
-                "OPENAI_MODEL": "fallback-chat",
-                "CHAT_LLM_MODEL": "chat-http-model",
-                "CHAT_LLM_TIMEOUT_SECONDS": "23",
+                "AIKE_LLM_API_KEY": "sk-http-secret",
+                "AIKE_LLM_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
+                "AIKE_LLM_MODEL": "fallback-chat",
+                "CHAT_LLM_API_KEY": "sk-http-chat-secret",
+                "CHAT_LLM_BASE_URL": "https://user:pass@example.com/v1?api_key=hidden",
                 "MAIN_LLM_API_KEY": "main-http-secret",
                 "MAIN_LLM_BASE_URL": "https://main.example.com/v1?token=hidden",
                 "MAIN_LLM_MODEL": "main-http-model",
@@ -1739,13 +1753,13 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
         self.assertFalse(settings_payload["web_write_enabled"])
         self.assertIsNone(settings_payload["error"])
         settings_data = settings_payload["data"]
-        self.assertEqual(settings_data["chat_model"]["model_name"], "chat-http-model")
+        self.assertEqual(settings_data["chat_model"]["model_name"], "fallback-chat")
         self.assertEqual(
             settings_data["chat_model"]["base_url_redacted"],
             "https://example.com/v1",
         )
         self.assertTrue(settings_data["chat_model"]["api_key_configured"])
-        self.assertEqual(settings_data["chat_model"]["timeout_seconds"], 23)
+        self.assertEqual(settings_data["chat_model"]["timeout_seconds"], 60)
         self.assertEqual(
             settings_data["main_agent_model"]["base_url_redacted"],
             "https://main.example.com/v1",
@@ -1791,9 +1805,10 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
 
     def test_memory_endpoint_reports_counts_flags_and_never_exposes_content(self):
         temp_dir, patcher = self.temp_database()
-        with temp_dir, patcher, patch.dict(
+        with temp_dir, patcher, patch.object(sys.modules["src.plugins.ai_chat.memory_maintenance"], "role_card_by_key", return_value=object()), patch.dict(
             os.environ,
             {
+                "BOT_PERSONA_BINDINGS": "2000000001=aike:aike",
                 "ENABLE_MEMORY_COMPRESSION": "false",
                 "ENABLE_GAP_SCENE_SUMMARIES": "true",
                 "ENABLE_LONG_TERM_MEMORY_CONTEXT": "true",
@@ -2010,10 +2025,11 @@ class OwnerConsoleFastApiSmokeTests(TempDatabaseMixin, unittest.TestCase):
 
     def test_diagnostics_endpoint_is_read_only_and_skips_external_probes(self):
         temp_dir, patcher = self.temp_database()
-        with temp_dir, patcher, patch.dict(
+        with temp_dir, patcher, patch.object(sys.modules["src.plugins.ai_chat.memory_maintenance"], "role_card_by_key", return_value=object()), patch.dict(
             os.environ,
             {
                 "BOT_OWNER_QQ": "10001",
+                "BOT_PERSONA_BINDINGS": "2000000001=aike:aike",
                 "ENABLE_PRIVATE_CHAT": "true",
                 "ENABLE_GROUP_CHAT": "true",
                 "ENABLE_MAIN_AGENT": "true",

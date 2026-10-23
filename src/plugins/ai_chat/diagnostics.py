@@ -8,16 +8,20 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+import httpx
 from nonebot import get_driver
 from openai import AsyncOpenAI
 
 from .config import AiChatConfig
+from .completion_routes import resolve_chat_completion_route
 from .database import DATABASE_PATH, connect, ensure_database
 from .failure_diagnostics import format_failure_inspection, inspect_failure_lines
 from .memory import memory_stats
 from .role_cards import ROLE_CARD_DIR, active_role_card, list_role_cards
+from .persona_maintenance import build_persona_binding_report
 from .trials import trial_stats
 from .vision import VisionInferenceCheck, check_vision_inference
+from .vision_routes import persona_vision_api_key
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -143,53 +147,567 @@ def _chat_finish_reason(response: object) -> str:
 
 
 def config_warnings(config: AiChatConfig) -> list[str]:
-    warnings: list[str] = []
-    chat_api_key = (
-        config.chat_llm_api_key
-        if config.enable_chat_graph_runtime
-        else config.openai_api_key
-    )
-    chat_model = (
-        config.chat_llm_model
-        if config.enable_chat_graph_runtime
-        else config.openai_model
-    )
+    warnings = [
+        f"{item.key}: {item.message}"
+        for item in getattr(config, "configuration_issues", ())
+    ]
+    chat_route = resolve_chat_completion_route(config)
     if not config.bot_owner_qq:
         warnings.append("BOT_OWNER_QQ 未配置，主人命令不可用。")
-    if not chat_api_key:
-        warnings.append("当前聊天运行链路的 API Key 未配置，普通聊天不可用。")
-    if not chat_model:
-        warnings.append("当前聊天运行链路的模型为空。")
+    if not chat_route.configured:
+        warnings.append(
+            "默认聊天路由配置不完整：" + ", ".join(chat_route.configuration_errors)
+        )
     if (
         config.enable_main_agent
         and config.main_agent_use_llm
         and not config.main_llm_api_key
     ):
         warnings.append("MainAgent 已启用 Main LLM，但 MAIN_LLM_API_KEY 未配置。")
-    if config.enable_vision and not config.vision_model:
-        warnings.append("ENABLE_VISION=true 但 VISION_MODEL 为空。")
+    if config.enable_vision:
+        warning_vision_provider = str(
+            getattr(config, "vision_provider", "ollama") or "ollama"
+        ).strip().lower()
+        if warning_vision_provider == "ollama" and not config.vision_model:
+            warnings.append("ENABLE_VISION=true 且 VISION_PROVIDER=ollama，但 VISION_MODEL 为空。")
     if config.summary_keep_recent_messages >= config.max_stored_messages_per_session:
         warnings.append("SUMMARY_KEEP_RECENT_MESSAGES 不小于 MAX_STORED_MESSAGES_PER_SESSION，自动压缩可能难以触发。")
     if config.max_context_messages != config.summary_keep_recent_messages:
         warnings.append("MAX_CONTEXT_MESSAGES 与 SUMMARY_KEEP_RECENT_MESSAGES 不一致，可能产生保留但不可见的原文。")
-    if config.gap_scene_summary_1_threshold < config.max_context_messages:
-        warnings.append("GAP_SCENE_SUMMARY_1_THRESHOLD 小于 MAX_CONTEXT_MESSAGES，空窗摘要可能过早触发。")
-    if config.gap_scene_summary_2_threshold <= config.gap_scene_summary_1_threshold:
-        warnings.append("GAP_SCENE_SUMMARY_2_THRESHOLD 不大于第 1 阈值，第 2 条空窗摘要可能无法正常分段。")
     if config.group_auto_reply_threshold < 20:
         warnings.append("GROUP_AUTO_REPLY_THRESHOLD 低于 20，主动回复可能过于频繁。")
+    vision_provider = str(
+        getattr(config, "vision_provider", "ollama") or "ollama"
+    ).strip().lower()
+    if config.enable_vision and vision_provider == "aliyun_bailian":
+        if not str(getattr(config, "aliyun_bailian_base_url", "") or "").strip():
+            warnings.append("云端视觉已启用，但 ALIYUN_BAILIAN_BASE_URL 未配置。")
+        if not str(getattr(config, "aliyun_bailian_api_key", "") or "").strip():
+            warnings.append("云端视觉已启用，但 ALIYUN_BAILIAN_API_KEY 未配置。")
+        if str(getattr(config, "vision_cloud_model", "") or "").strip() != "qwen3.7-flash":
+            warnings.append("云端视觉模型不是当前固定合同 qwen3.7-flash。")
+    if getattr(config, "enable_persona_llm_routing", False):
+        if not getattr(config, "persona_llm_role_card_keys", frozenset()):
+            warnings.append("人格聊天路由已开启，但 PERSONA_LLM_ROLE_CARD_KEYS 为空。")
+        for role in getattr(config, "persona_llm_role_card_keys", ()):
+            try:
+                resolve_chat_completion_route(config, role)
+            except (RuntimeError, ValueError, TypeError):
+                warnings.append("人格聊天路由已开启，但路由配置不完整；不回退默认模型。")
+                break
+    if getattr(config, "enable_persona_vision_routing", False):
+        if not getattr(config, "persona_vision_role_card_keys", frozenset()):
+            warnings.append("人格视觉路由已开启，但 PERSONA_VISION_ROLE_CARD_KEYS 为空。")
+        if not persona_vision_api_key(config):
+            warnings.append("人格视觉路由已开启，但当前视觉线路的 Key 未配置。")
+    if getattr(config, "enable_image_gen", False):
+        if not getattr(config, "image_gen_api_key", "") or not getattr(config, "image_gen_base_url", ""):
+            warnings.append("图片生成已开启，但图片接口或专属 Key 未完整配置。")
+        if not getattr(config, "image_gen_model", "") or not getattr(config, "image_edit_model", ""):
+            warnings.append("图片生成已开启，但文生图或改图模型为空。")
+    if getattr(config, "enable_qwen_space_edit", False):
+        if not getattr(config, "qwen_space_base_url", ""):
+            warnings.append("Qwen Space 改图已开启，但 Space 地址为空。")
+        if not getattr(config, "qwen_space_hf_token", ""):
+            warnings.append("Qwen Space 当前使用匿名队列，建议配置 HF Token 以提高排队优先级。")
+    if getattr(config, "enable_chat_weather", False):
+        mode = str(getattr(config, "chat_weather_mode", "off") or "off").strip().lower()
+        if mode == "off":
+            warnings.append("天气能力总开关已开启，但 CHAT_WEATHER_MODE=off，实际不会提供天气上下文。")
+    persona_routing = getattr(config, "persona_routing", None)
+    if persona_routing is not None and getattr(persona_routing, "binding_errors", ()):
+        warnings.append(
+            f"人格绑定配置存在 {len(persona_routing.binding_errors)} 个错误项，相关路由会失败关闭。"
+        )
+    report = build_persona_binding_report(config)
+    if not report["ready"]:
+        warnings.append("账号固定绑定未就绪；请检查绑定、角色卡和人格路由，异常账号禁止借用默认记忆库。")
     return warnings
+
+
+def _primary_text(config: AiChatConfig, name: str, default: str = "") -> str:
+    return str(getattr(config, name, default) or "").strip()
+
+
+def _primary_bool(config: AiChatConfig, name: str, default: bool = False) -> bool:
+    return bool(getattr(config, name, default))
+
+
+def _primary_int(config: AiChatConfig, name: str, default: int = 0) -> int:
+    try:
+        return int(getattr(config, name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _persona_binding_active(config: AiChatConfig, role_card_key: str) -> bool:
+    settings = getattr(config, "persona_routing", None)
+    if settings is None or not getattr(settings, "routing_v2_enabled", False):
+        return False
+    if getattr(settings, "binding_errors", ()):
+        return False
+    routing_bot_ids = {
+        str(item).strip()
+        for item in getattr(settings, "routing_v2_bot_ids", ())
+        if str(item).strip()
+    }
+    for binding in getattr(settings, "bindings", ()):
+        if (
+            str(getattr(binding, "role_card_key", "")).strip() == role_card_key
+            and str(getattr(binding, "bot_self_id", "")).strip() in routing_bot_ids
+        ):
+            return True
+    return False
+
+
+def _persona_memory_active(config: AiChatConfig, role_card_key: str) -> bool:
+    settings = getattr(config, "persona_routing", None)
+    if settings is None or not getattr(settings, "memory_v2_enabled", False):
+        return False
+    if not _persona_binding_active(config, role_card_key):
+        return False
+    memory_bot_ids = {
+        str(item).strip()
+        for item in getattr(settings, "memory_v2_bot_ids", ())
+        if str(item).strip()
+    }
+    return any(
+        str(getattr(binding, "role_card_key", "")).strip() == role_card_key
+        and str(getattr(binding, "bot_self_id", "")).strip() in memory_bot_ids
+        for binding in getattr(settings, "bindings", ())
+    )
+
+
+def _global_vision_ready(config: AiChatConfig) -> bool:
+    if not _primary_bool(config, "enable_vision"):
+        return False
+    provider = _primary_text(config, "vision_provider", "aliyun_bailian").lower()
+    if provider == "aliyun_bailian":
+        return bool(
+            _primary_text(config, "vision_cloud_model", "qwen3.7-flash")
+            and _primary_text(config, "aliyun_bailian_base_url")
+            and _primary_text(config, "aliyun_bailian_api_key")
+        )
+    return bool(
+        _primary_text(config, "vision_model")
+        and _primary_text(config, "vision_ollama_base_url")
+    )
+
+
+def _persona_vision_ready(config: AiChatConfig, role_card_key: str) -> bool:
+    if not _global_vision_ready(config):
+        return False
+    if not _primary_bool(config, "enable_persona_vision_routing"):
+        return False
+    if role_card_key not in getattr(config, "persona_vision_role_card_keys", ()):
+        return False
+    return bool(
+        _persona_binding_active(config, role_card_key)
+        and _primary_text(config, "persona_vision_model")
+        and _primary_text(config, "persona_vision_base_url")
+        and persona_vision_api_key(config)
+    )
+
+
+def _chat_route_ready(config: AiChatConfig) -> bool:
+    return resolve_chat_completion_route(config).configured
+
+
+def _primary_model_status(config: AiChatConfig, *, persona: bool = False) -> str:
+    try:
+        route = resolve_chat_completion_route(config, "linyin" if persona else "aike")
+    except (RuntimeError, ValueError, TypeError):
+        return "配置不完整"
+    if not route.configured:
+        return "配置不完整"
+    if persona and route.source == "persona" and not _persona_binding_active(config, "linyin"):
+        return "模型已配置，角色绑定未启用"
+    return "默认聊天线路已配置" if persona and route.source == "legacy" else "已启用"
+
+
+def _primary_chat_model_name(config: AiChatConfig, role_card_key: str) -> str:
+    try:
+        return resolve_chat_completion_route(config, role_card_key).model or "未配置"
+    except (RuntimeError, ValueError, TypeError):
+        return "未就绪（角色路由配置不完整）"
+
+
+def _primary_main_agent_status(config: AiChatConfig) -> str:
+    if not _primary_bool(config, "enable_main_agent"):
+        return "已关闭"
+    if not _primary_bool(config, "main_agent_use_llm"):
+        return "入口已启用，LLM 调用未启用"
+    if not _primary_text(config, "main_llm_model") or not _primary_text(
+        config, "main_llm_api_key"
+    ):
+        return "配置不完整"
+    return "已启用"
+
+
+def _primary_capability_lines(
+    config: AiChatConfig,
+    *,
+    persona: bool,
+) -> list[str]:
+    capabilities: list[str] = ["文字聊天"]
+    if persona:
+        if _persona_vision_ready(config, "linyin"):
+            capabilities.append("图片识别")
+        if (
+            _primary_bool(config, "enable_tts")
+            and _primary_bool(config, "enable_linyin_tts")
+            and _primary_text(config, "linyin_tts_voice")
+            and _primary_text(config, "linyin_tts_emotion")
+        ):
+            capabilities.append("语音输出")
+        if _primary_bool(config, "enable_chat_weather") and _primary_text(
+            config, "chat_weather_mode", "off"
+        ).lower() != "off":
+            capabilities.append("天气查询（主人私聊）")
+        if _persona_memory_active(config, "linyin"):
+            capabilities.append("记忆")
+        if _primary_bool(config, "enable_memory_rag") and _primary_bool(
+            config, "memory_rag_inject_in_chat"
+        ):
+            capabilities.append("Memory RAG")
+        if _primary_bool(config, "enable_shared_scene_hub"):
+            capabilities.append("共享场景互动")
+        return capabilities
+
+    if _global_vision_ready(config):
+        capabilities.append("图片识别")
+    if _primary_bool(config, "enable_tts"):
+        capabilities.append("语音输出")
+    if (
+        _primary_bool(config, "enable_local_stickers")
+        and _primary_bool(config, "enable_remote_sticker_classifier")
+        and _primary_bool(config, "enable_chat_sticker_attachments")
+    ):
+        capabilities.append("表情包识别与发送")
+    if _primary_bool(config, "enable_chat_weather") and _primary_text(
+        config, "chat_weather_mode", "off"
+    ).lower() != "off":
+        capabilities.append("天气查询（主人私聊）")
+    capabilities.append("记忆")
+    if _primary_bool(config, "enable_memory_rag") and _primary_bool(
+        config, "memory_rag_inject_in_chat"
+    ):
+        capabilities.append("Memory RAG")
+    if _primary_bool(config, "enable_group_auto_reply"):
+        capabilities.append("群聊主动回复")
+    if _primary_bool(config, "enable_shared_scene_hub"):
+        capabilities.append("共享场景互动")
+    return capabilities
+
+
+def _primary_llm_detail_lines(config: AiChatConfig) -> list[str]:
+    chat_model = _primary_chat_model_name(config, "aike")
+    persona_model = _primary_chat_model_name(config, "linyin")
+    main_model = _primary_text(config, "main_llm_model") or "未配置"
+    lines = [
+        "【主要 LLM】",
+        "",
+        "爱可 Chatbot",
+        f"模型：{chat_model}",
+        f"状态：{_primary_model_status(config)}",
+        f"能力：{'、'.join(_primary_capability_lines(config, persona=False))}",
+        "",
+        "凛音 Chatbot",
+        f"模型：{persona_model}",
+        f"状态：{_primary_model_status(config, persona=True)}",
+        f"能力：{'、'.join(_primary_capability_lines(config, persona=True))}",
+        "说明：普通群聊主动回复、表情包识别与发送目前未接入；共享群聊场景使用 DeepSeek 路线",
+        "",
+        "MainAgent",
+        f"模型：{main_model}",
+        f"状态：{_primary_main_agent_status(config)}",
+        "用途：项目上下文查询、系统状态与运行链路诊断、记忆与 RAG 查询、人格与访问状态查看、Web 公开资料检索、任务与审批工作流、生成并发送 TXT / Word / PPT",
+    ]
+    return lines
+
+
+def _primary_tts_detail_lines(config: AiChatConfig) -> list[str]:
+    enabled = _primary_bool(config, "enable_tts")
+    default_voice = _primary_text(config, "tts_voice")
+    default_emotion = _primary_text(config, "tts_emotion")
+    default_route_ready = bool(enabled and default_voice and default_emotion)
+    linyin_enabled = _primary_bool(config, "enable_linyin_tts")
+    linyin_voice = _primary_text(config, "linyin_tts_voice")
+    linyin_emotion = _primary_text(config, "linyin_tts_emotion")
+    linyin_route_ready = bool(
+        enabled and linyin_enabled and linyin_voice and linyin_emotion
+    )
+
+    if not enabled:
+        default_route_status = "未启用"
+        linyin_route_status = "未启用"
+    else:
+        default_route_status = (
+            "已接入默认语音线路" if default_route_ready else "配置不完整"
+        )
+        if not linyin_enabled:
+            linyin_route_status = "未启用"
+        else:
+            linyin_route_status = (
+                "已接入独立语音线路" if linyin_route_ready else "配置不完整"
+            )
+
+    return [
+        "【语音输出】",
+        f"功能：{'已启用' if enabled else '已关闭'}",
+        "引擎：IndexTTS2",
+        "语言：中文",
+        "使用范围：主人私聊",
+        f"启动方式：{'按需自动冷启动' if _primary_bool(config, 'tts_auto_start') else '不会自动启动'}",
+        f"文本上限：{getattr(config, 'tts_max_chars', 0)} 字",
+        f"单次总时长上限：{getattr(config, 'tts_max_total_seconds', 0)} 秒",
+        f"生成冷却：{getattr(config, 'tts_cooldown_seconds', 0)} 秒",
+        "",
+        "爱可 Chatbot",
+        f"语音输出：{default_route_status}",
+        f"音色：{'已配置' if default_voice else '未配置'}",
+        f"情绪：{'已配置' if default_emotion else '未配置'}",
+        "",
+        "凛音 Chatbot",
+        f"语音输出：{linyin_route_status}",
+        f"音色：{'已配置' if linyin_voice else '未配置'}",
+        f"情绪：{'已配置' if linyin_emotion else '未配置'}",
+    ]
+
+
+def _primary_vision_route_status(config: AiChatConfig, *, persona: bool) -> str:
+    if not _primary_bool(config, "enable_vision"):
+        return "未启用"
+    default_ready = _global_vision_ready(config)
+    if not persona:
+        return "已接入默认视觉线路" if default_ready else "配置不完整"
+
+    independent_requested = _primary_bool(
+        config, "enable_persona_vision_routing"
+    ) and "linyin" in getattr(config, "persona_vision_role_card_keys", ())
+    if independent_requested:
+        return (
+            "已接入独立视觉线路"
+            if _persona_vision_ready(config, "linyin")
+            else "配置不完整"
+        )
+    return "已接入默认视觉线路" if default_ready else "配置不完整"
+
+
+def _primary_vision_detail_lines(config: AiChatConfig) -> list[str]:
+    provider = _primary_text(config, "vision_provider", "aliyun_bailian").lower()
+    cloud_provider = provider == "aliyun_bailian"
+    default_model = (
+        _primary_text(config, "vision_cloud_model", "qwen3.7-flash")
+        if cloud_provider
+        else _primary_text(config, "vision_model")
+    ) or "未配置"
+    persona_model = _primary_text(config, "persona_vision_model") or "未配置"
+    if cloud_provider:
+        note = "说明：当前默认视觉使用云端线路；旧本地 Ollama 不作为当前主视觉线路。"
+    elif provider == "ollama":
+        note = "说明：当前默认视觉使用旧本地 Ollama 线路；云端视觉不作为当前主视觉线路。"
+    else:
+        note = "说明：当前默认视觉使用已配置线路；旧本地 Ollama 不作为当前主视觉线路。"
+
+    return [
+        "【图片识别】",
+        f"功能：{'已启用' if _primary_bool(config, 'enable_vision') else '已关闭'}",
+        "使用范围：聊天图片识别",
+        f"每轮最多图片：{getattr(config, 'vision_max_images', 0)} 张",
+        f"单图大小上限：{_human_bytes(getattr(config, 'vision_max_image_bytes', 0))}",
+        "",
+        "爱可 Chatbot",
+        f"图片识别：{_primary_vision_route_status(config, persona=False)}",
+        f"模型：{default_model}",
+        "",
+        "凛音 Chatbot",
+        f"图片识别：{_primary_vision_route_status(config, persona=True)}",
+        f"模型：{persona_model}",
+        note,
+    ]
+
+
+def _primary_image_route_status(
+    config: AiChatConfig,
+    *,
+    enabled_name: str,
+    ready: bool,
+    enabled_label: str,
+) -> str:
+    if not _primary_bool(config, enabled_name):
+        return "未启用"
+    return enabled_label if ready else "配置不完整"
+
+
+def _primary_image_detail_lines(config: AiChatConfig) -> list[str]:
+    image_enabled = _primary_bool(config, "enable_image_gen")
+    image_ready = bool(
+        image_enabled
+        and _primary_text(config, "image_gen_api_key")
+        and _primary_text(config, "image_gen_base_url")
+        and _primary_text(config, "image_gen_model")
+        and _primary_text(config, "image_edit_model")
+    )
+    qwen_enabled = _primary_bool(config, "enable_qwen_space_edit")
+    qwen_ready = bool(
+        qwen_enabled and _primary_text(config, "qwen_space_base_url")
+    )
+    qwen_download_retries = _primary_int(
+        config, "qwen_space_download_retries"
+    )
+    lines = [
+        "【图片生成与修改】",
+        "使用范围：主人私聊",
+        f"图片提示词上限：{_primary_int(config, 'image_gen_max_prompt_chars')} 字",
+        f"普通图片输入上限：{_human_bytes(_primary_int(config, 'image_gen_max_input_bytes'))}",
+        f"普通图片输出上限：{_human_bytes(_primary_int(config, 'image_gen_max_output_bytes'))}",
+        f"单次操作冷却：{_primary_int(config, 'image_gen_cooldown_seconds')} 秒",
+        f"每小时最多请求：{_primary_int(config, 'image_gen_max_requests_per_hour')} 次",
+        "",
+        "文生图",
+        f"功能：{'已启用' if image_enabled else '已关闭'}",
+        f"模型：{_primary_text(config, 'image_gen_model') or '未配置'}",
+        f"状态：{_primary_image_route_status(config, enabled_name='enable_image_gen', ready=image_ready, enabled_label='已接入图片生成线路')}",
+        f"接口等待上限：{_primary_int(config, 'image_gen_timeout_seconds')} 秒",
+        "失败处理：不会自动重新生成",
+        "",
+        "普通改图",
+        f"功能：{'已启用' if image_enabled else '已关闭'}",
+        f"模型：{_primary_text(config, 'image_edit_model') or '未配置'}",
+        f"状态：{_primary_image_route_status(config, enabled_name='enable_image_gen', ready=image_ready, enabled_label='已接入图片修改线路')}",
+        f"等待发送待修改图片：{_primary_int(config, 'image_gen_pending_edit_seconds')} 秒",
+        f"模型处理等待上限：{_primary_int(config, 'image_gen_timeout_seconds')} 秒",
+        "失败处理：不会自动重新修改",
+        "",
+        "Qwen Space 改图",
+        f"功能：{'已启用' if qwen_enabled else '已关闭'}",
+        "模型：Qwen Image Edit",
+        f"状态：{_primary_image_route_status(config, enabled_name='enable_qwen_space_edit', ready=qwen_ready, enabled_label='已接入 Qwen Space 改图线路')}",
+        f"等待发送待修改图片：{_primary_int(config, 'image_gen_pending_edit_seconds')} 秒",
+        f"提交阶段等待上限：{_primary_int(config, 'qwen_space_submit_timeout_seconds')} 秒",
+        f"排队与推理等待上限：{_primary_int(config, 'qwen_space_infer_timeout_seconds')} 秒",
+        f"结果下载单次等待上限：{_primary_int(config, 'qwen_space_download_timeout_seconds')} 秒",
+        f"结果下载失败重试：{qwen_download_retries} 次",
+        f"下载最多尝试：{qwen_download_retries + 1} 次（首次下载 + {qwen_download_retries} 次重试）",
+        f"已生成结果可重新下载：{_primary_int(config, 'qwen_space_result_ttl_seconds') // 60} 分钟内有效",
+        f"上传图片最长边：{_primary_int(config, 'qwen_space_max_side')} 像素",
+        "失败处理：下载失败时可以重新下载，不会重复调用模型",
+    ]
+    return lines
+
+
+def _primary_memory_detail_lines(config: AiChatConfig) -> list[str]:
+    memory_rag_enabled = _primary_bool(config, "enable_memory_rag")
+    project_doc_rag_enabled = _primary_bool(config, "enable_project_doc_rag")
+    return [
+        "【会话记忆与摘要】",
+        f"自动压缩：{'已启用' if _primary_bool(config, 'enable_memory_compression') else '已关闭'}",
+        f"每个会话最多保留原始消息：{_primary_int(config, 'max_stored_messages_per_session')} 条",
+        f"保留最近原文：{_primary_int(config, 'summary_keep_recent_messages')} 条",
+        f"触发摘要的最低消息数：{_primary_int(config, 'summary_min_source_messages')} 条",
+        f"每次摘要处理消息数：{_primary_int(config, 'summary_batch_messages')} 条",
+        f"带入上下文的正式摘要：{_primary_int(config, 'max_session_summaries_in_context')} 条",
+        "",
+        "【长期记忆】",
+        f"长期记忆上下文：{'已启用' if _primary_bool(config, 'enable_long_term_memory_context') else '已关闭'}",
+        f"带入上下文的长期记忆：最多 {_primary_int(config, 'max_long_term_memories_in_context')} 条",
+        "记忆类型：长期事实、长期偏好",
+        "",
+        "【空窗场景摘要】",
+        f"空窗摘要：{'已启用' if _primary_bool(config, 'enable_gap_scene_summaries') else '已关闭'}",
+        "当前策略：无状态卡时累计 25 条新消息后首次写入；已有状态卡时每新增 20 条更新",
+        "GAP_SCENE_SUMMARY_1_THRESHOLD / GAP_SCENE_SUMMARY_2_THRESHOLD：历史兼容配置，当前调度器不使用",
+        f"带入上下文的空窗摘要：最多 {_primary_int(config, 'max_gap_scene_summaries_in_context')} 条",
+        "",
+        "【MemoryRAG 记忆索引】",
+        f"功能：{'已启用' if memory_rag_enabled else '已关闭'}",
+        f"聊天注入：{'已启用' if _primary_bool(config, 'memory_rag_inject_in_chat') else '未启用'}",
+        f"向量模型：{_primary_text(config, 'memory_rag_embedding_model') or '未配置'}",
+        f"每次最多召回：{_primary_int(config, 'memory_rag_top_k')} 条",
+        f"最低匹配分数：{getattr(config, 'memory_rag_min_score', 0)}",
+        f"注入上下文上限：{_primary_int(config, 'memory_rag_max_context_chars')} 字",
+        "检索来源：",
+        f"- 长期事实记忆：{'启用' if _primary_bool(config, 'memory_rag_include_manual_facts') else '关闭'}",
+        f"- 长期偏好记忆：{'启用' if _primary_bool(config, 'memory_rag_include_manual_preferences') else '关闭'}",
+        f"- 正式会话摘要：{'启用' if _primary_bool(config, 'memory_rag_include_session_summaries') else '关闭'}",
+        f"- 短消息：{'启用' if _primary_bool(config, 'memory_rag_include_short_messages') else '关闭'}",
+        f"- 空窗摘要：{'启用' if _primary_bool(config, 'memory_rag_include_gap_scene_summaries') else '关闭'}",
+        "",
+        "【ProjectDocRAG 项目文档索引】",
+        f"功能：{'已启用' if project_doc_rag_enabled else '已关闭'}",
+        "聊天注入：未启用",
+        f"每次最多召回：{_primary_int(config, 'project_doc_rag_top_k')} 条",
+        f"最低匹配分数：{getattr(config, 'project_doc_rag_min_score', 0)}",
+        f"注入上下文上限：{_primary_int(config, 'project_doc_rag_max_context_chars')} 字",
+    ]
+
+
+def config_detail_sections(config: AiChatConfig) -> dict[str, list[str]]:
+    return {
+        "模型": _primary_llm_detail_lines(config),
+        "TTS": _primary_tts_detail_lines(config),
+        "视觉": _primary_vision_detail_lines(config),
+        "图片": _primary_image_detail_lines(config),
+        "记忆": _primary_memory_detail_lines(config),
+    }
+
+
+_CONFIG_DETAIL_ALIASES = {
+    "模型": "模型",
+    "model": "模型",
+    "聊天": "模型",
+    "chat": "模型",
+    "TTS": "TTS",
+    "tts": "TTS",
+    "语音": "TTS",
+    "视觉": "视觉",
+    "vision": "视觉",
+    "图片": "图片",
+    "image": "图片",
+    "记忆": "记忆",
+    "memory": "记忆",
+}
+
+
+def format_config_detail_status(config: AiChatConfig, section: str = "") -> str:
+    sections = config_detail_sections(config)
+    normalized = re.sub(r"\s+", "", str(section or "")).casefold()
+    if not normalized or normalized in {"帮助", "help", "?"}:
+        return "配置详情用法：/配置详情 <模型|TTS|视觉|图片|记忆>\n当前可用区域：模型、TTS、视觉、图片、记忆"
+    if normalized in {"全部", "all"}:
+        selected = list(sections)
+    else:
+        target = _CONFIG_DETAIL_ALIASES.get(normalized)
+        if target is None:
+            return f"未知配置区域：{section}\n当前可用区域：模型、TTS、视觉、图片、记忆"
+        selected = [target]
+    if selected == ["模型"]:
+        explanation = "说明：这里只展示三条主要 LLM 的业务用途，不展示 URL、Key、Token、上下文或角色卡内容。"
+    elif selected == ["TTS"]:
+        explanation = "说明：这里只展示语音功能的业务配置，不展示服务地址、Key、Token 或内部路径。"
+    elif selected == ["视觉"]:
+        explanation = "说明：这里只展示图片识别的业务配置，不展示接口地址、Key、Token、上下文或角色卡内容。"
+    elif selected == ["图片"]:
+        explanation = "说明：这里只展示图片生成与修改的业务配置，不展示接口地址、Key、Token 或内部请求参数。"
+    elif selected == ["记忆"]:
+        explanation = "说明：这里只展示记忆、摘要和索引的业务配置，不展示聊天原文、记忆正文、数据库路径、接口地址、Key 或 Token。"
+    else:
+        explanation = "说明：这里只展示业务配置，不展示 URL、Key、Token、上下文、角色卡或内部路径。"
+    lines = [
+        f"配置详情（{'、'.join(selected)}）：",
+        explanation,
+    ]
+    for name in selected:
+        lines.extend(["", f"{name}："])
+        lines.extend(f"- {line}" for line in sections[name])
+    return "\n".join(lines)
 
 
 def format_config_status(config: AiChatConfig) -> str:
     use_chat_graph = config.enable_chat_graph_runtime
     chat_runtime = "ChatGraph/RootGraph" if use_chat_graph else "兼容聊天链路"
-    chat_api_key = config.chat_llm_api_key if use_chat_graph else config.openai_api_key
-    chat_base_url = config.chat_llm_base_url if use_chat_graph else config.openai_base_url
-    chat_model = config.chat_llm_model if use_chat_graph else config.openai_model
-    chat_timeout = (
-        config.chat_llm_timeout_seconds if use_chat_graph else config.ai_timeout_seconds
-    )
+    chat_route = resolve_chat_completion_route(config)
     lines = [
         "配置状态：",
         "",
@@ -203,12 +721,13 @@ def format_config_status(config: AiChatConfig) -> str:
         f"主人转告：{_on_off(config.enable_owner_notifications)}",
         f"聊天运行链路：{chat_runtime}",
         "",
-        "聊天模型：",
-        f"Chat LLM：{_configured(chat_api_key and chat_model)}",
-        f"接口：{_redacted_url(chat_base_url)}",
-        f"模型：{chat_model or '未配置'}",
-        f"Key：{_configured(chat_api_key)}",
-        f"超时：{chat_timeout} 秒",
+        "默认聊天模型：",
+        f"Chat LLM：{_configured(chat_route.configured)}",
+        f"配置来源：{'AIKE_LLM_*' if chat_route.source == 'legacy' else 'PERSONA_LLM_*'}",
+        f"接口：{_redacted_url(chat_route.base_url)}",
+        f"模型：{chat_route.model or '未配置'}",
+        f"Key：{_configured(chat_route.api_key)}",
+        f"超时：{chat_route.timeout_seconds} 秒",
         f"温度：{config.ai_temperature}",
         "",
         "MainAgent：",
@@ -246,9 +765,13 @@ def format_config_status(config: AiChatConfig) -> str:
         "",
         "视觉：",
         f"功能：{_on_off(config.enable_vision)}",
-        f"服务地址：{_redacted_url(config.vision_ollama_base_url)}",
+        f"当前提供方：{getattr(config, 'vision_provider', 'ollama') or 'ollama'}",
+        f"云端模型：{getattr(config, 'vision_cloud_model', 'qwen3.7-flash') or 'qwen3.7-flash'}",
+        f"云端接口：{_redacted_url(getattr(config, 'aliyun_bailian_base_url', ''))}",
+        f"云端 Key：{_configured(getattr(config, 'aliyun_bailian_api_key', ''))}",
+        f"旧本地服务地址：{_redacted_url(config.vision_ollama_base_url)}",
         f"地址范围：{_service_address_scope(config.vision_ollama_base_url)}",
-        f"模型：{config.vision_model or '未配置'}",
+        f"旧本地模型：{config.vision_model or '未配置'}",
         f"超时：{config.vision_timeout_seconds} 秒",
         f"上下文：{config.vision_num_ctx}",
         f"每轮图片：{config.vision_max_images}",
@@ -280,6 +803,7 @@ def format_config_status(config: AiChatConfig) -> str:
         f"结果下载重试：{config.qwen_space_download_retries} 次",
         f"结果重取有效期：{config.qwen_space_result_ttl_seconds} 秒",
         f"上传最长边：{config.qwen_space_max_side} 像素",
+        f"JPEG 质量：{getattr(config, 'qwen_space_jpeg_quality', 0)}",
         "",
         "语音：",
         f"功能：{_on_off(config.enable_tts)}",
@@ -307,6 +831,7 @@ def format_config_status(config: AiChatConfig) -> str:
         "",
         "说明：以上是当前进程加载的配置值，不代表服务在线、模型已加载或端到端功能已经验证。",
         "运行状态请使用 /agent 执行系统诊断任务，或对应的状态命令。",
+        "业务配置详情请使用：/配置详情 <模型|TTS|视觉|图片|记忆>。",
     ]
     warnings = config_warnings(config)
     if warnings:
@@ -358,28 +883,64 @@ def role_card_status_lines() -> list[str]:
         return [f"角色卡：失败 {_short_error(exc)}"]
 
 
-async def check_chat_api(config: AiChatConfig) -> CheckResult:
-    if not config.openai_api_key:
-        return CheckResult(False, "OPENAI_API_KEY 未配置")
+async def check_chat_api(
+    config: AiChatConfig,
+    role_card_key: str = "",
+    *,
+    completion_route: str = "auto",
+) -> CheckResult:
+    """Probe one effective route with public fixed prompts and no tool calls."""
     try:
-        client = AsyncOpenAI(
-            api_key=config.openai_api_key,
-            base_url=config.openai_base_url,
-            timeout=CHAT_TEST_TIMEOUT_SECONDS,
+        route = resolve_chat_completion_route(
+            config, role_card_key, completion_route=completion_route
         )
+        if not route.configured:
+            return CheckResult(
+                False, "聊天路由配置不完整：" + ", ".join(route.configuration_errors)
+            )
+        messages = [
+            {"role": "system", "content": CHAT_TEST_SYSTEM_PROMPT},
+            {"role": "user", "content": CHAT_TEST_USER_PROMPT},
+        ]
+        timeout = min(route.timeout_seconds, CHAT_TEST_TIMEOUT_SECONDS)
         started = time.monotonic()
-        response = await client.chat.completions.create(
-            model=config.openai_model,
-            messages=[
-                {"role": "system", "content": CHAT_TEST_SYSTEM_PROMPT},
-                {"role": "user", "content": CHAT_TEST_USER_PROMPT},
-            ],
-            temperature=0,
-        )
-        elapsed = time.monotonic() - started
-        content = _extract_chat_content(response)
-        if not content:
+        if route.provider == "ollama":
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{route.base_url.rstrip('/')}/api/chat",
+                    json={
+                        "model": route.model,
+                        "messages": messages,
+                        "stream": False,
+                        "keep_alive": 0,
+                        "options": {
+                            "temperature": 0,
+                            "num_ctx": route.num_ctx,
+                            "num_predict": min(32, route.max_tokens),
+                        },
+                    },
+                )
+                response.raise_for_status()
+            message = response.json().get("message", {})
+            content = message.get("content", "") if isinstance(message, dict) else ""
+            content = content.strip() if isinstance(content, str) else ""
+            reason = "未返回文本"
+        else:
+            async with AsyncOpenAI(
+                api_key=route.api_key,
+                base_url=route.base_url,
+                timeout=timeout,
+                max_retries=0,
+            ) as client:
+                response = await client.chat.completions.create(
+                    model=route.model,
+                    messages=messages,
+                    temperature=0,
+                )
+            content = _extract_chat_content(response)
             reason = _chat_finish_reason(response)
+        elapsed = time.monotonic() - started
+        if not content:
             return CheckResult(False, f"返回空内容，用时 {elapsed:.1f} 秒，结束原因：{reason}")
         return CheckResult(True, f"正常，用时 {elapsed:.1f} 秒")
     except Exception as exc:
@@ -443,14 +1004,34 @@ def _vision_inference_is_low_quality_repeat(inference: VisionInferenceCheck) -> 
 
 
 def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]) -> str:
-    status = check_ollama(config) if config.enable_vision else OllamaStatus(CheckResult(False, "视觉未开启"), None)
+    vision_provider = str(
+        getattr(config, "vision_provider", "ollama") or "ollama"
+    ).strip().lower()
+    cloud_provider = vision_provider == "aliyun_bailian"
+    if not config.enable_vision:
+        status = OllamaStatus(CheckResult(False, "视觉未开启"), None)
+    elif cloud_provider:
+        status = OllamaStatus(
+            CheckResult(True, "当前使用云端视觉，未主动发起远程探针"),
+            None,
+        )
+    else:
+        status = check_ollama(config)
+
+    cloud_model = getattr(config, "vision_cloud_model", "qwen3.7-flash") or "qwen3.7-flash"
+    cloud_base_url = getattr(config, "aliyun_bailian_base_url", "") or ""
+    cloud_api_key = getattr(config, "aliyun_bailian_api_key", "") or ""
     lines = [
         "视觉状态：",
         f"视觉识图：{_on_off(config.enable_vision)}",
-        f"Ollama 地址：{config.vision_ollama_base_url}",
-        f"Ollama 服务：{status.service.detail}",
-        f"视觉模型：{config.vision_model}",
-        f"模型存在：{_yes_no(status.model_exists) if status.model_exists is not None else '无法检查'}",
+        f"当前提供方：{vision_provider}",
+        f"云端模型：{cloud_model}",
+        f"云端接口：{_redacted_url(cloud_base_url)}",
+        f"云端 Key：{_configured(cloud_api_key)}",
+        f"旧本地 Ollama 地址：{_redacted_url(config.vision_ollama_base_url)}",
+        f"旧本地 Ollama 服务：{status.service.detail if not cloud_provider else '未执行（当前不是本地提供方）'}",
+        f"旧本地视觉模型：{config.vision_model}",
+        f"本地模型存在：{_yes_no(status.model_exists) if status.model_exists is not None else '未检查'}",
         f"视觉上下文：{config.vision_num_ctx}",
         "",
         f"图片缓存：{image_cache_stats.get('total', 0)} 条",
@@ -461,7 +1042,11 @@ def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]
         f"每轮最多图片：{config.vision_max_images}",
         f"单图大小上限：{config.vision_max_image_bytes} 字节",
     ]
-    inference = _vision_inference_check_for_status(config, status)
+    inference = (
+        _skipped_vision_inference("云端视觉未主动发起远程推理探针")
+        if cloud_provider
+        else _vision_inference_check_for_status(config, status)
+    )
     lines.insert(7, f"推理自检：{inference.detail}")
     if (
         config.enable_vision
@@ -476,7 +1061,7 @@ def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]
                 *vision_runner_recovery_suggestion(config.vision_model),
             ]
         )
-    elif config.enable_vision and not status.service.ok:
+    elif config.enable_vision and not cloud_provider and not status.service.ok:
         lines.extend(
             [
                 "",
@@ -486,7 +1071,12 @@ def format_vision_status(config: AiChatConfig, image_cache_stats: dict[str, int]
                 "3. 避免 ollama app.exe 托盘程序用默认中文路径接管。",
             ]
         )
-    elif config.enable_vision and status.service.ok and status.model_exists is False:
+    elif (
+        config.enable_vision
+        and not cloud_provider
+        and status.service.ok
+        and status.model_exists is False
+    ):
         lines.extend(["", "建议：", f"运行 ollama pull {config.vision_model}"])
     return "\n".join(lines)
 
@@ -532,26 +1122,37 @@ def vision_troubleshoot_findings(
     joined_vision = "\n".join(vision_lines)
     findings: list[str] = []
     vision_disabled = "视觉识图：关闭" in joined_vision
+    cloud_provider = "当前提供方：aliyun_bailian" in joined_vision
     if vision_disabled:
         findings.append("视觉功能当前关闭，图片不会进入识图推理。")
 
     if not vision_disabled:
-        service_line = _first_line_with_prefix(vision_lines, "Ollama 服务：")
-        if service_line and not any(
-            marker in service_line.lower() for marker in ("ok", "正常")
-        ):
-            findings.append(f"Ollama 服务需要关注：{service_line}")
-        if "模型存在：否" in joined_vision:
-            model_line = _first_line_with_prefix(vision_lines, "视觉模型：")
-            findings.append(f"视觉模型不存在或未拉取：{model_line or '请检查视觉模型配置'}")
+        if cloud_provider:
+            if "云端接口：未配置" in joined_vision or "云端接口：(empty)" in joined_vision:
+                findings.append("云端视觉接口未配置，无法发起识图请求。")
+            if "云端 Key：未配置" in joined_vision:
+                findings.append("云端视觉 API Key 未配置，无法发起识图请求。")
+        else:
+            service_line = _first_line_with_prefix(vision_lines, "Ollama 服务：")
+            if service_line and not any(
+                marker in service_line.lower() for marker in ("ok", "正常")
+            ):
+                findings.append(f"Ollama 服务需要关注：{service_line}")
+            if "模型存在：否" in joined_vision:
+                model_line = _first_line_with_prefix(vision_lines, "视觉模型：")
+                findings.append(f"视觉模型不存在或未拉取：{model_line or '请检查视觉模型配置'}")
         inference_line = _first_line_with_prefix(vision_lines, "推理自检：")
         if inference_line and not any(
             marker in inference_line.lower()
             for marker in ("ok", "正常", "成功", "跳过")
         ):
             findings.append(f"视觉推理自检需要关注：{inference_line}")
-            if "低质量重复内容" in inference_line and "模型存在：是" in joined_vision:
-                model_line = _first_line_with_prefix(vision_lines, "视觉模型：")
+            if (
+                not cloud_provider
+                and "低质量重复内容" in inference_line
+                and ("模型存在：是" in joined_vision or "本地模型存在：是" in joined_vision)
+            ):
+                model_line = _first_line_with_prefix(vision_lines, "视觉模型：") or _first_line_with_prefix(vision_lines, "旧本地视觉模型：")
                 model = model_line.partition("：")[2].strip()
                 findings.extend(vision_runner_recovery_suggestion(model))
 
@@ -560,7 +1161,9 @@ def vision_troubleshoot_findings(
     if _vision_detail_metric_positive(root_lines, "low_quality"):
         findings.append("最近 RootGraph 视觉观测里出现过低质量识图输出，请查看 RootGraph 证据。")
     if recent_errors:
-        findings.append("最近错误日志非空，优先核对其中的 Ollama/vision/image 相关错误。")
+        findings.append(
+            "最近错误日志非空，优先核对其中的云端视觉、Ollama、vision 或 image 阶段错误。"
+        )
     if not findings:
         findings.append("未发现明确的视觉链路硬错误；如果 QQ 侧仍异常，下一步优先看最近一条 RootGraph Vision detail 是否有图片 URL、缓存和低质量输出计数。")
     return findings
@@ -674,7 +1277,28 @@ def clear_error_log() -> str:
 
 async def format_diagnostics(config: AiChatConfig, image_cache_stats: dict[str, int]) -> str:
     chat = await check_chat_api(config)
-    ollama = check_ollama(config) if config.enable_vision else OllamaStatus(CheckResult(False, "视觉未开启"), None)
+    vision_provider = str(
+        getattr(config, "vision_provider", "ollama") or "ollama"
+    ).strip()
+    ollama = (
+        check_ollama(config)
+        if config.enable_vision and vision_provider == "ollama"
+        else OllamaStatus(
+            CheckResult(
+                True,
+                "云端提供方已配置，未主动发起远程探针"
+                if config.enable_vision
+                else "视觉未开启",
+            ),
+            None,
+        )
+    )
+    chat_route = resolve_chat_completion_route(config)
+    vision_model = (
+        getattr(config, "vision_cloud_model", "qwen3.7-flash")
+        if vision_provider == "aliyun_bailian"
+        else config.vision_model
+    )
     db_lines = database_status_lines()
     role_lines = role_card_status_lines()
     errors = recent_error_lines(5)
@@ -685,14 +1309,15 @@ async def format_diagnostics(config: AiChatConfig, image_cache_stats: dict[str, 
         f"机器人：{config.bot_name}",
         f"环境：{driver.env}",
         "",
-        f"聊天接口：{_configured(config.openai_api_key)}",
-        f"聊天模型：{config.openai_model}",
+        f"默认聊天接口：{_configured(chat_route.configured)}",
+        f"默认聊天模型：{chat_route.model}",
         f"聊天连通性：{chat.detail}",
         "",
         f"视觉识图：{_on_off(config.enable_vision)}",
-        f"Ollama：{ollama.service.detail}",
-        f"视觉模型：{config.vision_model}",
-        f"模型存在：{_yes_no(ollama.model_exists) if ollama.model_exists is not None else '无法检查'}",
+        f"视觉提供方：{vision_provider}",
+        f"视觉模型：{vision_model}",
+        f"视觉服务检查：{ollama.service.detail}",
+        f"本地模型存在：{_yes_no(ollama.model_exists) if ollama.model_exists is not None else '未执行（非本地提供方）'}",
         "",
         *db_lines,
         "",

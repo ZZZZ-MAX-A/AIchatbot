@@ -92,6 +92,8 @@ class OwnerRuntimeFactory:
     development_context_report_for_event: DevelopmentContextReportForEvent | None = None
     system_diagnostics_report_for_event: SystemDiagnosticsReportForEvent | None = None
     external_read_report_for_event: ExternalReadReportForEvent | None = None
+    load_persona_prompt_for_event: EventTextProvider | None = None
+    persona_status_lines_for_event: Callable[[Any], list[str]] | None = None
 
     def agent_context(self, event: Any) -> OwnerAgentContext:
         return OwnerAgentContext(
@@ -122,8 +124,14 @@ class OwnerRuntimeFactory:
             run_diagnostics=run_owner_read_diagnostics,
             run_memory_retrieval=run_owner_read_memory_retrieval,
             run_memory_admin=run_owner_read_memory_admin,
-            load_persona_prompt=self.load_persona_prompt,
-            persona_status_lines=self.persona_status_lines,
+            load_persona_prompt=(
+                (lambda: self.load_persona_prompt_for_event(event))
+                if self.load_persona_prompt_for_event is not None else self.load_persona_prompt
+            ),
+            persona_status_lines=(
+                (lambda: self.persona_status_lines_for_event(event))
+                if self.persona_status_lines_for_event is not None else self.persona_status_lines
+            ),
             role_card_list_lines=self.role_card_list_lines,
             model_config_status_lines=self.model_config_status_lines,
             access_overview_lines=self.access_overview_lines,

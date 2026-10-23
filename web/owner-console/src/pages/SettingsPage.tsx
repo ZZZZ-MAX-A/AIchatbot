@@ -13,6 +13,7 @@ import type {
 } from "../api/ownerConsoleTypes";
 import { ErrorState } from "../components/ErrorState";
 import { StatusBadge } from "../components/StatusBadge";
+import { AccountPersonaPanel } from "../components/AccountPersonaPanel";
 
 type SettingsPageState = {
   loading: boolean;
@@ -148,7 +149,7 @@ function RoleCardsPanel({ rows }: { rows: OwnerConsoleRoleCardRow[] }) {
               </div>
               <StatusBadge
                 label="状态"
-                value={card.active ? "当前启用" : "可选"}
+                value={card.active ? "默认账号固定卡" : "本地文件"}
                 tone={card.active ? "success" : "neutral"}
               />
             </article>
@@ -157,6 +158,36 @@ function RoleCardsPanel({ rows }: { rows: OwnerConsoleRoleCardRow[] }) {
       ) : (
         <p className="diagnostic-card__empty">暂无角色卡</p>
       )}
+    </section>
+  );
+}
+
+function PersonaBindingsPanel({ settings }: { settings: OwnerConsoleSettingsSnapshot }) {
+  const bindings = settings.persona_bindings;
+  const memoryModes: Record<string, string> = {
+    legacy: "现有默认记忆库",
+    persona_v2_persistent: "人格独立记忆库",
+    persona_v2_ephemeral: "进程短时记忆",
+    invalid: "配置异常，操作已阻止",
+  };
+  return (
+    <section className="detail-panel">
+      <h2>账号固定绑定</h2>
+      <p>每个账号使用固定角色卡；绑定变更通过部署配置维护。</p>
+      {bindings?.rows.length ? bindings.rows.map((row) => (
+        <article className="role-card-row" key={row.account_label}>
+          <div>
+            <strong>{row.account_label} · {row.persona_id}</strong>
+            <span>角色卡：{row.role_card_key} · {row.role_card_available ? "可用" : "不可用"}</span>
+            <span>聊天模型：{row.chat_model || "未配置"}</span>
+            <span>记忆：{memoryModes[row.memory_mode] || row.memory_mode}</span>
+            {row.errors.length ? <span>配置错误：{row.errors.join("、")}</span> : null}
+          </div>
+          <StatusBadge label="绑定状态" value={row.ready ? "正常" : "异常"}
+            tone={row.ready ? "success" : "danger"} />
+        </article>
+      )) : <p className="diagnostic-card__empty">未配置账号绑定</p>}
+      {bindings?.errors.length ? <p>绑定配置错误：{bindings.errors.join("、")}</p> : null}
     </section>
   );
 }
@@ -316,7 +347,7 @@ export function SettingsPage() {
               <strong>{settings.generated_at || "未知"}</strong>
             </div>
             <StatusBadge
-              label="当前角色卡"
+              label="默认账号固定角色卡"
               value={settings.active_role_card_key || "未配置"}
               tone={settings.active_role_card_key ? "success" : "warning"}
             />
@@ -329,8 +360,13 @@ export function SettingsPage() {
             />
           </section>
 
+          {settings.account_personas ? <AccountPersonaPanel profiles={settings.account_personas} bindingErrors={settings.persona_bindings?.errors} />
+            : <PersonaBindingsPanel settings={settings} />}
+
+          <details className="persona-extra-settings">
+            <summary>项目现有共用设置</summary>
           <section className="detail-grid">
-            <ModelPanel title="聊天模型" model={settings.chat_model} />
+            <ModelPanel title="默认聊天模型" model={settings.chat_model} />
             <ModelPanel
               title="MainAgent 模型"
               model={settings.main_agent_model}
@@ -345,6 +381,7 @@ export function SettingsPage() {
             <RoleCardsPanel rows={settings.role_cards} />
             <BoundaryPanel settings={settings} />
           </section>
+          </details>
         </>
       ) : null}
     </section>

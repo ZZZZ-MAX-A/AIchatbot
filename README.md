@@ -71,7 +71,7 @@ cd D:\AIchatbot
 
 ```powershell
 cd D:\AIchatbot
-.\scripts\start-napcat-shell.ps1 2700318954
+.\scripts\start-napcat-shell.ps1 2000000001
 ```
 
 ## 测试

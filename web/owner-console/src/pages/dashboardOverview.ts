@@ -6,6 +6,7 @@ import type {
   OwnerConsoleReliabilityTrendItem,
 } from "../api/ownerConsoleTypes";
 import type { OwnerConsoleWebWriteState } from "../app/ownerConsoleAccessStatus";
+import { diagnosticSections } from "../app/diagnosticSections";
 
 export type DashboardTone = "neutral" | "success" | "warning" | "danger";
 export type DashboardSourceKey =
@@ -87,28 +88,6 @@ const RELIABILITY_PRIORITY: Record<string, number> = {
   unresolved: 1,
   insufficient_evidence: 2,
   recovered: 3,
-};
-
-const DIAGNOSTIC_SECTIONS = [
-  "bot_status",
-  "diagnostics",
-  "config",
-  "vision",
-  "image_cache",
-  "memory",
-  "tts",
-  "recent_errors",
-] as const;
-
-const DIAGNOSTIC_SECTION_LABELS: Record<(typeof DIAGNOSTIC_SECTIONS)[number], string> = {
-  bot_status: "Bot 状态",
-  diagnostics: "运行诊断",
-  config: "配置",
-  vision: "图片识别",
-  image_cache: "图片缓存",
-  memory: "记忆",
-  tts: "语音",
-  recent_errors: "最近错误",
 };
 
 function sourceGeneratedAt(
@@ -291,7 +270,7 @@ export function buildDashboardOverview(
   }
 
   const failedDiagnosticSections = input.diagnostics
-    ? DIAGNOSTIC_SECTIONS.filter((key) => !input.diagnostics?.[key].ok)
+    ? diagnosticSections(input.diagnostics).filter((item) => !item.section.ok)
     : [];
   if (failedDiagnosticSections.length > 0) {
     attentionItems.push({
@@ -299,7 +278,7 @@ export function buildDashboardOverview(
       tone: "warning",
       title: `${failedDiagnosticSections.length} 个诊断区块读取异常`,
       detail: `读取异常：${failedDiagnosticSections
-        .map((key) => DIAGNOSTIC_SECTION_LABELS[key])
+        .map((item) => item.attentionLabel)
         .join("、")}。这表示快照区块无法读取，不直接等价于外部服务故障。`,
       route: "/owner-console/diagnostics",
       actionLabel: "查看诊断",

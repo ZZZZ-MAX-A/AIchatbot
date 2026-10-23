@@ -21,7 +21,7 @@ class PersonaBehaviorDiagnosticTests(unittest.TestCase):
 
     def scope(self, **overrides):
         values = {
-            "bot_self_id": "2993614760",
+            "bot_self_id": "3000000001",
             "persona_id": "linyin",
             "role_card_key": "linyin",
             "chat_type": "private",
@@ -128,3 +128,24 @@ class PersonaBehaviorDiagnosticIntegrationContractTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, handler)
+
+    def test_normal_chat_promotes_current_identity_above_persisted_history(self):
+        start = self.plugin_source.index("async def generate_chat_text_response(")
+        end = self.plugin_source.index("\n\nasync def generate_legacy_chat_response", start)
+        generator = self.plugin_source[start:end]
+
+        self.assertIn(
+            "extra_system_context=combine_ephemeral_chat_system_contexts(\n"
+            "                current_message_identity_context(event),",
+            generator,
+        )
+
+    def test_persona_chat_filters_stale_identity_refusals_without_deleting_history(self):
+        start = self.plugin_source.index("async def build_chat_prompt_context(")
+        end = self.plugin_source.index("\n\nasync def describe_chat_images", start)
+        builder = self.plugin_source[start:end]
+
+        self.assertIn(
+            "if persona_memory_id:\n        history = filter_stale_identity_refusal_messages(history)",
+            builder,
+        )

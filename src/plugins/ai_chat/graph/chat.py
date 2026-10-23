@@ -234,7 +234,10 @@ class ChatGraphRunner:
         *,
         persisted_turn: PersistedTurn | None,
     ) -> ChatState:
-        runtime = replace(state.runtime, response=result.reply)
+        artifacts = dict(state.runtime.artifacts)
+        if result.tool_observation:
+            artifacts["encyclopedia_graph"] = dict(result.tool_observation)
+        runtime = replace(state.runtime, response=result.reply, artifacts=artifacts)
         return replace(
             state,
             runtime=runtime,

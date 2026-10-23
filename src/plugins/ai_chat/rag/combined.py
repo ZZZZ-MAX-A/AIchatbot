@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .memory_time import memory_document_time_context
+
 from dataclasses import dataclass, field
 
 from .memory_index import MEMORY_SOURCE_TYPES, memory_document_visible, trim_results_to_context_chars as trim_memory_results
@@ -116,6 +118,7 @@ def format_combined_rag_results(results: CombinedRagResults) -> str:
             if document.session_key:
                 lines.append(f"   会话：{document.session_key}")
             lines.append(f"   相似度：{result.score:.3f}")
+            lines.append(memory_document_time_context(document))
             lines.append(document.content)
             lines.append("")
     else:

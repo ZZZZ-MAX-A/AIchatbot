@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from threading import RLock
+from datetime import datetime, timezone
+
+from .memory_time import message_time_context, parse_memory_time
 
 
 Message = dict[str, str]
@@ -31,8 +34,10 @@ class EphemeralPersonaHistory:
         if max_messages <= 0:
             return history
         with self._lock:
-            messages = list(self._messages.get(session_key, ()))
-        history.extend(messages[-max_messages:])
+            messages = [dict(item) for item in self._messages.get(session_key, ())]
+        now = datetime.now(timezone.utc)
+        history.extend({"role": item["role"], "content": message_time_context(item, now=now) + "\n" + item["content"]}
+                       for item in messages[-max_messages:])
         return history
 
     def append_turn(
@@ -41,16 +46,30 @@ class EphemeralPersonaHistory:
         user_content: str,
         assistant_content: str,
         max_messages: int,
+        *,
+        user_occurred_at: str | None = None,
     ) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        instant = parse_memory_time(user_occurred_at)
         turn = [
-            {"role": "user", "content": user_content.strip()},
-            {"role": "assistant", "content": assistant_content.strip()},
+            {"role": "user", "content": user_content.strip(), "created_at": now,
+             "occurred_at": instant.isoformat() if instant else "", "time_kind": "platform_sent" if instant else ""},
+            {"role": "assistant", "content": assistant_content.strip(), "created_at": now},
         ]
         with self._lock:
             messages = self._messages.setdefault(session_key, [])
             messages.extend(turn)
             if max_messages > 0 and len(messages) > max_messages:
                 del messages[:-max_messages]
+
+    def mark_assistant_sent(self, session_key: str, content: str, *, sent_at: str | None = None) -> None:
+        instant = parse_memory_time(sent_at) or datetime.now(timezone.utc)
+        with self._lock:
+            messages = self._messages.get(session_key, ())
+            if messages and messages[-1]["role"] == "assistant" and messages[-1]["content"] == content.strip():
+                message = messages[-1]
+                if message.get("time_kind") != "reply_sent":
+                    message.update(occurred_at=instant.astimezone(timezone.utc).isoformat(timespec="seconds"), time_kind="reply_sent")
 
     def clear(self, session_key: str) -> None:
         with self._lock:

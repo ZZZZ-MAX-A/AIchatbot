@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -13,9 +14,11 @@ import type {
   OwnerConsoleCloudVisionEnvelope,
 } from "../api/ownerConsoleTypes";
 import { DiagnosticsPage } from "./DiagnosticsPage";
+import { alternateMemoryScope, defaultMemoryScope, memoryScopeSettings } from "../testFixtures/memoryScope";
 
-const { getDiagnostics, getManualDiagnostics, runProjectDocRagProbe, runMemoryRagConsistency, runMainLlmContract, runTtsSynthesis, getTtsAudioPreview, acceptTtsAudioQuality, rejectTtsAudioQuality, runCloudVisionFixedDescription, getCloudVisionReferencePreview, acceptCloudVisionResponseQuality, rejectCloudVisionResponseQuality } = vi.hoisted(() => ({
+const { getSettings, getDiagnostics, getManualDiagnostics, runProjectDocRagProbe, runMemoryRagConsistency, runMainLlmContract, runTtsSynthesis, getTtsAudioPreview, acceptTtsAudioQuality, rejectTtsAudioQuality, runCloudVisionFixedDescription, getCloudVisionReferencePreview, acceptCloudVisionResponseQuality, rejectCloudVisionResponseQuality } = vi.hoisted(() => ({
   getDiagnostics: vi.fn(),
+  getSettings: vi.fn(),
   getManualDiagnostics: vi.fn(),
   runProjectDocRagProbe: vi.fn(),
   runMemoryRagConsistency: vi.fn(),
@@ -39,6 +42,7 @@ vi.mock("../api/ownerConsoleApi", () => {
     OwnerConsoleApiError,
     ownerConsoleApi: {
       getDiagnostics,
+      getSettings,
       getManualDiagnostics,
       runProjectDocRagProbe,
       runMemoryRagConsistency,
@@ -228,6 +232,7 @@ const actionEnvelope: OwnerConsoleProjectDocRagProbeEnvelope = {
 };
 
 const memoryAttentionRun = {
+  memory_scope: defaultMemoryScope,
   run_id: 1,
   workflow: "memory_rag_index_consistency",
   status: "completed",
@@ -673,6 +678,7 @@ const cloudVisionAcceptedEnvelope: OwnerConsoleCloudVisionEnvelope = {
 };
 
 beforeEach(() => {
+  getSettings.mockResolvedValue(memoryScopeSettings);
   getManualDiagnostics.mockResolvedValue(manualEnvelope);
   getTtsAudioPreview.mockResolvedValue(
     new Blob([new Uint8Array(64)], { type: "audio/wav" }),
@@ -697,13 +703,113 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+async function openAdvancedChecks() {
+  const details = await screen.findByLabelText("高级维护检查") as HTMLDetailsElement;
+  if (!details.open) fireEvent.click(details.querySelector("summary")!);
+  expect(details.open).toBe(true);
+}
+
 describe("DiagnosticsPage", () => {
+  it("binds the confirmation and evidence request to the chosen account, hiding other scope results", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({ ...manualEnvelope, data: {
+      ...manualEnvelope.data!, manual_diagnostic_actions_enabled: true, memory_rag_consistency_enabled: true,
+      supported_workflows: ["memory_rag_index_consistency"], memory_rag_consistency_latest_run: memoryAttentionRun,
+    } });
+    runMemoryRagConsistency.mockResolvedValue({ ...memoryActionEnvelope, data: { ...memoryAttentionRun, memory_scope: alternateMemoryScope } });
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
+    await screen.findByText("2 个活动记忆文档缺少当前有效向量");
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: alternateMemoryScope.bot_self_id } });
+    await waitFor(() => expect(getDiagnostics).toHaveBeenLastCalledWith(expect.any(AbortSignal), alternateMemoryScope));
+    await waitFor(() => expect(screen.queryByText("2 个活动记忆文档缺少当前有效向量")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "手动检查一致性" }));
+    expect(screen.getByLabelText("确认 MemoryRAG 索引一致性手动检查").textContent).toContain("凛音 · data/persona-memory/linyin.db");
+    fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
+    await screen.findByText("2 个活动记忆文档缺少当前有效向量");
+    expect(runMemoryRagConsistency).toHaveBeenCalledWith(undefined, alternateMemoryScope);
+  });
+
+  it("cancels the old memory confirmation after switching account", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({ ...manualEnvelope, data: {
+      ...manualEnvelope.data!, manual_diagnostic_actions_enabled: true, memory_rag_consistency_enabled: true,
+      supported_workflows: ["memory_rag_index_consistency"],
+    } });
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
+    await openAdvancedChecks();
+    fireEvent.click(screen.getByRole("button", { name: "手动检查一致性" }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: alternateMemoryScope.bot_self_id } });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认并执行" })).toBeNull());
+    expect(runMemoryRagConsistency).not.toHaveBeenCalled();
+  });
+
+  it("keeps other checks available when the requested memory account is invalid", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({ ...manualEnvelope, data: {
+      ...manualEnvelope.data!, manual_diagnostic_actions_enabled: true, memory_rag_consistency_enabled: true,
+      project_doc_rag_probe_enabled: true, supported_workflows: ["memory_rag_index_consistency", "project_doc_rag_fixed_retrieval"],
+    } });
+    render(<MemoryRouter initialEntries={["/diagnostics?memory_account=unbound"]}><DiagnosticsPage /></MemoryRouter>);
+    await openAdvancedChecks();
+    expect(screen.getByRole("button", { name: "手动检查一致性" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "手动检查检索" }).hasAttribute("disabled")).toBe(false);
+    expect(getDiagnostics).toHaveBeenCalledWith(expect.any(AbortSignal), null);
+    expect(document.body.textContent).not.toContain("message_count=350");
+  });
+
+  it("ignores late diagnostic reads after switching account", async () => {
+    let finish: (value: OwnerConsoleDiagnosticsEnvelope) => void = () => {};
+    getDiagnostics.mockImplementationOnce(() => new Promise<OwnerConsoleDiagnosticsEnvelope>((resolve) => { finish = resolve; }));
+    getDiagnostics.mockResolvedValueOnce({ ...envelope, data: { ...envelope.data!, memory: section("memory", ["message_count=222"]) } });
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
+    await waitFor(() => expect(getDiagnostics).toHaveBeenCalledTimes(1));
+    const signal = getDiagnostics.mock.calls[0][0] as AbortSignal;
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: alternateMemoryScope.bot_self_id } });
+    await screen.findByText("message_count=222");
+    expect(signal.aborted).toBe(true);
+    await act(async () => finish(envelope));
+    expect(screen.queryByText("message_count=350")).toBeNull();
+  });
+
+  it("keeps advanced checks collapsed until requested and never runs a check on expansion", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: { ...manualEnvelope.data!, manual_diagnostic_actions_enabled: true, project_doc_rag_probe_enabled: true, supported_workflows: ["project_doc_rag_probe"] },
+    });
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
+    const advanced = await screen.findByLabelText("高级维护检查") as HTMLDetailsElement;
+    expect(advanced.open).toBe(false);
+    await openAdvancedChecks();
+    expect(screen.getByRole("button", { name: "手动检查检索" })).toBeTruthy();
+    expect(runProjectDocRagProbe).not.toHaveBeenCalled();
+    expect(runMemoryRagConsistency).not.toHaveBeenCalled();
+    expect(runMainLlmContract).not.toHaveBeenCalled();
+    expect(runTtsSynthesis).not.toHaveBeenCalled();
+    expect(runCloudVisionFixedDescription).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "账号、人物、模型与音色配置" }).getAttribute("href")).toBe("/owner-console/settings");
+  });
+
+  it("automatically exposes an advanced check needing attention after reload", async () => {
+    getDiagnostics.mockResolvedValue(envelope);
+    getManualDiagnostics.mockResolvedValue({
+      ...manualEnvelope,
+      data: { ...manualEnvelope.data!, manual_diagnostic_actions_enabled: true, memory_rag_consistency_enabled: true, supported_workflows: ["memory_rag_index_consistency"], memory_rag_consistency_latest_run: memoryActionEnvelope.data },
+    });
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
+    const advanced = await screen.findByLabelText("高级维护检查") as HTMLDetailsElement;
+    expect(advanced.open).toBe(true);
+    expect(screen.getByRole("button", { name: "手动检查一致性" })).toBeTruthy();
+    expect(runMemoryRagConsistency).not.toHaveBeenCalled();
+  });
+
   it("separates snapshot readability from service health and keeps raw evidence visible", async () => {
     getDiagnostics.mockResolvedValue(envelope);
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     const reading = await screen.findByLabelText("当前诊断解读");
     expect(reading.textContent).toContain("8 个诊断区块均已读取");
+    expect((screen.getByLabelText("诊断技术证据") as HTMLDetailsElement).open).toBe(false);
     expect(reading.textContent).toContain("不等同于功能异常");
     expect(screen.getByLabelText("诊断快照状态").textContent).toContain("8/8");
 
@@ -736,10 +842,11 @@ describe("DiagnosticsPage", () => {
       },
     });
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     const reading = await screen.findByLabelText("当前诊断解读");
-    expect(reading.textContent).toContain("1 个读取异常：云端视觉配置");
+    expect(reading.textContent).toContain("1 个读取异常：视觉配置");
+    expect((screen.getByLabelText("诊断技术证据") as HTMLDetailsElement).open).toBe(true);
     const visionCard = document.querySelector('[data-section="vision"]');
     expect(visionCard).not.toBeNull();
     expect(visionCard?.className).toContain("diagnostic-card--attention");
@@ -749,7 +856,7 @@ describe("DiagnosticsPage", () => {
 
   it("keeps empty observations concise and exposes no write controls", async () => {
     getDiagnostics.mockResolvedValue(envelope);
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     await screen.findByLabelText("当前诊断解读");
     expect(screen.getByLabelText("手动诊断配置状态").textContent).toContain(
@@ -780,14 +887,16 @@ describe("DiagnosticsPage", () => {
     });
     runProjectDocRagProbe.mockResolvedValue(actionEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
+    await openAdvancedChecks();
     fireEvent.click(await screen.findByRole("button", { name: "手动检查检索" }));
     expect(screen.getByText("确认执行一次固定真实检索？")).toBeTruthy();
     expect(runProjectDocRagProbe).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
     await screen.findByText("固定项目文档真实检索通过");
+    expect((screen.getByLabelText("高级维护检查") as HTMLDetailsElement).open).toBe(true);
     expect(runProjectDocRagProbe).toHaveBeenCalledTimes(1);
     expect(screen.getByText("code=project_doc_rag_probe_succeeded")).toBeTruthy();
     expect(screen.getByText("项目文档 1601")).toBeTruthy();
@@ -809,8 +918,9 @@ describe("DiagnosticsPage", () => {
     });
     runMemoryRagConsistency.mockResolvedValue(memoryActionEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
+    await openAdvancedChecks();
     fireEvent.click(await screen.findByRole("button", { name: "手动检查一致性" }));
     expect(screen.getByText("确认执行一次只读一致性核对？")).toBeTruthy();
     expect(runMemoryRagConsistency).not.toHaveBeenCalled();
@@ -818,7 +928,7 @@ describe("DiagnosticsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
     await screen.findByText("2 个活动记忆文档缺少当前有效向量");
     expect(runMemoryRagConsistency).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("需要关注")).toBeTruthy();
+    expect(screen.getAllByText("需要关注").length).toBeGreaterThan(0);
     expect(screen.getByText("活动文档 37")).toBeTruthy();
     expect(screen.getByText("有效向量 35")).toBeTruthy();
     expect(screen.getByText("缺失向量 2")).toBeTruthy();
@@ -844,8 +954,9 @@ describe("DiagnosticsPage", () => {
     });
     runMainLlmContract.mockResolvedValue(mainLlmActionEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
+    await openAdvancedChecks();
     fireEvent.click(await screen.findByRole("button", { name: "手动检查问答" }));
     expect(screen.getByText("确认执行一次远程固定问答？")).toBeTruthy();
     expect(runMainLlmContract).not.toHaveBeenCalled();
@@ -879,7 +990,7 @@ describe("DiagnosticsPage", () => {
     });
     runTtsSynthesis.mockResolvedValue(ttsActionEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     fireEvent.click(
       await screen.findByRole("button", { name: "检查启动、合成与清理" }),
@@ -976,7 +1087,7 @@ describe("DiagnosticsPage", () => {
     });
     rejectTtsAudioQuality.mockResolvedValue(ttsRejectedEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     fireEvent.click(
       await screen.findByRole("button", { name: "加载临时试听" }),
@@ -1009,7 +1120,7 @@ describe("DiagnosticsPage", () => {
     });
     runCloudVisionFixedDescription.mockResolvedValue(cloudVisionActionEnvelope);
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
 
     fireEvent.click(
       await screen.findByRole("button", { name: "检查百炼表情描述与感情色彩" }),
@@ -1100,12 +1211,13 @@ describe("DiagnosticsPage", () => {
       }),
     );
 
-    render(<DiagnosticsPage />);
+    render(<MemoryRouter><DiagnosticsPage /></MemoryRouter>);
     fireEvent.click(
       await screen.findByRole("button", { name: "检查启动、合成与清理" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "确认并执行" }));
 
+    await openAdvancedChecks();
     const projectButton = within(
       screen.getByLabelText("项目文档 RAG 手动检查"),
     ).getByRole("button") as HTMLButtonElement;

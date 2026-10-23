@@ -1,5 +1,6 @@
 import { RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   OwnerConsoleApiError,
@@ -7,31 +8,30 @@ import {
 } from "../api/ownerConsoleApi";
 import type {
   OwnerConsoleDiagnosticsEnvelope,
-  OwnerConsoleHealthSnapshot,
   OwnerConsoleMainLlmContractRun,
   OwnerConsoleManualDiagnosticRun,
   OwnerConsoleManualDiagnosticsEnvelope,
   OwnerConsoleManualDiagnosticsSnapshot,
   OwnerConsoleMemoryRagConsistencyRun,
   OwnerConsoleRuntimeBoundary,
-  OwnerConsoleTextSnapshotSection,
   OwnerConsoleTtsSynthesisRun,
   OwnerConsoleCloudVisionRun,
 } from "../api/ownerConsoleTypes";
 import { ErrorState } from "../components/ErrorState";
 import { StatusBadge } from "../components/StatusBadge";
+import { ManualDiagnosticConfirmation } from "../components/ManualDiagnosticConfirmation";
+import { MemoryScopePanel } from "../components/MemoryScopePanel";
+import { useMemoryMaintenanceScope } from "../hooks/useMemoryMaintenanceScope";
+import { sameMemoryScope, type MemoryMaintenanceScope } from "../api/memoryScopeTypes";
+import { diagnosticSections, type DiagnosticSection } from "../app/diagnosticSections";
 
 type DiagnosticsPageState = {
   loading: boolean;
   diagnostics: OwnerConsoleDiagnosticsEnvelope | null;
   manualDiagnostics: OwnerConsoleManualDiagnosticsEnvelope | null;
   error: Error | null;
-};
-
-type DiagnosticSection = {
-  key: string;
-  label: string;
-  section: OwnerConsoleTextSnapshotSection;
+  manualError?: Error | null;
+  memoryScope?: MemoryMaintenanceScope | null;
 };
 
 type BooleanInterpretation = {
@@ -53,6 +53,41 @@ const EVIDENCE_LABELS: Record<string, string> = {
   enable_main_agent: "MainAgent",
   main_agent_use_llm: "MainAgent 模型规划",
   enable_chat_graph_runtime: "聊天图运行时",
+  chat_runtime: "聊天执行链路",
+  config_snapshot_kind: "配置读取方式",
+  config_issue_count: "配置提示数量",
+  chat_route_scope: "聊天配置范围",
+  chat_effective_route: "默认聊天模型路由",
+  chat_provider: "默认聊天提供方",
+  chat_model: "默认聊天模型",
+  chat_base_url: "默认聊天接口",
+  chat_credentials_configured: "默认聊天凭据",
+  chat_configuration_complete: "默认聊天配置完整性",
+  chat_timeout_seconds: "默认聊天超时（秒）",
+  persona_llm_enabled: "人格聊天路由",
+  persona_llm_model: "人格聊天模型",
+  persona_llm_credentials_configured: "人格聊天凭据",
+  persona_llm_role_key_count: "人格聊天角色数量",
+  persona_vision_enabled: "人格视觉路由",
+  persona_vision_model: "人格视觉模型",
+  persona_vision_credentials_configured: "人格视觉凭据",
+  persona_vision_role_key_count: "人格视觉角色数量",
+  image_gen_enabled: "普通图片功能",
+  image_gen_model: "文生图模型",
+  image_edit_model: "改图模型",
+  image_gen_credentials_configured: "普通图片凭据",
+  qwen_space_enabled: "Qwen Space 改图",
+  qwen_space_token_configured: "Qwen HF Token",
+  qwen_space_base_url_configured: "Qwen Space 地址",
+  tts_enabled: "TTS 功能",
+  weather_enabled: "天气功能",
+  weather_mode: "天气模式",
+  memory_rag_enabled: "MemoryRAG",
+  project_doc_rag_enabled: "ProjectDocRAG",
+  embedding_provider: "Embedding 提供方",
+  embedding_model: "Embedding 模型",
+  embedding_base_url: "Embedding 接口",
+  scene_hub_enabled: "SceneHub",
   enable_vision: "视觉功能",
   vision_provider: "视觉提供方",
   vision_model: "视觉模型",
@@ -69,6 +104,10 @@ const EVIDENCE_LABELS: Record<string, string> = {
   image_cache_ttl_seconds: "图片缓存有效期",
   private_image_wait_seconds: "私聊图片等待时间",
   memory_snapshot: "记忆统计快照",
+  memory_persona: "记忆人物",
+  memory_database: "记忆库",
+  memory_scope_revision: "记忆范围版本",
+  memory_error_code: "记忆范围异常",
   message_count: "消息记录数",
   session_count: "会话数",
   session_summary_count: "会话摘要数",
@@ -89,6 +128,7 @@ const EVIDENCE_LABELS: Record<string, string> = {
 };
 
 const BOOLEAN_INTERPRETATIONS: Record<string, BooleanInterpretation> = {
+  chat_configuration_complete: { true: "配置完整", false: "配置不完整" },
   web_write_enabled: { true: "已开放", false: "未开放" },
   external_probes_executed: {
     true: "已执行",
@@ -108,6 +148,21 @@ const BOOLEAN_INTERPRETATIONS: Record<string, BooleanInterpretation> = {
   enable_main_agent: { true: "已启用", false: "未启用" },
   main_agent_use_llm: { true: "已启用", false: "未启用" },
   enable_chat_graph_runtime: { true: "已启用", false: "未启用" },
+  chat_credentials_configured: { true: "已配置", false: "未配置" },
+  persona_llm_enabled: { true: "已启用", false: "未启用" },
+  persona_llm_credentials_configured: { true: "已配置", false: "未配置" },
+  persona_vision_enabled: { true: "已启用", false: "未启用" },
+  persona_vision_credentials_configured: { true: "已配置", false: "未配置" },
+  image_gen_enabled: { true: "已启用", false: "未启用" },
+  image_gen_credentials_configured: { true: "已配置", false: "未配置" },
+  qwen_space_enabled: { true: "已启用", false: "未启用" },
+  qwen_space_token_configured: { true: "已配置", false: "未配置" },
+  qwen_space_base_url_configured: { true: "已配置", false: "未配置" },
+  tts_enabled: { true: "已启用", false: "未启用" },
+  weather_enabled: { true: "已启用", false: "未启用" },
+  memory_rag_enabled: { true: "已启用", false: "未启用" },
+  project_doc_rag_enabled: { true: "已启用", false: "未启用" },
+  scene_hub_enabled: { true: "已启用", false: "未启用" },
   enable_vision: { true: "已启用", false: "未启用" },
   workspace_configured: { true: "已配置", false: "未配置" },
   credentials_configured: { true: "已配置", false: "未配置" },
@@ -157,7 +212,15 @@ const VALUE_INTERPRETATIONS: Record<string, Record<string, string>> = {
   transport: { http: "HTTP" },
   mode: { read_only: "只读" },
   diagnostics_snapshot: { read_only: "只读" },
-  memory_snapshot: { collected: "已采集" },
+  memory_snapshot: { collected: "已采集", unavailable: "不可读取" },
+  config_snapshot_kind: {
+    process_environment_snapshot: "当前进程环境快照",
+    explicit_mapping: "显式配置快照",
+  },
+  chat_runtime: { chat_graph: "ChatGraph / RootGraph", legacy: "兼容聊天链路" },
+  chat_route_scope: { default: "默认聊天；角色专用路由单独配置" },
+  chat_effective_route: { legacy: "默认聊天路由", persona: "角色专用路由" },
+  chat_provider: { openai: "OpenAI 兼容接口", ollama: "Ollama" },
 };
 
 function apiErrorDescription(error: Error): string {
@@ -171,21 +234,6 @@ function apiErrorDescription(error: Error): string {
     return `后端返回 HTTP ${error.status}：${error.message}`;
   }
   return error.message;
-}
-
-function diagnosticSections(
-  diagnostics: OwnerConsoleHealthSnapshot,
-): DiagnosticSection[] {
-  return [
-    { key: "bot_status", label: "Owner Console", section: diagnostics.bot_status },
-    { key: "diagnostics", label: "只读诊断边界", section: diagnostics.diagnostics },
-    { key: "config", label: "功能配置", section: diagnostics.config },
-    { key: "vision", label: "云端视觉配置", section: diagnostics.vision },
-    { key: "image_cache", label: "图片缓存", section: diagnostics.image_cache },
-    { key: "memory", label: "记忆与 RAG 统计", section: diagnostics.memory },
-    { key: "tts", label: "语音配置", section: diagnostics.tts },
-    { key: "recent_errors", label: "近期错误取证", section: diagnostics.recent_errors },
-  ];
 }
 
 function interpretEvidenceLine(line: string): {
@@ -377,25 +425,15 @@ function ManualProjectDocRagPanel({
       ) : null}
 
       {confirming ? (
-        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认项目文档 RAG 手动检查">
-          <strong>确认执行一次固定真实检索？</strong>
-          <p>
+        <ManualDiagnosticConfirmation
+          label="确认项目文档 RAG 手动检查"
+          title="确认执行一次固定真实检索？"
+          running={running}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        >
             本次只调用 embedding 一次，不自动重试；不会写索引、读取私人记忆、运行 DevContext 或执行后续诊断。
-          </p>
-          <div>
-            <button className="secondary-button" type="button" onClick={onCancel}>
-              取消
-            </button>
-            <button
-              className="manual-diagnostic-action"
-              type="button"
-              onClick={onConfirm}
-              disabled={running}
-            >
-              {running ? "正在检查" : "确认并执行"}
-            </button>
-          </div>
-        </div>
+        </ManualDiagnosticConfirmation>
       ) : (
         <button
           className="manual-diagnostic-action"
@@ -416,6 +454,7 @@ function ManualProjectDocRagPanel({
 
 function ManualMemoryRagConsistencyPanel({
   snapshot,
+  scope,
   confirming,
   running,
   actionError,
@@ -424,6 +463,7 @@ function ManualMemoryRagConsistencyPanel({
   onConfirm,
 }: {
   snapshot: OwnerConsoleManualDiagnosticsSnapshot;
+  scope: MemoryMaintenanceScope | null;
   confirming: boolean;
   running: boolean;
   actionError: string;
@@ -436,7 +476,8 @@ function ManualMemoryRagConsistencyPanel({
   }
 
   const latest: OwnerConsoleMemoryRagConsistencyRun | null =
-    snapshot.memory_rag_consistency_latest_run;
+    sameMemoryScope(snapshot.memory_rag_consistency_latest_run?.memory_scope, scope)
+      ? snapshot.memory_rag_consistency_latest_run : null;
   const latestRunning = latest?.status === "running";
   const tone =
     latest?.outcome === "succeeded"
@@ -472,6 +513,7 @@ function ManualMemoryRagConsistencyPanel({
       <p className="manual-diagnostic-panel__description">
         只读核对活动记忆文档、当前有效向量与来源映射；不读取记忆正文，不执行私人记忆检索或 embedding，不重建索引。
       </p>
+      <p>{scope ? `本次范围：${scope.persona_name} · ${scope.database}` : "请先选择有效的记忆维护账号。"}</p>
 
       {latest ? (
         <div className="manual-diagnostic-result">
@@ -507,31 +549,22 @@ function ManualMemoryRagConsistencyPanel({
       ) : null}
 
       {confirming ? (
-        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认 MemoryRAG 索引一致性手动检查">
-          <strong>确认执行一次只读一致性核对？</strong>
-          <p>
+        <ManualDiagnosticConfirmation
+          label="确认 MemoryRAG 索引一致性手动检查"
+          title="确认执行一次只读一致性核对？"
+          running={running}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        >
+            本次范围：{scope?.persona_name} · {scope?.database}。
             本次不读取记忆正文、不执行检索或 embedding，不写数据库、不重建索引，也不自动修复缺失向量。
-          </p>
-          <div>
-            <button className="secondary-button" type="button" onClick={onCancel}>
-              取消
-            </button>
-            <button
-              className="manual-diagnostic-action"
-              type="button"
-              onClick={onConfirm}
-              disabled={running}
-            >
-              {running ? "正在检查" : "确认并执行"}
-            </button>
-          </div>
-        </div>
+        </ManualDiagnosticConfirmation>
       ) : (
         <button
           className="manual-diagnostic-action"
           type="button"
           onClick={onRequestConfirmation}
-          disabled={running || latestRunning}
+          disabled={running || latestRunning || !scope}
         >
           {running || latestRunning ? "正在检查" : "手动检查一致性"}
         </button>
@@ -634,25 +667,15 @@ function ManualMainLlmContractPanel({
       ) : null}
 
       {confirming ? (
-        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认 Main LLM 固定问答检查">
-          <strong>确认执行一次远程固定问答？</strong>
-          <p>
+        <ManualDiagnosticConfirmation
+          label="确认 Main LLM 固定问答检查"
+          title="确认执行一次远程固定问答？"
+          running={running}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        >
             本次会产生一次少量 token 的 Main LLM 调用；只发送固定合成问题，不发送主人输入、聊天历史、项目文档或私人记忆，不开放工具，也不自动重试。
-          </p>
-          <div>
-            <button className="secondary-button" type="button" onClick={onCancel}>
-              取消
-            </button>
-            <button
-              className="manual-diagnostic-action"
-              type="button"
-              onClick={onConfirm}
-              disabled={running}
-            >
-              {running ? "正在检查" : "确认并执行"}
-            </button>
-          </div>
-        </div>
+        </ManualDiagnosticConfirmation>
       ) : (
         <button
           className="manual-diagnostic-action"
@@ -864,25 +887,15 @@ function ManualTtsSynthesisPanel({
       ) : null}
 
       {confirming ? (
-        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认 TTS 一键生命周期检查">
-          <strong>确认执行一次 TTS 生命周期诊断？</strong>
-          <p>
+        <ManualDiagnosticConfirmation
+          label="确认 TTS 一键生命周期检查"
+          title="确认执行一次 TTS 生命周期诊断？"
+          running={running}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        >
             若服务明确离线，诊断会启动一个受管理 TTS 子进程，等待健康后完成一次固定合成；服务原本在线则直接复用且绝不停止。验证后只清理本次 artifact ID 的最终 WAV 与分段目录，并且只停止本次持有句柄的进程。不会扫描或结束其他 Python 进程，不会发送 QQ、写业务数据库或可靠性事件，也不会调用 LLM/RAG 或自动重试合成。
-          </p>
-          <div>
-            <button className="secondary-button" type="button" onClick={onCancel}>
-              取消
-            </button>
-            <button
-              className="manual-diagnostic-action"
-              type="button"
-              onClick={onConfirm}
-              disabled={running}
-            >
-              {running ? "正在检查" : "确认并执行"}
-            </button>
-          </div>
-        </div>
+        </ManualDiagnosticConfirmation>
       ) : (
         <button
           className="manual-diagnostic-action"
@@ -1099,25 +1112,15 @@ function ManualCloudVisionPanel({
       ) : null}
 
       {confirming ? (
-        <div className="manual-diagnostic-confirmation" role="group" aria-label="确认阿里云百炼固定图片检查">
-          <strong>确认把固定 owner_private 表情发送到阿里云百炼？</strong>
-          <p>
+        <ManualDiagnosticConfirmation
+          label="确认阿里云百炼固定图片检查"
+          title="确认把固定 owner_private 表情发送到阿里云百炼？"
+          running={running}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        >
             本次只读取正式表情库固定登记且哈希锁定的 aike_affection_005.png，并发送到阿里云百炼北京地域，调用 qwen3.7-flash 一次。应用无法控制供应商侧的数据处理与留存；不会读取聊天、QQ 临时图片或图片缓存，不会写业务数据库、发送 QQ、自动重试或切换其他模型。
-          </p>
-          <div>
-            <button className="secondary-button" type="button" onClick={onCancel}>
-              取消
-            </button>
-            <button
-              className="manual-diagnostic-action"
-              type="button"
-              onClick={onConfirm}
-              disabled={running}
-            >
-              {running ? "正在检查" : "确认并执行"}
-            </button>
-          </div>
-        </div>
+        </ManualDiagnosticConfirmation>
       ) : (
         <button
           className="manual-diagnostic-action"
@@ -1185,6 +1188,12 @@ function RuntimeBoundaryPanel({
 }
 
 export function DiagnosticsPage() {
+  const selection = useMemoryMaintenanceScope();
+  const memoryScope = selection.scope;
+  const memoryScopeRef = useRef(memoryScope);
+  memoryScopeRef.current = memoryScope;
+  const [advancedExpanded, setAdvancedExpanded] = useState(false);
+  const [evidenceExpanded, setEvidenceExpanded] = useState(false);
   const [state, setState] = useState<DiagnosticsPageState>({
     loading: true,
     diagnostics: null,
@@ -1239,21 +1248,24 @@ export function DiagnosticsPage() {
     }));
 
     try {
-      const [diagnostics, manualDiagnostics] = await Promise.all([
-        ownerConsoleApi.getDiagnostics(signal),
-        ownerConsoleApi.getManualDiagnostics(signal),
+      const [diagnosticsResult, manualResult] = await Promise.allSettled([
+        ownerConsoleApi.getDiagnostics(signal, memoryScope),
+        ownerConsoleApi.getManualDiagnostics(signal, memoryScope ?? undefined),
       ]);
       if (signal?.aborted) {
         return;
       }
+      if (diagnosticsResult.status === "rejected") throw diagnosticsResult.reason;
       setState({
         loading: false,
-        diagnostics,
-        manualDiagnostics,
+        diagnostics: diagnosticsResult.value,
+        memoryScope,
+        manualDiagnostics: manualResult.status === "fulfilled" ? manualResult.value : null,
+        manualError: manualResult.status === "rejected" ? new Error("当前范围的检查记录不可读取，请刷新账号绑定后重试。") : null,
         error: null,
       });
     } catch (exc) {
-      if (exc instanceof DOMException && exc.name === "AbortError") {
+      if (signal?.aborted || (exc instanceof DOMException && exc.name === "AbortError")) {
         return;
       }
       setState({
@@ -1263,15 +1275,26 @@ export function DiagnosticsPage() {
         error: exc instanceof Error ? exc : new Error("诊断快照加载失败"),
       });
     }
-  }, []);
+  }, [memoryScope]);
 
   useEffect(() => {
+    if (selection.loading) return;
     const controller = new AbortController();
     void load(controller.signal);
     return () => controller.abort();
-  }, [load]);
+  }, [load, selection.loading]);
 
-  const diagnostics = state.diagnostics?.data;
+  useEffect(() => {
+    setMemoryConfirming(false);
+    setMemoryError("");
+  }, [memoryScope]);
+
+  const rawDiagnostics = state.diagnostics?.data;
+  const diagnostics = rawDiagnostics && !selection.loading && sameMemoryScope(state.memoryScope, memoryScope)
+    ? rawDiagnostics : rawDiagnostics ? {
+      ...rawDiagnostics,
+      memory: { title: "memory", ok: false, summary_text: "当前记忆范围尚不可读取", display_lines: ["memory_snapshot=unavailable"], error: "请选择有效账号并等待当前范围的快照。" },
+    } : null;
   const manualDiagnostics = state.manualDiagnostics?.data;
   const manualDiagnosticsUnavailable = Boolean(
     manualDiagnostics &&
@@ -1284,6 +1307,23 @@ export function DiagnosticsPage() {
   const externalProbesSkipped = diagnostics?.diagnostics.display_lines.includes(
     "external_probes_executed=false",
   );
+  const advancedChecks = manualDiagnostics ? [
+    { label: "项目文档 RAG", enabled: manualDiagnostics.project_doc_rag_probe_enabled, latest: manualDiagnostics.project_doc_rag_latest_run },
+    { label: "人格记忆索引", enabled: manualDiagnostics.memory_rag_consistency_enabled, latest: sameMemoryScope(manualDiagnostics.memory_rag_consistency_latest_run?.memory_scope, memoryScope) ? manualDiagnostics.memory_rag_consistency_latest_run : null },
+    { label: "Main LLM", enabled: manualDiagnostics.main_llm_contract_enabled, latest: manualDiagnostics.main_llm_contract_latest_run },
+  ].filter((check) => check.enabled) : [];
+  const advancedNeedsAttention = Boolean(
+    probeError || memoryError || mainLlmError || probeRunning || memoryRunning || mainLlmRunning ||
+    advancedChecks.some((check) => check.latest && check.latest.outcome !== "succeeded"),
+  );
+  const anyManualActionRunning = probeRunning || memoryRunning || mainLlmRunning ||
+    ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning;
+  useEffect(() => {
+    if (advancedNeedsAttention) setAdvancedExpanded(true);
+  }, [advancedNeedsAttention]);
+  useEffect(() => {
+    if (failedSections.length > 0) setEvidenceExpanded(true);
+  }, [failedSections.length]);
 
   const runProjectDocRagProbe = useCallback(async () => {
     setProbeRunning(true);
@@ -1317,10 +1357,14 @@ export function DiagnosticsPage() {
   }, []);
 
   const runMemoryRagConsistency = useCallback(async () => {
+    const target = memoryScope;
+    if (!target) return;
     setMemoryRunning(true);
     setMemoryError("");
     try {
-      const result = await ownerConsoleApi.runMemoryRagConsistency();
+      const result = await ownerConsoleApi.runMemoryRagConsistency(undefined, target);
+      if (!sameMemoryScope(memoryScopeRef.current, target)) return;
+      if (!sameMemoryScope(result.data?.memory_scope, target)) throw new Error("检查结果范围与当前人物不一致，请刷新后重新确认。");
       setState((current) => {
         if (!current.manualDiagnostics?.data) {
           return current;
@@ -1341,11 +1385,12 @@ export function DiagnosticsPage() {
       });
       setMemoryConfirming(false);
     } catch (exc) {
+      if (!sameMemoryScope(memoryScopeRef.current, target)) return;
       setMemoryError(apiErrorDescription(exc instanceof Error ? exc : new Error("一致性检查失败")));
     } finally {
       setMemoryRunning(false);
     }
-  }, []);
+  }, [memoryScope]);
 
   const runMainLlmContract = useCallback(async () => {
     setMainLlmRunning(true);
@@ -1583,15 +1628,17 @@ export function DiagnosticsPage() {
         <button
           className="refresh-button"
           type="button"
-          onClick={() => void load()}
-          disabled={state.loading}
+          onClick={() => void selection.reload()}
+          disabled={selection.loading || state.loading || anyManualActionRunning}
         >
           <RefreshCw aria-hidden="true" size={16} />
           <span>刷新诊断</span>
         </button>
       </header>
 
-      {state.loading ? (
+      <MemoryScopePanel {...selection} disabled={anyManualActionRunning} onSelect={selection.select} />
+
+      {state.loading || selection.loading ? (
         <section className="loading-panel" role="status">
           正在加载诊断快照
         </section>
@@ -1648,6 +1695,14 @@ export function DiagnosticsPage() {
             </p>
           </section>
 
+          <nav className="maintenance-links" aria-label="维护职责入口">
+            <Link to="/owner-console/settings">账号、人物、模型与音色配置</Link>
+            <Link to="/owner-console/memory">按账号查看人格记忆统计与策略</Link>
+            <Link to="/owner-console/reliability">历史故障与恢复记录</Link>
+          </nav>
+
+          {state.manualError ? <p role="alert" className="manual-diagnostic-panel__error">{state.manualError.message}</p> : null}
+
           {manualDiagnosticsUnavailable ? (
             <section
               className="manual-diagnostic-panel manual-diagnostic-panel--disabled"
@@ -1672,42 +1727,6 @@ export function DiagnosticsPage() {
 
           {manualDiagnostics ? (
             <>
-              <ManualProjectDocRagPanel
-                snapshot={manualDiagnostics}
-                confirming={probeConfirming}
-                running={probeRunning || memoryRunning || mainLlmRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
-                actionError={probeError}
-                onRequestConfirmation={() => {
-                  setProbeError("");
-                  setProbeConfirming(true);
-                }}
-                onCancel={() => setProbeConfirming(false)}
-                onConfirm={() => void runProjectDocRagProbe()}
-              />
-              <ManualMemoryRagConsistencyPanel
-                snapshot={manualDiagnostics}
-                confirming={memoryConfirming}
-                running={memoryRunning || probeRunning || mainLlmRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
-                actionError={memoryError}
-                onRequestConfirmation={() => {
-                  setMemoryError("");
-                  setMemoryConfirming(true);
-                }}
-                onCancel={() => setMemoryConfirming(false)}
-                onConfirm={() => void runMemoryRagConsistency()}
-              />
-              <ManualMainLlmContractPanel
-                snapshot={manualDiagnostics}
-                confirming={mainLlmConfirming}
-                running={mainLlmRunning || probeRunning || memoryRunning || ttsRunning || ttsReviewRunning || visionRunning || visionReviewRunning}
-                actionError={mainLlmError}
-                onRequestConfirmation={() => {
-                  setMainLlmError("");
-                  setMainLlmConfirming(true);
-                }}
-                onCancel={() => setMainLlmConfirming(false)}
-                onConfirm={() => void runMainLlmContract()}
-              />
               <ManualTtsSynthesisPanel
                 snapshot={manualDiagnostics}
                 confirming={ttsConfirming}
@@ -1748,27 +1767,91 @@ export function DiagnosticsPage() {
                 onAcceptQuality={(runId) => void reviewVisionResponseQuality(runId, true)}
                 onRejectQuality={(runId) => void reviewVisionResponseQuality(runId, false)}
               />
+              {advancedChecks.length > 0 ? (
+                <details className="maintenance-section" open={advancedExpanded} onToggle={(event) => setAdvancedExpanded(event.currentTarget.open)} aria-label="高级维护检查">
+                  <summary>
+                    <strong>高级维护检查</strong>
+                    <span>项目文档 RAG、人格记忆索引与 Main LLM 合同；按需展开</span>
+                    {advancedChecks.map((check) => (
+                      <StatusBadge
+                        key={check.label}
+                        label={check.label}
+                        value={check.latest?.status === "running" ? "执行中" : check.latest?.outcome === "succeeded" ? "通过" : check.latest ? "需要关注" : "未执行"}
+                        tone={check.latest?.outcome === "succeeded" ? "success" : check.latest ? "warning" : "neutral"}
+                      />
+                    ))}
+                  </summary>
+                  <div className="maintenance-section__content">
+                    <p className="panel-note">MemoryRAG 核对使用上方选定的人格记忆库；其余检查使用各自配置。展开此区块不会执行检查。</p>
+                    <ManualProjectDocRagPanel
+                      snapshot={manualDiagnostics}
+                      confirming={probeConfirming}
+                      running={anyManualActionRunning}
+                      actionError={probeError}
+                      onRequestConfirmation={() => {
+                        setProbeError("");
+                        setProbeConfirming(true);
+                      }}
+                      onCancel={() => setProbeConfirming(false)}
+                      onConfirm={() => void runProjectDocRagProbe()}
+                    />
+                    <ManualMemoryRagConsistencyPanel
+                      snapshot={manualDiagnostics}
+                      scope={memoryScope}
+                      confirming={memoryConfirming}
+                      running={anyManualActionRunning}
+                      actionError={memoryError}
+                      onRequestConfirmation={() => {
+                        setMemoryError("");
+                        setMemoryConfirming(true);
+                      }}
+                      onCancel={() => setMemoryConfirming(false)}
+                      onConfirm={() => void runMemoryRagConsistency()}
+                    />
+                    <ManualMainLlmContractPanel
+                      snapshot={manualDiagnostics}
+                      confirming={mainLlmConfirming}
+                      running={anyManualActionRunning}
+                      actionError={mainLlmError}
+                      onRequestConfirmation={() => {
+                        setMainLlmError("");
+                        setMainLlmConfirming(true);
+                      }}
+                      onCancel={() => setMainLlmConfirming(false)}
+                      onConfirm={() => void runMainLlmContract()}
+                    />
+                  </div>
+                </details>
+              ) : null}
             </>
           ) : null}
 
-          <div className="diagnostic-card-grid">
-            {sections.map((item) => (
-              <SnapshotCard key={item.key} item={item} />
-            ))}
-          </div>
+          <details className="maintenance-section" open={evidenceExpanded} onToggle={(event) => setEvidenceExpanded(event.currentTarget.open)} aria-label="诊断技术证据">
+            <summary>
+              <strong>技术证据与运行边界</strong>
+              <span>{failedSections.length > 0 ? "发现读取异常，已展开证据" : "原始配置、统计和图观测；按需展开"}</span>
+            </summary>
+            <div className="maintenance-section__content">
+              <div className="diagnostic-card-grid">
+                {sections.map((item) => (
+                  <SnapshotCard key={item.key} item={item} />
+                ))}
+              </div>
 
-          <section className="detail-grid">
-            <ObservationPanel
-              title="MainAgent 观测"
-              lines={diagnostics.observations.main_agent}
-            />
-            <ObservationPanel
-              title="RootGraph 观测"
-              lines={diagnostics.observations.root_graph}
-            />
-          </section>
+              <section className="detail-grid">
+                <ObservationPanel
+                  title="MainAgent 观测"
+                  lines={diagnostics.observations.main_agent}
+                />
+                <ObservationPanel
+                  title="RootGraph 观测"
+                  lines={diagnostics.observations.root_graph}
+                />
+              </section>
 
-          <RuntimeBoundaryPanel boundary={diagnostics.boundary} />
+              <RuntimeBoundaryPanel boundary={diagnostics.boundary} />
+            </div>
+          </details>
         </>
       ) : null}
     </section>

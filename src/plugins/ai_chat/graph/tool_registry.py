@@ -48,6 +48,7 @@ class ToolSpec:
     llm_visible: bool = True
     requires_approval: bool = False
     approval_resume_enabled: bool = False
+    argument_validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         allowed = set(self.required_arguments) | set(self.optional_arguments)
@@ -56,6 +57,8 @@ class ToolSpec:
             raise ToolArgumentError(
                 f"{self.name} tool got unsupported arguments: {', '.join(unknown)}"
             )
+        if self.argument_validator is not None:
+            return self.argument_validator(dict(arguments))
         for field_name in self.required_arguments:
             value = arguments.get(field_name)
             if not isinstance(value, str) or not value.strip():

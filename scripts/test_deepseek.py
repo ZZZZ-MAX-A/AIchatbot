@@ -11,13 +11,13 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 
 async def main() -> None:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
-    model = os.getenv("OPENAI_MODEL", "deepseek-v4-flash")
+    api_key = os.getenv("AIKE_LLM_API_KEY", "")
+    base_url = os.getenv("AIKE_LLM_BASE_URL", "https://api.deepseek.com")
+    model = os.getenv("AIKE_LLM_MODEL", "deepseek-v4-flash")
 
-    print(f"OPENAI_API_KEY={'configured' if api_key else 'missing'}")
-    print(f"OPENAI_BASE_URL={base_url}")
-    print(f"OPENAI_MODEL={model}")
+    print(f"AIKE_LLM_API_KEY={'configured' if api_key else 'missing'}")
+    print(f"AIKE_LLM_BASE_URL={base_url}")
+    print(f"AIKE_LLM_MODEL={model}")
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=30)
     response = await client.chat.completions.create(

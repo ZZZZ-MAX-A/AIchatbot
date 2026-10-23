@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 from dataclasses import dataclass, field
 from hashlib import sha256
 from io import BytesIO
@@ -23,13 +24,16 @@ from .image_gen import (
     normalize_image_prompt,
     validate_image_bytes,
 )
+from .failure_diagnostics import sanitize_failure_text
 
 
 QWEN_SPACE_DEFAULT_BASE_URL = (
     "https://prithivmlmods-qwen-image-edit-2511-loras-fast.hf.space"
 )
-QWEN_SPACE_INFER_PATH = "/gradio_api/call/v2/infer"
-QWEN_SPACE_EVENT_PATH = "/gradio_api/call/infer/{event_id}"
+# The Space currently exposes the public Gradio endpoint as /edit_image.
+# Gradio keeps the v2 prefix on submission but not on the event-stream URL.
+QWEN_SPACE_INFER_PATH = "/gradio_api/call/v2/edit_image"
+QWEN_SPACE_EVENT_PATH = "/gradio_api/call/edit_image/{event_id}"
 QWEN_SPACE_DEFAULT_GUIDANCE = 1.0
 QWEN_SPACE_DEFAULT_STEPS = 4
 _SAFE_EVENT_ID = re.compile(r"[A-Za-z0-9_-]{1,160}")
@@ -69,6 +73,9 @@ class QwenRemoteResult:
     result_url: str = field(repr=False)
     seed: int
     media_type: str
+    # The current Space returns a base64 PNG data URL instead of a file URL.
+    # Keep it out of repr/logs because it contains the complete generated image.
+    result_data_url: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -288,11 +295,126 @@ def _base_url(config: AiChatConfig) -> str:
 
 def _classify_space_error(payload: str) -> str:
     lowered = payload.casefold()
+    if "no gpu was available" in lowered or "no gpu available" in lowered:
+        return "qwen_gpu_unavailable"
     if any(token in lowered for token in ("quota", "gpu time", "exceeded")):
         return "qwen_quota_exceeded"
     if any(token in lowered for token in ("duration", "timeout", "timed out")):
         return "qwen_infer_timeout"
     return "qwen_infer_failed"
+
+
+def _safe_space_response_excerpt(value: object) -> str:
+    """Return a short, secret-safe provider response fragment for diagnostics."""
+    text = str(value or "")
+    text = re.sub(
+        r"data:image/[^,\s]+;base64,[A-Za-z0-9+/=]+",
+        "[redacted-image]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return sanitize_failure_text(text, limit=240)
+
+
+def _space_response_context(
+    response: httpx.Response,
+    *,
+    phase: str,
+    endpoint: str,
+) -> dict[str, object]:
+    """Build safe HTTP details without retaining tokens, images, or URLs."""
+    return {
+        "qwen_phase": phase,
+        "qwen_http_status": response.status_code,
+        "qwen_api_path": urlparse(endpoint).path or endpoint,
+        "qwen_response_type": response.headers.get("content-type", "")[:80],
+        "qwen_response_excerpt": _safe_space_response_excerpt(response.text),
+    }
+
+
+def _space_http_error(
+    response: httpx.Response,
+    *,
+    phase: str,
+    endpoint: str,
+) -> QwenSpaceEditError:
+    """Map a Space HTTP failure to a useful stable code for logs and QQ."""
+    excerpt = _safe_space_response_excerpt(response.text)
+    lowered = excerpt.casefold()
+    if "no gpu was available" in lowered or "no gpu available" in lowered:
+        code = "qwen_gpu_unavailable"
+    elif response.status_code in {401, 403}:
+        code = "qwen_auth_failed"
+    elif response.status_code == 404:
+        code = "qwen_endpoint_not_found"
+    elif response.status_code == 429:
+        code = "qwen_rate_limited"
+    elif response.status_code >= 500:
+        code = "qwen_space_server_error"
+    elif any(token in lowered for token in ("quota", "gpu time", "exceeded")):
+        code = "qwen_quota_exceeded"
+    else:
+        code = f"qwen_http_{response.status_code}"
+    return QwenSpaceEditError(
+        code,
+        context=_space_response_context(
+            response,
+            phase=phase,
+            endpoint=endpoint,
+        ),
+    )
+
+
+def _qwen_result_from_payload(
+    event_id: str,
+    values: object,
+    *,
+    max_output_bytes: int,
+    base_hostname: str,
+) -> QwenRemoteResult:
+    """Parse both the current data-URL result and the older URL result shape."""
+    if not isinstance(values, list) or not values or not isinstance(values[0], dict):
+        raise QwenSpaceEditError("qwen_result_invalid")
+    result_data = values[0]
+    legacy_seed = values[1] if len(values) > 1 else result_data.get("seed")
+    try:
+        seed = int(result_data.get("seed", legacy_seed))
+    except (TypeError, ValueError) as exc:
+        raise QwenSpaceEditError("qwen_seed_invalid") from exc
+
+    image_value = result_data.get("image")
+    if isinstance(image_value, dict):
+        image_value = image_value.get("url") or image_value.get("path")
+    result_value = str(image_value or "").strip()
+    if result_value.startswith("data:image/"):
+        if len(result_value) > max(max_output_bytes, 1) * 2:
+            raise QwenSpaceEditError("image_too_large")
+        header, separator, _payload = result_value.partition(",")
+        if separator != "," or ";base64" not in header.casefold():
+            raise QwenSpaceEditError("qwen_result_invalid")
+        media_type = header[5:].split(";", 1)[0].strip().lower()
+        return QwenRemoteResult(
+            event_id=event_id,
+            result_url="",
+            seed=seed,
+            media_type=media_type,
+            result_data_url=result_value,
+        )
+
+    result_url = str(result_data.get("url") or result_value).strip()
+    result_parsed = urlparse(result_url)
+    if (
+        result_parsed.scheme != "https"
+        or not result_parsed.hostname
+        or result_parsed.hostname != base_hostname
+    ):
+        raise QwenSpaceEditError("qwen_result_url_invalid")
+    return QwenRemoteResult(
+        event_id=event_id,
+        result_url=result_url,
+        seed=seed,
+        media_type=str(result_data.get("mime_type") or "").strip(),
+    )
 
 
 async def submit_qwen_edit(
@@ -328,14 +450,25 @@ async def submit_qwen_edit(
                 f"{_base_url(config)}{QWEN_SPACE_INFER_PATH}",
                 json=body,
             )
-            submitted.raise_for_status()
+            if submitted.is_error:
+                raise _space_http_error(
+                    submitted,
+                    phase="submit",
+                    endpoint=str(submitted.request.url),
+                )
             event_id = str(submitted.json().get("event_id") or "").strip()
             if not _SAFE_EVENT_ID.fullmatch(event_id):
                 raise QwenSpaceEditError("qwen_event_id_invalid")
             event_url = f"{_base_url(config)}{QWEN_SPACE_EVENT_PATH.format(event_id=event_id)}"
             current_event = ""
             async with client.stream("GET", event_url) as response:
-                response.raise_for_status()
+                if response.is_error:
+                    await response.aread()
+                    raise _space_http_error(
+                        response,
+                        phase="event_stream",
+                        endpoint=event_url,
+                    )
                 async for line in response.aiter_lines():
                     if line.startswith("event:"):
                         current_event = line.split(":", 1)[1].strip()
@@ -344,37 +477,37 @@ async def submit_qwen_edit(
                         continue
                     payload = line.split(":", 1)[1].strip()
                     if current_event == "error":
-                        raise QwenSpaceEditError(_classify_space_error(payload))
+                        raise QwenSpaceEditError(
+                            _classify_space_error(payload),
+                            context={
+                                "qwen_phase": "inference",
+                                "qwen_api_path": urlparse(event_url).path,
+                                "qwen_response_excerpt": _safe_space_response_excerpt(payload),
+                            },
+                        )
                     if current_event != "complete":
                         continue
-                    values = json.loads(payload)
-                    if not isinstance(values, list) or len(values) < 2:
-                        raise QwenSpaceEditError("qwen_result_invalid")
-                    file_data = values[0]
-                    if not isinstance(file_data, dict):
-                        raise QwenSpaceEditError("qwen_result_invalid")
-                    result_url = str(file_data.get("url") or "").strip()
-                    result_type = str(file_data.get("mime_type") or "").strip()
-                    result_parsed = urlparse(result_url)
-                    base_parsed = urlparse(_base_url(config))
-                    if (
-                        result_parsed.scheme != "https"
-                        or result_parsed.hostname != base_parsed.hostname
-                    ):
-                        raise QwenSpaceEditError("qwen_result_url_invalid")
-                    try:
-                        seed = int(values[1])
-                    except (TypeError, ValueError) as exc:
-                        raise QwenSpaceEditError("qwen_seed_invalid") from exc
-                    return QwenRemoteResult(
-                        event_id=event_id,
-                        result_url=result_url,
-                        seed=seed,
-                        media_type=result_type,
+                    return _qwen_result_from_payload(
+                        event_id,
+                        json.loads(payload),
+                        max_output_bytes=config.image_gen_max_output_bytes,
+                        base_hostname=urlparse(_base_url(config)).hostname or "",
                     )
     except QwenSpaceEditError:
         raise
-    except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except json.JSONDecodeError as exc:
+        raise QwenSpaceEditError(
+            "qwen_response_json_invalid",
+            context={"qwen_phase": "submit"},
+        ) from exc
+    except (httpx.TimeoutException,) as exc:
+        raise QwenSpaceEditError(
+            "qwen_submit_timeout",
+            context={"qwen_phase": "submit"},
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise QwenSpaceEditError("qwen_submit_network_error") from exc
+    except (TypeError, ValueError) as exc:
         raise QwenSpaceEditError("qwen_submit_failed") from exc
     raise QwenSpaceEditError("qwen_event_incomplete")
 
@@ -392,6 +525,29 @@ async def download_qwen_result(
 ) -> ImageArtifact:
     destination = (output_dir or DEFAULT_IMAGE_OUTPUT_DIR).resolve()
     destination.mkdir(parents=True, exist_ok=True)
+    if remote.result_data_url:
+        try:
+            _header, separator, encoded = remote.result_data_url.partition(",")
+            if separator != ",":
+                raise QwenSpaceEditError("qwen_result_invalid")
+            content = base64.b64decode(encoded, validate=True)
+            validated = validate_image_bytes(
+                content,
+                max_bytes=config.image_gen_max_output_bytes,
+            )
+            return _write_artifact(
+                validated,
+                operation="qwen_edit",
+                output_dir=destination,
+            )
+        except QwenSpaceEditError:
+            raise
+        except (binascii.Error, ValueError) as exc:
+            raise QwenSpaceEditError("qwen_result_base64_invalid") from exc
+        except ImageGenError as exc:
+            raise QwenSpaceEditError("qwen_result_invalid") from exc
+    if not remote.result_url:
+        raise QwenSpaceEditError("qwen_result_invalid")
     partial = _partial_path(remote, destination)
     headers = _auth_headers(config)
     timeout = httpx.Timeout(

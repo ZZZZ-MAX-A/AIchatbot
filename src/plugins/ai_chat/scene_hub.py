@@ -5,11 +5,13 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import re
 from time import monotonic
 
 from .scene_director import SceneDirectorResult, ScenePlan, ScenePlanStep
+from .memory_time import time_label
 
 
 _SCENE_SPEAKERS = frozenset({"owner", "aike", "linyin"})
@@ -88,6 +90,7 @@ class PublicSceneEvent:
     scene_turn_id: str
     speaker: str
     text: str
+    recorded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,7 @@ SceneDirector = Callable[
 ]
 SceneActor = Callable[[SceneActorRequest], Awaitable[str]]
 SceneSender = Callable[[str, str], Awaitable[bool]]
+SceneReplyObserver = Callable[[str], None]
 SceneMemberProvider = Callable[[], Awaitable[set[str]]]
 SceneIdleRunner = Callable[[str], Awaitable[None]]
 
@@ -410,8 +414,10 @@ def normalize_group_reply(text: str, *, max_sentences: int = 3, max_chars: int =
 def public_context_payload(
     events: Sequence[PublicSceneEvent], *, max_events: int
 ) -> list[dict[str, str]]:
+    now = datetime.now(timezone.utc)
     return [
-        {"speaker": event.speaker, "text": event.text}
+        {"speaker": event.speaker, "text": event.text,
+         "time_context": f"场景记录时间：{time_label(event.recorded_at, now=now)}"}
         for event in events[-max_events:]
         if event.speaker in _SCENE_SPEAKERS and event.text.strip()
     ]
@@ -427,6 +433,7 @@ def build_scene_actor_user_prompt(request: SceneActorRequest) -> str:
         )
         return f"""
 【{prior_speaker}已经成功发送完毕的群消息】
+[场景记录时间：{time_label(request.prior_reply.recorded_at)}]
 {request.prior_reply.text}
 
 【给{current_speaker}的本地执行任务】
@@ -458,6 +465,7 @@ def build_scene_actor_system_context(
             "speaker": request.prior_reply.speaker,
             "text": request.prior_reply.text,
             "send_status": "success",
+            "time_context": f"场景记录时间：{time_label(request.prior_reply.recorded_at)}",
         }
     data = json.dumps(
         {
@@ -620,11 +628,12 @@ class SceneHub:
             self._active = False
 
     async def _validated_members(
-        self, provider: SceneMemberProvider
+        self, provider: SceneMemberProvider, *, force_refresh: bool = False
     ) -> tuple[bool, str]:
         now = monotonic()
         if (
-            self._member_cache is not None
+            not force_refresh
+            and self._member_cache is not None
             and now - self._member_cache_at <= self.settings.member_cache_seconds
         ):
             members = self._member_cache
@@ -880,6 +889,7 @@ class SceneHub:
         director: SceneDirector,
         actor: SceneActor,
         sender: SceneSender,
+        on_owner_reply_sent: SceneReplyObserver | None = None,
     ) -> SceneTurnResult:
         settings_status = scene_hub_settings_status(self.settings)
         if settings_status != "ready":
@@ -903,6 +913,7 @@ class SceneHub:
             return SceneTurnResult(claim_status)
 
         turn_started_at = monotonic()
+        privacy_status = "completed"
         director_status = "not_called"
         model_calls = 0
         route = "director"
@@ -922,7 +933,9 @@ class SceneHub:
         owner_event = PublicSceneEvent(turn_id, "owner", normalized_message)
         try:
             member_started_at = monotonic()
-            members_ok, member_status = await self._validated_members(member_provider)
+            members_ok, member_status = await self._validated_members(
+                member_provider, force_refresh=True
+            )
             timing_member_ms = _elapsed_ms(member_started_at)
             if not members_ok:
                 return SceneTurnResult(
@@ -1012,6 +1025,22 @@ class SceneHub:
                     )
                     continue
 
+                # Each actor can read private continuity. Never authorize that
+                # read with the member cache or a check made before directing.
+                member_started_at = monotonic()
+                members_ok, member_status = await self._validated_members(
+                    member_provider, force_refresh=True
+                )
+                timing_member_ms += _elapsed_ms(member_started_at)
+                if not members_ok:
+                    privacy_status = member_status
+                    for pending in plan.steps[step_index:2]:
+                        skipped.append(pending.speaker)
+                        step_outcomes.append(
+                            SceneStepOutcome(pending.speaker, member_status)
+                        )
+                    break
+
                 called_speakers.add(step.speaker)
                 request = SceneActorRequest(
                     scene_turn_id=turn_id,
@@ -1057,6 +1086,21 @@ class SceneHub:
                         SceneStepOutcome(step.speaker, "empty_reply")
                     )
                     continue
+                # Generation can take seconds. Recheck before publishing a
+                # reply produced with private context to the group.
+                member_started_at = monotonic()
+                members_ok, member_status = await self._validated_members(
+                    member_provider, force_refresh=True
+                )
+                timing_member_ms += _elapsed_ms(member_started_at)
+                if not members_ok:
+                    privacy_status = member_status
+                    for pending in plan.steps[step_index:2]:
+                        skipped.append(pending.speaker)
+                        step_outcomes.append(
+                            SceneStepOutcome(pending.speaker, member_status)
+                        )
+                    break
                 send_started_at = monotonic()
                 try:
                     send_ok = await sender(step.speaker, reply)
@@ -1079,8 +1123,12 @@ class SceneHub:
                 sent_events.append(sent_event)
                 sent_by_speaker[step.speaker] = sent_event
                 step_outcomes.append(SceneStepOutcome(step.speaker, "sent"))
+                if on_owner_reply_sent is not None:
+                    # Delivery is already committed; an observer cannot undo it.
+                    with suppress(Exception):
+                        on_owner_reply_sent(step.speaker)
 
-            if send_emergency_notice:
+            if send_emergency_notice and privacy_status == "completed":
                 try:
                     notice_ok = await sender("aike", EMERGENCY_NOTICE_TEXT)
                 except Exception:
@@ -1090,7 +1138,7 @@ class SceneHub:
             self._events.append(owner_event)
             self._events.extend(sent_events)
             return SceneTurnResult(
-                status="completed",
+                status=privacy_status,
                 scene_turn_id=turn_id,
                 director_status=director_status,
                 model_calls=model_calls,

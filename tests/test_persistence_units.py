@@ -1614,14 +1614,12 @@ class MessageHistoryPersistenceUnitTests(TempDatabaseMixin, unittest.TestCase):
             self.memory.clear_all_sessions()
             stats_after_clear_all = self.memory.memory_stats()
 
-        self.assertEqual(
-            history,
-            [
-                {"role": "system", "content": "system context"},
-                {"role": "assistant", "content": "second"},
-                {"role": "user", "content": "third"},
-            ],
-        )
+        self.assertEqual(history[0], {"role": "system", "content": "system context"})
+        self.assertEqual([message["role"] for message in history], ["system", "assistant", "user"])
+        for message, original in zip(history[1:], ("second", "third"), strict=True):
+            timestamp, content = message["content"].split("\n", 1)
+            self.assertIn("记录时间（非发送确认）", timestamp)
+            self.assertEqual(content, original)
         self.assertEqual(count, 3)
         self.assertEqual(stats["message_count"], 4)
         self.assertEqual(stats["session_count"], 2)

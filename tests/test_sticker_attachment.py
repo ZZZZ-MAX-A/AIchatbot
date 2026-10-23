@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -122,6 +123,33 @@ class StickerAttachmentTests(unittest.TestCase):
         self.assertEqual(result.status, "send_failed")
         self.assertEqual(calls, 1)
 
+    def test_expired_intent_rechecks_after_asset_validation_and_never_sends(self):
+        self.approve()
+        calls = []
+        async def sender(*args):
+            calls.append(args)
+        result = asyncio.run(self.module.send_selected_sticker_attachment(
+            self.root, 'aike_act_cute_001', 10001, limits=self.approval.StickerLimits(),
+            sender=sender, can_send=lambda: False,
+        ))
+        self.assertEqual(result.status, 'expired')
+        self.assertFalse(result.sent)
+        self.assertEqual(calls, [])
+
+    def test_send_timeout_is_distinct_from_confirmed_failure_and_never_retried(self):
+        self.approve()
+        calls = []
+        async def sender(*args):
+            calls.append(args)
+            await asyncio.Event().wait()
+        with patch.object(self.module, 'STICKER_ATTACHMENT_SEND_TIMEOUT_SECONDS', .01):
+            result = asyncio.run(self.module.send_selected_sticker_attachment(
+                self.root, 'aike_act_cute_001', 10001, limits=self.approval.StickerLimits(), sender=sender,
+            ))
+        self.assertEqual(result.status, 'send_timeout')
+        self.assertFalse(result.sent)
+        self.assertEqual(len(calls), 1)
+
     def test_invalid_recipient_unknown_disabled_or_tampered_never_sends(self):
         self.approve()
         calls = 0
@@ -216,8 +244,8 @@ class StickerAttachmentTests(unittest.TestCase):
             end = source.index("\n\nasync def ", start + 10)
             block = source[start:end]
             self.assertLess(
-                block.index("await matcher.send(result.reply)"),
-                block.index("schedule_remote_sticker_classifier_shadow("),
+                block.index("await send_chat_reply_bubbles("),
+                block.index("schedule_chat_reply_sticker("),
             )
 
 

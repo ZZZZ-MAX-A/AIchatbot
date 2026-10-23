@@ -96,6 +96,18 @@ class ReliabilityRuntimeIntegrationTests(unittest.TestCase):
         raw_call = self.function_source(self.lc_source, "create_main_llm_call")
         self.assertNotIn("result_observer=result_observer", raw_call)
 
+    def test_encyclopedia_observer_covers_chat_and_scene_without_storing_queries(self):
+        generation = self.function_source(self.plugin_source, "generate_chat_text_response")
+        actor = self.function_source(self.plugin_source, "actor")
+        finalizers = [node.finalbody for node in ast.walk(ast.parse(generation)) if isinstance(node, ast.Try)]
+        calls = {node.func.id for body in finalizers for statement in body for node in ast.walk(statement) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        self.assertTrue({'record_encyclopedia_observation_safely', 'write_encyclopedia_turn_log_safely'} <= calls)
+        self.assertIn("record_encyclopedia_observation_safely(tool_observation, actor_scope.role_card_key)", actor)
+        self.assertIn("write_encyclopedia_turn_log_safely(", actor)
+        self.assertIn('allow_encyclopedia=request.turn_kind == "owner"', actor)
+        self.assertIn("tool_observation=tool_observation", actor)
+        self.assertNotIn("record_encyclopedia_observation_safely(test_text", self.plugin_source)
+
     def test_document_delivery_records_fixed_failure_and_real_success(self):
         delivery = self.function_source(self.plugin_source, "_send_new_document_deliveries")
 

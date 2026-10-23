@@ -22,12 +22,14 @@ ALLOWED_STICKER_MOODS = frozenset(
         "embarrassed",
         "excited",
         "expectant",
+        "flustered",
         "happy",
         "hurt",
         "mixed",
         "neutral",
         "playful",
         "pleading",
+        "proud",
         "resigned",
         "sad",
         "shy",
@@ -111,6 +113,7 @@ ALLOWED_STICKER_SCENES = frozenset(
         "sharing_snack",
         "success",
         "teasing",
+        "thinking",
         "unexpected_statement",
     }
 )
@@ -134,10 +137,12 @@ STICKER_LABELING_PROMPT = """
   "ambiguous": true或false
 }
 
-情绪白名单：affection, angry, attentive, comfort, confused, curious, dizzy, embarrassed, excited, expectant, happy, hurt, mixed, neutral, playful, pleading, resigned, sad, shy, surprised, teasing, tired。
+情绪白名单：affection, angry, attentive, comfort, confused, curious, dizzy, embarrassed, excited, expectant, flustered, happy, hurt, mixed, neutral, playful, pleading, proud, resigned, sad, shy, surprised, teasing, tired。
 强度含义：soft=轻微，medium=明确但不过度，strong=夸张或强烈。
 动作白名单：act_cute, blush, cover_face, cry, dance, drink_milk_tea, drive, exclamation_mark, facepalm, fidget, get_hit, hands_together, hide, hug, jump, kiss, laugh, lick, lie_flat, look_away, look_around, nod, offer_cake, offer_gift, peek, question_mark, shake_head, show_heart, sleep, smile, soul_leave_body, stare, sway, take_notes, take_photo, type_angrily, wave, yawn。
-场景白名单：acting_cute, affection, apology, attention_seeking, birthday, celebration, checking_reaction, comfort, continue_speaking, departure, embarrassed_response, failure, general_reaction, giving_up, goodnight, greeting, holding_grudge, joining_chat, listening, morning, pleasing, praise_received, questioning, recording, remembering, request, setback, sharing_snack, success, teasing, unexpected_statement。
+场景白名单：acting_cute, affection, apology, attention_seeking, birthday, celebration, checking_reaction, comfort, continue_speaking, departure, embarrassed_response, failure, general_reaction, giving_up, goodnight, greeting, holding_grudge, joining_chat, listening, morning, pleasing, praise_received, questioning, recording, remembering, request, setback, sharing_snack, success, teasing, thinking, unexpected_statement。
+
+补充语义：proud 表示得意、自信的笑；flustered 表示慌乱、不知所措；thinking 表示安静思考的交流场景。情绪方向与强度分别判断，得意也可以是 soft，闭眼微笑也可能是 resigned；张嘴和闭眼不能单独证明 happy 或 laugh。
 
 主人校准后的判定规则：
 1. 区分可见情绪、画面动作和交流意图；“卖萌”优先表示为 playful + act_cute + acting_cute，通常为 medium。仅凭张大嘴不能判断为 yawn；只有同时存在困倦、闭眼、伸懒腰或睡眠语义线索时才使用 tired/yawn。

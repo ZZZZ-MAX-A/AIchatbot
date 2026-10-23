@@ -10,12 +10,14 @@ from pathlib import Path
 import re
 from time import monotonic
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from openai import AsyncOpenAI
 from PIL import Image, UnidentifiedImageError
 
 from .config import AiChatConfig
+from .failure_diagnostics import sanitize_failure_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -29,9 +31,17 @@ IMAGE_REQUEST_QUALITY = "high"
 class ImageGenError(RuntimeError):
     """Stable, non-secret image-task failure exposed to the QQ layer."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        context: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
+        # Context is intentionally limited to safe, non-secret diagnostics.
+        # Callers must never put API keys, prompts, or complete URLs here.
+        self.context: dict[str, object] = dict(context or {})
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,7 @@ class ProviderFailureDiagnostic:
     http_status: int | None
     provider_code: str
     provider_param: str
+    provider_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,6 +90,7 @@ class ImageRequestDecision:
 
 
 _SAFE_PROVIDER_TOKEN = re.compile(r"[A-Za-z0-9_.\[\]-]{1,80}")
+_SAFE_PROVIDER_PATH = re.compile(r"/[A-Za-z0-9_./{}-]{1,180}")
 
 
 def _safe_provider_token(value: object) -> str:
@@ -86,8 +98,89 @@ def _safe_provider_token(value: object) -> str:
     return text if _SAFE_PROVIDER_TOKEN.fullmatch(text) else "-"
 
 
+_PROVIDER_SENSITIVE_FIELDS = re.compile(
+    r"(?i)\b(?:prompt|input|text|content|image|key|api[_ -]?key|token|secret|url)"
+    r"\s*[:=]\s*\S+"
+)
+
+
+def _safe_provider_message(value: object) -> str:
+    """Keep a useful provider reason while removing sensitive values."""
+    text = sanitize_failure_text(value, limit=240)
+    text = _PROVIDER_SENSITIVE_FIELDS.sub("[redacted-field]", text)
+    return " ".join(text.replace("\r", " ").replace("\n", " ").split())[:240]
+
+
+_IMAGE_ERROR_STAGES = {
+    "provider_generate_failed": "provider_request",
+    "provider_edit_failed": "provider_request",
+    "provider_response_empty": "provider_response",
+    "provider_image_missing": "provider_response",
+    "provider_image_download_failed": "result_download",
+    "image_base64_invalid": "result_decode",
+    "image_invalid": "result_validation",
+    "image_format_unsupported": "result_validation",
+    "animated_image_unsupported": "result_validation",
+    "image_dimensions_invalid": "result_validation",
+    "input_image_load_failed": "input_download",
+}
+
+
+def image_gen_failure_stage(code: str, *, operation: str = "") -> str:
+    """Return the stable processing stage for a logged image failure."""
+    if operation == "qwen_edit":
+        return "qwen_submit"
+    if operation == "qwen_download":
+        return "qwen_download"
+    return _IMAGE_ERROR_STAGES.get(code, "input_or_configuration")
+
+
+_IMAGE_LOG_CONTEXT_KEYS = (
+    "response_mode",
+    "response_format",
+    "model",
+    "size",
+    "quality",
+    "input_format",
+    "mask",
+    "result_scheme",
+    "result_host",
+    "result_has_query",
+    "qwen_phase",
+    "qwen_http_status",
+    "qwen_api_path",
+    "qwen_response_type",
+    "qwen_response_excerpt",
+)
+
+
+def format_image_gen_context(context: dict[str, object] | None) -> str:
+    """Format only an allowlisted set of safe image diagnostics."""
+    if not context:
+        return ""
+    fields: list[str] = []
+    for key in _IMAGE_LOG_CONTEXT_KEYS:
+        value = context.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        if key == "qwen_response_excerpt":
+            safe_value = _safe_provider_message(value).replace('"', "'")
+            fields.append(f'{key}="{safe_value}"')
+        elif key == "qwen_api_path":
+            path = str(value).strip()
+            if _SAFE_PROVIDER_PATH.fullmatch(path):
+                fields.append(f"{key}={path}")
+        elif key == "qwen_response_type":
+            response_type = str(value).strip()
+            if re.fullmatch(r"[A-Za-z0-9_./+-]{1,80}", response_type):
+                fields.append(f"{key}={response_type}")
+        else:
+            fields.append(f"{key}={_safe_provider_token(value)}")
+    return " ".join(fields)
+
+
 def provider_failure_diagnostic(error: BaseException) -> ProviderFailureDiagnostic:
-    """Extract non-secret provider metadata without retaining response text."""
+    """Extract useful, redacted provider metadata without retaining secrets."""
     status_value = getattr(error, "status_code", None)
     http_status = (
         status_value
@@ -107,22 +200,32 @@ def provider_failure_diagnostic(error: BaseException) -> ProviderFailureDiagnost
         or payload.get("type")
     )
     provider_param = getattr(error, "param", None) or payload.get("param")
+    provider_message = (
+        getattr(error, "message", None)
+        or payload.get("message")
+        or payload.get("detail")
+        or str(error)
+    )
     return ProviderFailureDiagnostic(
         exception_type=_safe_provider_token(type(error).__name__),
         http_status=http_status,
         provider_code=_safe_provider_token(provider_code),
         provider_param=_safe_provider_token(provider_param),
+        provider_message=_safe_provider_message(provider_message),
     )
 
 
 def format_provider_failure_diagnostic(error: BaseException) -> str:
     diagnostic = provider_failure_diagnostic(error)
     status = str(diagnostic.http_status) if diagnostic.http_status is not None else "-"
+    provider_message = diagnostic.provider_message or "-"
+    provider_message = provider_message.replace("\\", "\\\\").replace('"', '\\"')
     return (
         f"provider_type={diagnostic.exception_type} "
         f"http_status={status} "
         f"provider_code={diagnostic.provider_code} "
-        f"provider_param={diagnostic.provider_param}"
+        f"provider_param={diagnostic.provider_param} "
+        f'provider_message="{provider_message}"'
     )
 
 
@@ -221,14 +324,34 @@ def _decode_image_base64(value: str, *, max_bytes: int) -> bytes:
 async def _response_image_bytes(response: object, *, max_bytes: int) -> bytes:
     data_items = getattr(response, "data", None)
     if not isinstance(data_items, list) or not data_items:
-        raise ImageGenError("provider_response_empty")
+        raise ImageGenError(
+            "provider_response_empty",
+            context={"response_mode": "missing"},
+        )
     data = data_items[0]
     encoded = _response_value(data, "b64_json")
     if encoded:
-        return _decode_image_base64(encoded, max_bytes=max_bytes)
+        try:
+            return _decode_image_base64(encoded, max_bytes=max_bytes)
+        except ImageGenError as exc:
+            exc.context.update(
+                {"stage": "result_decode", "response_mode": "b64_json"}
+            )
+            raise
     url = _response_value(data, "url")
     if not url:
-        raise ImageGenError("provider_image_missing")
+        raise ImageGenError(
+            "provider_image_missing",
+            context={"response_mode": "unknown"},
+        )
+    parsed_url = urlparse(url)
+    result_context = {
+        "stage": "result_download",
+        "response_mode": "url",
+        "result_scheme": parsed_url.scheme or "unknown",
+        "result_host": parsed_url.hostname or "unknown",
+        "result_has_query": "yes" if bool(parsed_url.query) else "no",
+    }
     try:
         from .vision import _download_image_base64
 
@@ -240,8 +363,16 @@ async def _response_image_bytes(response: object, *, max_bytes: int) -> bytes:
             (),
         )
     except Exception as exc:
-        raise ImageGenError("provider_image_download_failed") from exc
-    return _decode_image_base64(downloaded, max_bytes=max_bytes)
+        raise ImageGenError(
+            "provider_image_download_failed",
+            context=result_context,
+        ) from exc
+    try:
+        return _decode_image_base64(downloaded, max_bytes=max_bytes)
+    except ImageGenError as exc:
+        exc.context.update(result_context)
+        exc.context["stage"] = "result_decode"
+        raise
 
 
 def _client(config: AiChatConfig) -> AsyncOpenAI:
@@ -302,10 +433,14 @@ async def _save_response(
         response,
         max_bytes=config.image_gen_max_output_bytes,
     )
-    validated = validate_image_bytes(
-        content,
-        max_bytes=config.image_gen_max_output_bytes,
-    )
+    try:
+        validated = validate_image_bytes(
+            content,
+            max_bytes=config.image_gen_max_output_bytes,
+        )
+    except ImageGenError as exc:
+        exc.context.setdefault("stage", "result_validation")
+        raise
     return await asyncio.to_thread(
         _write_artifact,
         validated,
@@ -333,10 +468,20 @@ async def generate_image(
             n=1,
             size=IMAGE_REQUEST_SIZE,
             quality=IMAGE_REQUEST_QUALITY,
+            response_format="b64_json",
             timeout=config.image_gen_timeout_seconds,
         )
     except Exception as exc:
-        raise ImageGenError("provider_generate_failed") from exc
+        raise ImageGenError(
+            "provider_generate_failed",
+            context={
+                "stage": "provider_request",
+                "model": config.image_gen_model,
+                "size": IMAGE_REQUEST_SIZE,
+                "quality": IMAGE_REQUEST_QUALITY,
+                "response_format": "b64_json",
+            },
+        ) from exc
     return await _save_response(
         response,
         config=config,
@@ -377,10 +522,22 @@ async def edit_image(
             n=1,
             size=IMAGE_REQUEST_SIZE,
             quality=IMAGE_REQUEST_QUALITY,
+            response_format="b64_json",
             timeout=config.image_gen_timeout_seconds,
         )
     except Exception as exc:
-        raise ImageGenError("provider_edit_failed") from exc
+        raise ImageGenError(
+            "provider_edit_failed",
+            context={
+                "stage": "provider_request",
+                "model": config.image_edit_model,
+                "size": IMAGE_REQUEST_SIZE,
+                "quality": IMAGE_REQUEST_QUALITY,
+                "response_format": "b64_json",
+                "input_format": validated_source.image_format,
+                "mask": "transparent_full_image",
+            },
+        ) from exc
     return await _save_response(
         response,
         config=config,

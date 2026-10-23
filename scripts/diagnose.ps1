@@ -15,43 +15,6 @@ function Write-Check {
     }
 }
 
-function Mask-Configured {
-    param([string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return "not configured"
-    }
-    return "configured"
-}
-
-function Get-ValueOrDefault {
-    param(
-        [hashtable]$Values,
-        [string]$Key,
-        [string]$Default = "not set"
-    )
-    if ($Values.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace($Values[$Key])) {
-        return $Values[$Key]
-    }
-    return $Default
-}
-
-function Read-DotEnv {
-    param([string]$Path)
-    $result = @{}
-    if (-not (Test-Path $Path)) {
-        return $result
-    }
-    Get-Content -Path $Path -Encoding UTF8 | ForEach-Object {
-        $line = $_.Trim()
-        if (-not $line -or $line.StartsWith("#") -or -not $line.Contains("=")) {
-            return
-        }
-        $key, $value = $line.Split("=", 2)
-        $result[$key.Trim()] = $value.Trim()
-    }
-    return $result
-}
-
 Write-Host "AIchatbot local diagnostics"
 Write-Host "==========================="
 
@@ -70,17 +33,12 @@ if (Test-Path ".\.venv\Scripts\python.exe") {
     Write-Check "ERR" "virtualenv" "missing .venv\Scripts\python.exe"
 }
 
-$envValues = Read-DotEnv ".env"
 if (Test-Path ".env") {
     Write-Check "OK" ".env" "exists"
 } else {
     Write-Check "WARN" ".env" "missing; defaults may be used"
 }
-Write-Check "INFO" "OPENAI_API_KEY" (Mask-Configured $envValues["OPENAI_API_KEY"])
-Write-Check "INFO" "OPENAI_BASE_URL" (Get-ValueOrDefault $envValues "OPENAI_BASE_URL")
-Write-Check "INFO" "OPENAI_MODEL" (Get-ValueOrDefault $envValues "OPENAI_MODEL")
-Write-Check "INFO" "ENABLE_VISION" (Get-ValueOrDefault $envValues "ENABLE_VISION")
-Write-Check "INFO" "VISION_MODEL" (Get-ValueOrDefault $envValues "VISION_MODEL")
+$configurationReport = $null
 if ([string]::IsNullOrWhiteSpace($env:OLLAMA_MODELS)) {
     Write-Check "INFO" "current OLLAMA_MODELS" "not set"
 } else {
@@ -88,14 +46,21 @@ if ([string]::IsNullOrWhiteSpace($env:OLLAMA_MODELS)) {
 }
 
 try {
-    $importOutput = & .\.venv\Scripts\python.exe -c "import bot; print('bot import OK')" 2>&1
+    $configurationOutput = & .\.venv\Scripts\python.exe .\scripts\check_configuration.py --json 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Check "OK" "bot.py import" "success"
+        $configurationReport = ($configurationOutput -join "`n") | ConvertFrom-Json
+        Write-Check "OK" "configuration parse" "read-only; Bot and database not imported"
+        Write-Check "INFO" "default chat configured" $configurationReport.default_chat.configured.ToString()
+        Write-Check "INFO" "vision provider" $configurationReport.vision.provider
+        Write-Check "INFO" "Ollama required" $configurationReport.ollama_required.ToString()
+        foreach ($issue in $configurationReport.issues) {
+            Write-Check "WARN" $issue.key $issue.message
+        }
     } else {
-        Write-Check "ERR" "bot.py import" (($importOutput | Select-Object -Last 3) -join " ")
+        Write-Check "ERR" "configuration parse" ($configurationOutput -join " ")
     }
 } catch {
-    Write-Check "ERR" "bot.py import" $_.Exception.Message
+    Write-Check "ERR" "configuration parse" $_.Exception.Message
 }
 
 $pythonProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -117,35 +82,24 @@ if ($ollamaProcesses.Count -gt 0) {
     Write-Check "WARN" "ollama process" "not found"
 }
 
-$port11434 = netstat -ano | Select-String ":11434"
-if ($port11434) {
-    Write-Check "OK" "ollama port 11434" "present"
-} else {
-    Write-Check "WARN" "ollama port 11434" "not found"
-}
-
-$port8080 = netstat -ano | Select-String ":8080"
-if ($port8080) {
-    Write-Check "OK" "nonebot port 8080" "present"
-} else {
-    Write-Check "WARN" "nonebot port 8080" "not found"
-}
-
-try {
-    $ollamaTags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 3
-    $models = @($ollamaTags.models | ForEach-Object { $_.name })
-    Write-Check "OK" "ollama api" "ok"
-    if ($models -contains "qwen2.5vl:3b") {
-        Write-Check "OK" "vision model qwen2.5vl:3b" "exists"
+if ($null -ne $configurationReport) {
+    $botPort = [int]$configurationReport.nonebot_port
+    $botPortLines = netstat -ano | Select-String ":$botPort\s"
+    Write-Check $(if ($botPortLines) { "OK" } else { "WARN" }) "NoneBot configured port" "$botPort"
+    if ($configurationReport.ollama_auto_ensure) {
+        try {
+            $ollamaTags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 3
+            Write-Check "OK" "required local Ollama API" "reachable; model availability not inferred"
+        } catch {
+            Write-Check "WARN" "required local Ollama API" $_.Exception.GetType().Name
+        }
     } else {
-        Write-Check "WARN" "vision model qwen2.5vl:3b" "not found in ollama tags"
+        Write-Check "INFO" "local Ollama API" "not probed; no dependency on the standard local endpoint"
     }
-} catch {
-    Write-Check "WARN" "ollama api" $_.Exception.GetType().Name
 }
 
 try {
-    $dbOutput = & .\.venv\Scripts\python.exe -c "import sqlite3; con=sqlite3.connect('data/chatbot.db'); con.execute('select 1').fetchone(); con.close(); print('database OK')" 2>&1
+    $dbOutput = & .\.venv\Scripts\python.exe -c "import sqlite3; con=sqlite3.connect('file:data/chatbot.db?mode=ro', uri=True); con.execute('select 1').fetchone(); con.close(); print('database OK')" 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Check "OK" "sqlite database" "open ok"
     } else {

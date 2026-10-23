@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .database import connect_read_only, utc_now
+from .memory_maintenance import MemoryMaintenanceScope
 from .owner_console_main_llm_contract import (
     MAIN_LLM_CONTRACT_ACTION_HEADER,
     MAIN_LLM_CONTRACT_CONFIRMATION,
@@ -175,6 +176,7 @@ class OwnerConsoleMemoryRagConsistencyRun:
     llm_called: bool = False
     dev_context_called: bool = False
     automatic_retry: bool = False
+    memory_scope: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1113,6 +1115,7 @@ class OwnerConsoleManualDiagnosticsRuntime:
         ) = None
         self._latest_project_run: OwnerConsoleManualDiagnosticRun | None = None
         self._latest_memory_run: OwnerConsoleMemoryRagConsistencyRun | None = None
+        self._memory_runs_by_scope: dict[str, OwnerConsoleMemoryRagConsistencyRun] = {}
         self._latest_main_llm_run: OwnerConsoleMainLlmContractRun | None = None
         self._latest_tts_run: OwnerConsoleTtsSynthesisRun | None = None
         self._latest_tts_technical_result: tuple[str, str, str] | None = None
@@ -1121,11 +1124,15 @@ class OwnerConsoleManualDiagnosticsRuntime:
         self._latest_cloud_vision_run: OwnerConsoleCloudVisionRun | None = None
         self._latest_cloud_vision_technical_result: tuple[str, str, str] | None = None
 
-    def build_snapshot(self) -> OwnerConsoleManualDiagnosticsSnapshot:
+    def build_snapshot(self, *, memory_scope: MemoryMaintenanceScope | None = None) -> OwnerConsoleManualDiagnosticsSnapshot:
         with self._state_lock:
             latest_run = self._latest_run
             latest_project_run = self._latest_project_run
             latest_memory_run = self._latest_memory_run
+            if memory_scope is not None:
+                latest_memory_run = self._memory_runs_by_scope.get(memory_scope.revision)
+                if isinstance(latest_run, OwnerConsoleMemoryRagConsistencyRun):
+                    latest_run = latest_memory_run
             latest_main_llm_run = self._latest_main_llm_run
             latest_tts_run = self._latest_tts_run
             latest_vision_run = self._latest_vision_run
@@ -1299,12 +1306,15 @@ class OwnerConsoleManualDiagnosticsRuntime:
 
     def run_memory_rag_consistency(
         self,
+        *,
+        memory_scope: MemoryMaintenanceScope | None = None,
     ) -> OwnerConsoleMemoryRagConsistencyRun:
         if not self._manual_enabled or not self._memory_consistency_enabled:
             raise OwnerConsoleManualDiagnosticDisabled(
                 "MemoryRAG consistency diagnostic is disabled"
             )
-        if self._memory_consistency_executor is None:
+        executor = self._memory_consistency_executor
+        if executor is None:
             raise OwnerConsoleManualDiagnosticDisabled(
                 "MemoryRAG consistency diagnostic executor is unavailable"
             )
@@ -1346,9 +1356,14 @@ class OwnerConsoleManualDiagnosticsRuntime:
             )
             self._latest_run = running
             self._latest_memory_run = running
+            if memory_scope is not None:
+                running = replace(running, memory_scope=memory_scope.as_dict())
+                self._latest_run = self._latest_memory_run = running
+                self._memory_runs_by_scope[memory_scope.revision] = running
 
+        completed = None
         try:
-            evidence = self._memory_consistency_executor()
+            evidence = executor()
             source_mismatch_count = (
                 evidence.active_documents_missing_source
                 + evidence.source_records_missing_document
@@ -1444,11 +1459,12 @@ class OwnerConsoleManualDiagnosticsRuntime:
             )
         finally:
             with self._state_lock:
+                if completed is not None:
+                    if memory_scope is not None:
+                        completed = replace(completed, memory_scope=memory_scope.as_dict())
+                        self._memory_runs_by_scope[memory_scope.revision] = completed
+                    self._latest_run = self._latest_memory_run = completed
                 self._probe_running = False
-
-        with self._state_lock:
-            self._latest_run = completed
-            self._latest_memory_run = completed
         return completed
 
     def run_main_llm_contract(self) -> OwnerConsoleMainLlmContractRun:

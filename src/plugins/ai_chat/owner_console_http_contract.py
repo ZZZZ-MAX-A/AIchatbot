@@ -155,7 +155,7 @@ def _spec_for_mapping(
         read_model=read_spec.read_model,
         requires_context=read_spec.requires_context,
         path_params=read_spec.required_params,
-        query_params=read_spec.optional_params,
+        query_params=("bot_self_id", "scope_revision", "skip_memory") if mapping.name == "diagnostics" else read_spec.optional_params,
     )
 
 
@@ -163,6 +163,12 @@ OWNER_CONSOLE_HTTP_ROUTE_SPECS = tuple(
     _spec_for_mapping(mapping)
     for mapping in _HTTP_ROUTE_MAPPINGS
 ) + (
+    OwnerConsoleHttpRouteSpec(
+        name="settings.voice-sample", resource="settings/voice-sample", method="GET",
+        path=f"{OWNER_CONSOLE_HTTP_API_PREFIX}/settings/accounts/{{bot_self_id}}/voice-sample",
+        read_page="settings", runtime_method="read_account_voice_sample", read_model="audio/wav",
+        requires_context=True, path_params=("bot_self_id",),
+    ),
     OwnerConsoleHttpRouteSpec(
         name="manual-diagnostics",
         resource="manual-diagnostics",
@@ -172,6 +178,7 @@ OWNER_CONSOLE_HTTP_ROUTE_SPECS = tuple(
         runtime_method="build_snapshot",
         read_model="OwnerConsoleManualDiagnosticsSnapshot",
         requires_context=False,
+        query_params=("bot_self_id", "scope_revision"),
     ),
     OwnerConsoleHttpRouteSpec(
         name="tasks.cancel",
@@ -267,6 +274,7 @@ OWNER_CONSOLE_HTTP_ROUTE_SPECS = tuple(
         runtime_method="run_memory_rag_consistency",
         read_model="OwnerConsoleMemoryRagConsistencyRun",
         requires_context=False,
+        query_params=("bot_self_id", "scope_revision"),
         read_only=False,
         write_side_effect_allowed=True,
         manual_runtime_action_allowed=True,

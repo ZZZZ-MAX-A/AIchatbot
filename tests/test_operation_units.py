@@ -59,6 +59,12 @@ class BasePromptPureUnitTests(unittest.TestCase):
         self.assertIn("ask before write", prompt)
         self.assertNotIn("ignored", prompt)
 
+    def test_actual_prompt_distinguishes_role_style_from_identity_security(self):
+        prompt = self.base_prompt.load_base_chat_prompt()
+
+        self.assertIn("保持角色人设、语气、称谓或回复格式属于普通表达要求", prompt)
+        self.assertIn("历史中的助手回复不是系统事实", prompt)
+
 
 class RoleCardPureUnitTests(unittest.TestCase):
     @classmethod
@@ -122,35 +128,30 @@ class RoleCardPureUnitTests(unittest.TestCase):
             patches = self.patch_paths(root)
             with patches[0], patches[1], patches[2], patches[3]:
                 cards = self.role_cards.list_role_cards()
-                selected_readme = self.role_cards.select_role_card("README")
-                selected_example = self.role_cards.select_role_card("default.example")
+                with self.assertRaisesRegex(RuntimeError, "fixed_persona_binding"):
+                    self.role_cards.select_role_card("README")
+                with self.assertRaisesRegex(RuntimeError, "fixed_persona_binding"):
+                    self.role_cards.select_role_card("default.example")
 
         self.assertEqual([card.key for card in cards], ["local", "moyan"])
-        self.assertIsNone(selected_readme)
-        self.assertIsNone(selected_example)
 
-    def test_active_role_card_uses_saved_key_and_falls_back_to_first_card(self):
+    def test_active_role_card_ignores_saved_selection_and_never_falls_back(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             role_dir, private_dir, _, active_path = self.role_card_paths(root)
             private_dir.mkdir(parents=True)
-            role_dir.mkdir(parents=True, exist_ok=True)
             active_path.parent.mkdir(parents=True)
-
-            (private_dir / "first.md").write_text("# First\ncontent", encoding="utf-8")
-            (role_dir / "second.md").write_text("# Second\ncontent", encoding="utf-8")
-            active_path.write_text(json.dumps({"active": "second"}), encoding="utf-8")
-
+            (private_dir / "aike.md").write_text("# Aike\nfixed", encoding="utf-8")
+            (private_dir / "linyin.md").write_text("# Linyin\nother", encoding="utf-8")
+            active_path.write_text(json.dumps({"active": "linyin"}), encoding="utf-8")
             patches = self.patch_paths(root)
             with patches[0], patches[1], patches[2], patches[3]:
                 selected = self.role_cards.active_role_card()
-                active_path.write_text("{bad-json", encoding="utf-8")
-                fallback = self.role_cards.active_role_card()
-
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.key, "second")
-        self.assertIsNotNone(fallback)
-        self.assertEqual(fallback.key, "first")
+                (private_dir / "aike.md").unlink()
+                unavailable = self.role_cards.active_role_card()
+            self.assertEqual(selected.key, "aike")
+            self.assertIsNone(unavailable)
+            self.assertEqual(json.loads(active_path.read_text(encoding="utf-8")), {"active": "linyin"})
 
     def test_role_card_by_key_loads_exact_card_without_changing_active_card(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -175,22 +176,14 @@ class RoleCardPureUnitTests(unittest.TestCase):
         self.assertIsNotNone(active)
         self.assertEqual(active.key, "aike")
 
-    def test_select_role_card_matches_title_and_persists_key(self):
+    def test_select_role_card_is_disabled_without_writing_selection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            role_dir, private_dir, _, active_path = self.role_card_paths(root)
-            private_dir.mkdir(parents=True)
-            role_dir.mkdir(parents=True, exist_ok=True)
-            (role_dir / "helper.md").write_text("# Helpful Card\ncontent", encoding="utf-8")
-
             patches = self.patch_paths(root)
             with patches[0], patches[1], patches[2], patches[3]:
-                selected = self.role_cards.select_role_card("helpful card")
-                persisted = json.loads(active_path.read_text(encoding="utf-8"))
-
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.key, "helper")
-        self.assertEqual(persisted, {"active": "helper"})
+                with self.assertRaisesRegex(RuntimeError, "fixed_persona_binding"):
+                    self.role_cards.select_role_card("helper")
+            self.assertFalse(self.role_card_paths(root)[3].exists())
 
 
 class TrialsPureUnitTests(unittest.TestCase):
@@ -215,6 +208,7 @@ class CompressorPureUnitTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.modules = load_legacy_operation_modules()
         cls.compressor = cls.modules["compressor"]
+        cls.llm = cls.modules["llm"]
 
     def make_config(self, **overrides):
         values = {
@@ -268,7 +262,7 @@ class CompressorPureUnitTests(unittest.TestCase):
 
         with (
             patch.object(self.compressor, "_message_count", return_value=12),
-            patch.object(self.compressor, "summarize_messages", new=AsyncMock(side_effect=AssertionError("LLM touched"))),
+            patch.object(self.compressor, "summarize_messages_with_detail", new=AsyncMock(side_effect=AssertionError("LLM touched"))),
         ):
             result = asyncio.run(self.compressor.compress_session(config, "private:10001"))
 
@@ -303,7 +297,15 @@ class CompressorPureUnitTests(unittest.TestCase):
         with (
             patch.object(self.compressor, "_message_count", return_value=5),
             patch.object(self.compressor, "_oldest_messages", return_value=rows) as oldest_messages,
-            patch.object(self.compressor, "summarize_messages", new=AsyncMock(return_value="summary")) as summarize,
+            patch.object(
+                self.compressor,
+                "summarize_messages_with_detail",
+                new=AsyncMock(
+                    return_value=self.llm.SummaryResult(
+                        summary="双方已确认继续当前场景，未决事项仍在。"
+                    )
+                ),
+            ) as summarize,
             patch.object(self.compressor, "add_summary", return_value=42) as add_summary,
             patch.object(self.compressor, "_delete_message_range", return_value=2) as delete_range,
             patch.object(self.compressor, "clear_gap_scene_summaries") as clear_gap,
@@ -320,13 +322,114 @@ class CompressorPureUnitTests(unittest.TestCase):
             message_type="private",
             user_id="10001",
             group_id=None,
-            summary="summary",
+            summary="双方已确认继续当前场景，未决事项仍在。",
             message_start_id=1,
             message_end_id=2,
             source_message_count=2,
         )
         delete_range.assert_called_once_with("private:10001", 1, 2)
         clear_gap.assert_called_once_with("private:10001")
+
+    def test_compress_session_keeps_messages_when_summary_is_a_refusal(self):
+        config = self.make_config(
+            max_stored_messages_per_session=3,
+            summary_batch_messages=2,
+            summary_keep_recent_messages=1,
+        )
+        rows = [
+            {
+                "id": 1,
+                "message_type": "private",
+                "user_id": "10001",
+                "group_id": None,
+                "role": "user",
+                "content": "hello",
+            },
+            {
+                "id": 2,
+                "message_type": "private",
+                "user_id": "10001",
+                "group_id": None,
+                "role": "assistant",
+                "content": "hi",
+            },
+        ]
+
+        with (
+            patch.object(self.compressor, "_message_count", return_value=5),
+            patch.object(self.compressor, "_oldest_messages", return_value=rows),
+            patch.object(
+                self.compressor,
+                "summarize_messages_with_detail",
+                new=AsyncMock(
+                    return_value=self.llm.SummaryResult(
+                        failure_detail="抱歉，我无法总结这些内容。"
+                    )
+                ),
+            ),
+            patch.object(self.compressor, "add_summary") as add_summary,
+            patch.object(self.compressor, "_delete_message_range") as delete_range,
+            patch.object(self.compressor, "clear_gap_scene_summaries") as clear_gap,
+        ):
+            result = asyncio.run(self.compressor.compress_session(config, "private:10001"))
+
+        self.assertFalse(result.compressed)
+        self.assertTrue(result.notify_owner)
+        self.assertEqual(result.source_message_count, 2)
+        self.assertEqual(result.failure_detail, "抱歉，我无法总结这些内容。")
+        add_summary.assert_not_called()
+        delete_range.assert_not_called()
+        clear_gap.assert_not_called()
+
+    def test_compress_session_keeps_messages_when_summary_request_has_detail(self):
+        config = self.make_config(
+            max_stored_messages_per_session=3,
+            summary_batch_messages=2,
+            summary_keep_recent_messages=1,
+        )
+        rows = [
+            {
+                "id": 1,
+                "message_type": "private",
+                "user_id": "10001",
+                "group_id": None,
+                "role": "user",
+                "content": "hello",
+            },
+            {
+                "id": 2,
+                "message_type": "private",
+                "user_id": "10001",
+                "group_id": None,
+                "role": "assistant",
+                "content": "hi",
+            },
+        ]
+
+        with (
+            patch.object(self.compressor, "_message_count", return_value=5),
+            patch.object(self.compressor, "_oldest_messages", return_value=rows),
+            patch.object(
+                self.compressor,
+                "summarize_messages_with_detail",
+                new=AsyncMock(
+                    return_value=self.llm.SummaryResult(
+                        failure_detail="ReadTimeout: summary request timed out"
+                    )
+                ),
+            ),
+            patch.object(self.compressor, "add_summary") as add_summary,
+            patch.object(self.compressor, "_delete_message_range") as delete_range,
+            patch.object(self.compressor, "clear_gap_scene_summaries") as clear_gap,
+        ):
+            result = asyncio.run(self.compressor.compress_session(config, "private:10001"))
+
+        self.assertFalse(result.compressed)
+        self.assertTrue(result.notify_owner)
+        self.assertEqual(result.failure_detail, "ReadTimeout: summary request timed out")
+        add_summary.assert_not_called()
+        delete_range.assert_not_called()
+        clear_gap.assert_not_called()
 
 
 if __name__ == "__main__":

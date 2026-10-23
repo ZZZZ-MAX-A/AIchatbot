@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
+from datetime import datetime, timezone
+
+from .memory_time import summary_time_context, source_time_range
 
 from .database import connect, ensure_database, utc_now
 
@@ -16,6 +19,8 @@ class SessionSummary:
     message_type: str = ""
     user_id: str = ""
     group_id: str = ""
+    source_start_at: str | None = None
+    source_end_at: str | None = None
 
 
 def _summary_from_row(row: Any) -> SessionSummary:
@@ -27,6 +32,8 @@ def _summary_from_row(row: Any) -> SessionSummary:
         message_end_id=int(row["message_end_id"]),
         source_message_count=int(row["source_message_count"]),
         created_at=str(row["created_at"]),
+        source_start_at=row["source_start_at"] if "source_start_at" in row.keys() else None,
+        source_end_at=row["source_end_at"] if "source_end_at" in row.keys() else None,
         message_type=str(row["message_type"]) if "message_type" in row.keys() else "",
         user_id=str(row["user_id"]) if "user_id" in row.keys() and row["user_id"] is not None else "",
         group_id=str(row["group_id"]) if "group_id" in row.keys() and row["group_id"] is not None else "",
@@ -42,9 +49,19 @@ def add_summary(
     message_start_id: int,
     message_end_id: int,
     source_message_count: int,
+    source_start_at: str | None = None,
+    source_end_at: str | None = None,
 ) -> int:
     ensure_database()
     with connect() as connection:
+        if source_start_at is None or source_end_at is None:
+            rows = connection.execute(
+                "SELECT id, created_at, occurred_at FROM messages WHERE session_key = ? AND id BETWEEN ? AND ? ORDER BY id",
+                (session_key, message_start_id, message_end_id),
+            ).fetchall()
+            start, end = source_time_range(rows)
+            source_start_at = source_start_at or (start if rows and rows[0]["id"] == message_start_id else None)
+            source_end_at = source_end_at or (end if rows and rows[-1]["id"] == message_end_id else None)
         cursor = connection.execute(
             """
             INSERT INTO session_summaries (
@@ -56,9 +73,9 @@ def add_summary(
                 message_start_id,
                 message_end_id,
                 source_message_count,
-                created_at
+                created_at, source_start_at, source_end_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_key,
@@ -69,7 +86,7 @@ def add_summary(
                 message_start_id,
                 message_end_id,
                 source_message_count,
-                utc_now(),
+                utc_now(), source_start_at, source_end_at,
             ),
         )
         summary_id = int(cursor.lastrowid)
@@ -103,7 +120,7 @@ def get_session_summary(summary_id: int, session_key: str | None = None) -> Sess
                 message_start_id,
                 message_end_id,
                 source_message_count,
-                created_at
+                created_at, source_start_at, source_end_at
             FROM session_summaries
             WHERE {' AND '.join(clauses)}
             """,
@@ -141,7 +158,7 @@ def list_session_summaries(
                 message_start_id,
                 message_end_id,
                 source_message_count,
-                created_at
+                created_at, source_start_at, source_end_at
             FROM session_summaries
             {where_clause}
             ORDER BY id DESC
@@ -169,7 +186,7 @@ def recent_summaries(session_key: str, limit: int) -> list[SessionSummary]:
                 message_start_id,
                 message_end_id,
                 source_message_count,
-                created_at
+                created_at, source_start_at, source_end_at
             FROM session_summaries
             WHERE session_key = ?
             ORDER BY id DESC
@@ -266,6 +283,7 @@ def format_summary_context(session_key: str, limit: int) -> str:
     if not summaries:
         return ""
     lines = ["以下是当前会话较早内容的客观摘要："]
+    now = datetime.now(timezone.utc)
     for index, summary in enumerate(summaries, start=1):
-        lines.append(f"{index}. {summary.summary}")
+        lines.append(f"{index}. {summary_time_context(summary, now=now)}\n{summary.summary}")
     return "\n".join(lines)

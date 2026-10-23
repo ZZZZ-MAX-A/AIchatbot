@@ -35,6 +35,10 @@ const API_BASE =
   import.meta.env.VITE_OWNER_CONSOLE_API_BASE ?? OWNER_CONSOLE_API_PREFIX;
 const HEALTH_PATH = import.meta.env.VITE_OWNER_CONSOLE_HEALTH_PATH ?? "/healthz";
 
+function memoryScopeQuery(scope?: import("./memoryScopeTypes").MemoryMaintenanceScope): string {
+  return scope ? buildQuery({ bot_self_id: scope.bot_self_id, scope_revision: scope.revision }) : "";
+}
+
 const allowedGetPaths = new Set([
   HEALTH_PATH,
   `${API_BASE}/routes`,
@@ -89,6 +93,10 @@ function isAllowedPostPath(routePath: string): boolean {
 function isAllowedGetPath(routePath: string): boolean {
   if (allowedGetPaths.has(routePath)) {
     return true;
+  }
+  const personaSamplePrefix = `${API_BASE}/settings/accounts/`;
+  if (routePath.startsWith(personaSamplePrefix)) {
+    return /^[0-9]{5,20}\/voice-sample$/.test(routePath.slice(personaSamplePrefix.length));
   }
 
   const taskDetailPrefix = `${API_BASE}/tasks/`;
@@ -279,6 +287,24 @@ async function postAccessAction(
 }
 
 export const ownerConsoleApi = {
+  async getPersonaVoiceSample(botSelfId: string, signal?: AbortSignal): Promise<Blob> {
+    if (!/^[0-9]{5,20}$/.test(botSelfId)) {
+      throw new Error("账号标识无效");
+    }
+    const path = `${API_BASE}/settings/accounts/${botSelfId}/voice-sample`;
+    if (!isAllowedGetPath(path)) throw new Error("音色样例路径未注册");
+    const response = await fetch(path, {
+      method: "GET", credentials: "same-origin", cache: "no-store", signal,
+      headers: { Accept: "audio/wav", "X-Owner-Console-Action": "persona-voice-sample-v1" },
+    });
+    if (!response.ok) throw new Error("当前账号的音色样例不可用，请刷新配置后重试。");
+    const blob = await response.blob();
+    if (response.headers.get("content-type")?.split(";", 1)[0] !== "audio/wav"
+      || blob.size <= 44 || blob.size > 20 * 1024 * 1024) {
+      throw new Error("音色样例格式无效");
+    }
+    return blob;
+  },
   getHealth(signal?: AbortSignal): Promise<OwnerConsoleHealth> {
     return getJson<OwnerConsoleHealth>(HEALTH_PATH, signal);
   },
@@ -312,9 +338,10 @@ export const ownerConsoleApi = {
 
   async getDiagnostics(
     signal?: AbortSignal,
+    scope?: import("./memoryScopeTypes").MemoryMaintenanceScope | null,
   ): Promise<OwnerConsoleDiagnosticsEnvelope> {
     const envelope = await getJson<OwnerConsoleDiagnosticsEnvelope>(
-      `${API_BASE}/diagnostics`,
+      `${API_BASE}/diagnostics${scope === null ? "?skip_memory=true" : memoryScopeQuery(scope)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
@@ -326,9 +353,10 @@ export const ownerConsoleApi = {
 
   async getManualDiagnostics(
     signal?: AbortSignal,
+    scope?: import("./memoryScopeTypes").MemoryMaintenanceScope,
   ): Promise<OwnerConsoleManualDiagnosticsEnvelope> {
     const envelope = await getJson<OwnerConsoleManualDiagnosticsEnvelope>(
-      `${API_BASE}/manual-diagnostics`,
+      `${API_BASE}/manual-diagnostics${memoryScopeQuery(scope)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);
@@ -356,9 +384,10 @@ export const ownerConsoleApi = {
 
   async runMemoryRagConsistency(
     signal?: AbortSignal,
+    scope?: import("./memoryScopeTypes").MemoryMaintenanceScope,
   ): Promise<OwnerConsoleMemoryRagConsistencyEnvelope> {
     const envelope = await postJson<OwnerConsoleMemoryRagConsistencyEnvelope>(
-      `${API_BASE}/manual-diagnostics/memory-rag-consistency`,
+      `${API_BASE}/manual-diagnostics/memory-rag-consistency${memoryScopeQuery(scope)}`,
       { confirmation: "run_registered_memory_rag_consistency" },
       { "X-Owner-Console-Action": "manual-memory-rag-consistency-v1" },
       signal,
@@ -606,9 +635,9 @@ export const ownerConsoleApi = {
     return envelope;
   },
 
-  async getMemory(signal?: AbortSignal): Promise<OwnerConsoleMemoryEnvelope> {
+  async getMemory(signal?: AbortSignal, scope?: import("./memoryScopeTypes").MemoryMaintenanceScope): Promise<OwnerConsoleMemoryEnvelope> {
     const envelope = await getJson<OwnerConsoleMemoryEnvelope>(
-      `${API_BASE}/memory`,
+      `${API_BASE}/memory${memoryScopeQuery(scope)}`,
       signal,
     );
     const contract = checkOwnerConsoleEnvelope(envelope);

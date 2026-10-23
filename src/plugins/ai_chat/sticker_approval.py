@@ -16,7 +16,7 @@ from .sticker_library import (
     ALLOWED_ACTIONS,
     ALLOWED_INTENSITIES,
     ALLOWED_MOODS,
-    ALLOWED_PERSONA_KEYS,
+    ALLOWED_STICKER_ASSET_PERSONA_KEYS,
     ALLOWED_SCOPES,
     ALLOWED_USAGE_TAGS,
     APPROVED_DIRECTORY_NAME,
@@ -140,7 +140,7 @@ def _parse_draft(entry: object) -> StickerApprovalDraft:
     if not _STICKER_ID_PATTERN.fullmatch(sticker_id):
         raise StickerApprovalError("invalid_sticker_id")
     persona_key = _required_string(entry, "persona_key")
-    if persona_key not in ALLOWED_PERSONA_KEYS:
+    if persona_key not in ALLOWED_STICKER_ASSET_PERSONA_KEYS:
         raise StickerApprovalError("invalid_persona_key")
     intensity = _required_string(entry, "intensity")
     if intensity not in ALLOWED_INTENSITIES:

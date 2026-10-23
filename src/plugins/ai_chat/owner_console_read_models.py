@@ -233,6 +233,8 @@ class OwnerConsoleSettingsSnapshot:
     active_role_card_key: str
     feature_flags: dict[str, bool]
     boundary: OwnerConsoleRuntimeBoundary
+    persona_bindings: dict[str, Any] = field(default_factory=dict)
+    account_personas: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -332,6 +334,7 @@ class OwnerConsoleMemorySnapshot:
     retrieval_executed: bool
     index_rebuild_executed: bool
     boundary: OwnerConsoleRuntimeBoundary
+    memory_scope: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

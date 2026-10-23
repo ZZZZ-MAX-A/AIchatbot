@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .database import connect, ensure_database, utc_now
+from .memory_reader import manual_context_text, read_manual_rows
 
 
 MANUAL_FACT_TYPE = "fact_summary"
@@ -133,39 +134,8 @@ def list_manual_memories(
     limit: int | None = 20,
 ) -> list[ManualMemory]:
     ensure_database()
-    clauses: list[str] = []
-    params: list[object] = []
-    if subject_type:
-        clauses.append("subject_type = ?")
-        params.append(subject_type)
-    if subject_id:
-        clauses.append("subject_id = ?")
-        params.append(subject_id)
-    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    limit_clause = ""
-    if limit is not None:
-        limit_clause = "LIMIT ?"
-        params.append(limit)
-
     with connect() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT
-                id,
-                subject_type,
-                subject_id,
-                memory_type,
-                content,
-                confidence,
-                created_at,
-                updated_at
-            FROM long_term_memories
-            {where_clause}
-            ORDER BY id DESC
-            {limit_clause}
-            """,
-            tuple(params),
-        ).fetchall()
+        rows = read_manual_rows(connection, subject_type=subject_type, subject_id=subject_id, limit=limit)
     return [_memory_from_row(row) for row in rows]
 
 
@@ -223,13 +193,4 @@ def format_manual_memory_context(
             break
         memories.extend(list_manual_memories(subject_type, subject_id, remaining))
 
-    if not memories:
-        return ""
-
-    lines = [
-        "以下是主人手动维护的长期记忆摘要。",
-        "这些内容不是 AI 自动提取的；仅在与当前问题相关时参考，不要强行提起，也不要编造额外事实。",
-    ]
-    for memory in memories[:limit]:
-        lines.append(f"- {memory_type_label(memory.memory_type)}：{memory.content}")
-    return "\n".join(lines)
+    return manual_context_text([vars(memory) for memory in memories[:limit]])

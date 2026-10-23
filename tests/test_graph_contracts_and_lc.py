@@ -335,12 +335,17 @@ class LangChainModelFactoryTests(unittest.TestCase):
         self.assertNotIn("temperature", self.calls[0])
         self.assertNotIn("max_tokens", self.calls[0])
 
-    def test_build_chat_llm_uses_chat_agent_model_settings(self):
+    def test_build_chat_llm_uses_effective_default_chat_settings(self):
         config = types.SimpleNamespace(
-            chat_llm_api_key="chat-key",
-            chat_llm_base_url="https://chat.example/v1",
-            chat_llm_model="deepseek-chat",
-            chat_llm_timeout_seconds=17,
+            aike_llm_api_key="aike-key",
+            aike_llm_base_url="https://aike.example/v1",
+            aike_llm_model="deepseek-chat",
+            aike_llm_timeout_seconds=17,
+            enable_chat_graph_runtime=True,
+            chat_llm_api_key="unused-chat-key",
+            chat_llm_base_url="https://unused.example/v1",
+            chat_llm_model="unused-model",
+            chat_llm_timeout_seconds=999,
         )
 
         llm = self.models.build_chat_llm(config)
@@ -350,8 +355,8 @@ class LangChainModelFactoryTests(unittest.TestCase):
             self.calls,
             [
                 {
-                    "api_key": "chat-key",
-                    "base_url": "https://chat.example/v1",
+                    "api_key": "aike-key",
+                    "base_url": "https://aike.example/v1",
                     "model": "deepseek-chat",
                     "timeout": 17,
                 }

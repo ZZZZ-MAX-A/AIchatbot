@@ -4,13 +4,13 @@ param(
     [int]$TimeoutSec = 5,
     [int]$StartupWaitSec = 20,
     [switch]$NoStart,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [string[]]$RequiredModels = @()
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$dotEnvPath = Join-Path $repoRoot ".env"
 
 function Write-Ensure {
     param(
@@ -20,71 +20,6 @@ function Write-Ensure {
     if (-not $Quiet) {
         Write-Host ("[{0}] {1}" -f $Status, $Message)
     }
-}
-
-function Normalize-DotEnvValue {
-    param([string]$Value)
-    $trimmed = $Value.Trim()
-    if (
-        ($trimmed.StartsWith('"') -and $trimmed.EndsWith('"')) -or
-        ($trimmed.StartsWith("'") -and $trimmed.EndsWith("'"))
-    ) {
-        return $trimmed.Substring(1, $trimmed.Length - 2)
-    }
-    return $trimmed
-}
-
-function Read-DotEnv {
-    param([string]$Path)
-    $result = @{}
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $result
-    }
-    Get-Content -LiteralPath $Path -Encoding UTF8 | ForEach-Object {
-        $line = $_.Trim()
-        if (-not $line -or $line.StartsWith("#") -or -not $line.Contains("=")) {
-            return
-        }
-        $key, $value = $line.Split("=", 2)
-        $result[$key.Trim()] = Normalize-DotEnvValue $value
-    }
-    return $result
-}
-
-$dotEnv = Read-DotEnv $dotEnvPath
-
-function Get-ConfigValue {
-    param(
-        [string]$Name,
-        [string]$Default = ""
-    )
-    $processValue = [Environment]::GetEnvironmentVariable($Name, "Process")
-    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
-        return $processValue
-    }
-    if ($dotEnv.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace($dotEnv[$Name])) {
-        return $dotEnv[$Name]
-    }
-    return $Default
-}
-
-function Get-BoolConfig {
-    param(
-        [string]$Name,
-        [bool]$Default
-    )
-    $value = Get-ConfigValue $Name ""
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        return $Default
-    }
-    $normalized = $value.Trim().ToLowerInvariant()
-    if ($normalized -in @("1", "true", "yes", "on")) {
-        return $true
-    }
-    if ($normalized -in @("0", "false", "no", "off")) {
-        return $false
-    }
-    return $Default
 }
 
 function Test-LocalOllamaUrl {
@@ -165,26 +100,29 @@ function Test-ConnectionRefusedException {
     return $false
 }
 
-$enableMemoryRag = Get-BoolConfig "ENABLE_MEMORY_RAG" $false
-$enableProjectDocRag = Get-BoolConfig "ENABLE_PROJECT_DOC_RAG" $false
-$embeddingProvider = (Get-ConfigValue "MEMORY_RAG_EMBEDDING_PROVIDER" "ollama").Trim().ToLowerInvariant()
-
-$needsOllama = ($enableMemoryRag -or $enableProjectDocRag) -and $embeddingProvider -eq "ollama"
-if (-not $needsOllama) {
-    Write-Ensure "OK" "Ollama ensure skipped: Ollama-backed RAG is disabled."
-    exit 0
+if ($RequiredModels.Count -eq 0) {
+    $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    $configurationJson = & $python (Join-Path $PSScriptRoot "check_configuration.py") --json
+    if ($LASTEXITCODE -ne 0) {
+        Write-Ensure "ERR" "Configuration preflight failed; no service was contacted."
+        Write-Host ($configurationJson -join "`n")
+        exit 1
+    }
+    $configurationReport = ($configurationJson -join "`n") | ConvertFrom-Json
+    $plans = @($configurationReport.ollama_local_plans)
+    if ($plans.Count -eq 0) {
+        Write-Ensure "OK" "Ollama ensure skipped: Ollama-backed RAG is disabled. No local Ollama dependency."
+        exit 0
+    }
+    $plan = $plans[0]
+    if ([string]::IsNullOrWhiteSpace($BaseUrl)) { $BaseUrl = $plan.base_url }
+    $RequiredModels = @($plan.models)
 }
-
-$embeddingBaseUrl = Get-ConfigValue "MEMORY_RAG_EMBEDDING_BASE_URL" "http://127.0.0.1:11434"
-if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-    $BaseUrl = $embeddingBaseUrl
+$requiredModels = @($RequiredModels | Select-Object -Unique)
+if ([string]::IsNullOrWhiteSpace($BaseUrl) -or $requiredModels.Count -eq 0 -or @($requiredModels | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+    Write-Ensure "ERR" "Ollama endpoint or required models are incomplete."
+    exit 1
 }
-
-$requiredModels = @()
-if (($enableMemoryRag -or $enableProjectDocRag) -and $embeddingProvider -eq "ollama") {
-    $requiredModels += Get-ConfigValue "MEMORY_RAG_EMBEDDING_MODEL" "bge-m3"
-}
-$requiredModels = @($requiredModels | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 
 $isLocalUrl = Test-LocalOllamaUrl $BaseUrl
 $shouldStart = (-not $NoStart) -and $isLocalUrl

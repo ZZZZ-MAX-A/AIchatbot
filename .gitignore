@@ -24,6 +24,8 @@ logs/*
 !logs/.gitkeep
 data/*
 !data/.gitkeep
+# Local sticker source images; normalized runtime assets live under data/stickers.
+/picture/
 
 # Persona cards: deny everything by default. Only documentation, explicitly
 # desensitized example templates, and the private-directory placeholder may be tracked.
@@ -53,6 +55,8 @@ backups/
 docs-archive/
 
 # Local validation artifacts
+tmp/
+output/
 tts-validation/
 voice-samples/
 temp_audio/

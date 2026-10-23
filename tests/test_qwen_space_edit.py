@@ -75,6 +75,18 @@ class QwenSpaceEditTests(unittest.IsolatedAsyncioTestCase):
             "qwen_mode_unknown",
         ):
             self.module.resolve_qwen_edit_request("不存在的模式", max_chars=1000)
+        self.assertEqual(
+            self.module._classify_space_error(
+                '{"error":"No GPU was available after 60s"}'
+            ),
+            "qwen_gpu_unavailable",
+        )
+        self.assertEqual(
+            self.module._classify_space_error(
+                '{"error":"No GPU was available after 60s"}'
+            ),
+            "qwen_gpu_unavailable",
+        )
 
     def test_preprocessing_limits_long_side_and_creates_data_url(self):
         prepared = self.module.prepare_qwen_image(
@@ -90,13 +102,15 @@ class QwenSpaceEditTests(unittest.IsolatedAsyncioTestCase):
         with Image.open(BytesIO(decoded)) as image:
             self.assertEqual(image.size, (1024, 512))
 
-    async def test_submit_uses_public_infer_once_and_sends_image_array_json(self):
+    async def test_submit_uses_current_public_edit_endpoint_and_parses_data_url(self):
         calls: list[httpx.Request] = []
-        result_url = "https://unit.invalid/gradio_api/file=result.png"
+        result_data_url = "data:image/png;base64," + base64.b64encode(
+            image_bytes((48, 32))
+        ).decode("ascii")
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request)
-            if request.url.path.endswith("/call/v2/infer"):
+            if request.url.path.endswith("/call/v2/edit_image"):
                 payload = json.loads(request.content)
                 images = json.loads(payload["images_b64_json"])
                 self.assertIsInstance(images, list)
@@ -105,12 +119,9 @@ class QwenSpaceEditTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["steps"], 4)
                 self.assertEqual(payload["guidance_scale"], 1.0)
                 return httpx.Response(200, json={"event_id": "event-unit-1"})
-            if request.url.path.endswith("/call/infer/event-unit-1"):
+            if request.url.path.endswith("/call/edit_image/event-unit-1"):
                 event_data = json.dumps(
-                    [
-                        {"url": result_url, "mime_type": "image/png"},
-                        123456,
-                    ]
+                    [{"image": result_data_url, "seed": 123456}]
                 )
                 return httpx.Response(
                     200,
@@ -145,12 +156,52 @@ class QwenSpaceEditTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(remote.event_id, "event-unit-1")
         self.assertEqual(remote.seed, 123456)
+        self.assertEqual(remote.result_url, "")
+        self.assertEqual(remote.result_data_url, result_data_url)
         self.assertEqual(len([c for c in calls if c.method == "POST"]), 1)
         self.assertTrue(
             all(c.headers.get("authorization") == "Bearer unit-token" for c in calls)
         )
         self.assertNotIn("unit-token", repr(remote))
-        self.assertNotIn(result_url, repr(remote))
+        self.assertNotIn(result_data_url, repr(remote))
+
+    async def test_submit_maps_http_status_to_actionable_code(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                text="Not Found: edit_image endpoint",
+                headers={"content-type": "text/plain"},
+            )
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return real_client(transport=transport, **kwargs)
+
+        prepared = self.module.prepare_qwen_image(
+            image_bytes(),
+            max_input_bytes=10_485_760,
+            max_side=1024,
+            jpeg_quality=90,
+        )
+        request = self.module.resolve_qwen_edit_request("动漫", max_chars=1000)
+        with patch.object(
+            self.module.httpx,
+            "AsyncClient",
+            side_effect=client_factory,
+        ):
+            with self.assertRaisesRegex(
+                self.module.QwenSpaceEditError,
+                "qwen_endpoint_not_found",
+            ) as raised:
+                await self.module.submit_qwen_edit(
+                    self.settings(),
+                    request,
+                    prepared,
+                )
+        self.assertEqual(raised.exception.context["qwen_http_status"], 404)
+        self.assertIn("edit_image endpoint", raised.exception.context["qwen_response_excerpt"])
 
     async def test_download_resumes_partial_result_without_inference(self):
         content = image_bytes((48, 32), (90, 20, 70))

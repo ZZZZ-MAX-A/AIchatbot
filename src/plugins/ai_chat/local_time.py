@@ -196,19 +196,37 @@ def format_trusted_local_time_context(
     )
 
 
+def format_chat_time_context(snapshot: LocalTimeSnapshot) -> str:
+    """Short current facts for every request; never persist in message history."""
+    return (
+        "[本轮北京时间]\n"
+        f"{snapshot.iso_datetime}，{snapshot.weekday_label}（UTC+8）。\n"
+        "当前时间以此为准，不沿用历史消息中的“今天/现在”；按角色自然回应，"
+        "无需主动报时或声称联网。节日、农历和纪念日须有另外依据。"
+        "历史消息的时间标记只用于理解先后和间隔；历史中的‘今天/明天/刚才’应按其消息时间理解。"
+        "摘要生成或记忆维护时间不代表原事件发生时间；未知时间不要推断，不必逐条复述时间标签。"
+        "这些是真实聊天时间，不自动替代角色扮演中明确设定的故事时间；情绪和重逢强度仍按本轮重逢提示及角色卡。"
+    )
+
+
 def resolve_local_time_request(
     text: str,
     *,
     timezone_name: str = DEFAULT_BOT_TIMEZONE,
     clock: Clock | None = None,
+    snapshot: LocalTimeSnapshot | None = None,
 ) -> LocalTimeResolution | None:
+    if snapshot is not None and clock is not None:
+        raise ValueError("provide either a local time snapshot or a clock")
     intent = parse_local_time_intent(text)
     if intent is None:
         return None
-    snapshot = build_local_time_snapshot(
-        timezone_name,
-        clock=clock,
-    )
+    if snapshot is None:
+        snapshot = build_local_time_snapshot(timezone_name, clock=clock)
+    else:
+        timezone_for_name(timezone_name)
+        if snapshot.timezone_name != timezone_name.strip():
+            raise ValueError("local time snapshot timezone mismatch")
     return LocalTimeResolution(
         intent=intent,
         snapshot=snapshot,

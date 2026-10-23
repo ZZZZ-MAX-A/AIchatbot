@@ -9,6 +9,7 @@ from .config import AiChatConfig, load_config
 from .gap_scene_summaries import gap_scene_summary_stats
 from .manual_memory import manual_memory_stats
 from .memory import memory_stats
+from .memory_maintenance import read_memory_maintenance_counts
 from .owner_console_read_models import OwnerConsoleContext
 from .owner_console_read_runtime import OwnerConsoleReadRuntime
 from .rag.documents import rag_document_stats
@@ -84,6 +85,7 @@ def create_owner_console_http_read_runtime(
         task_actions_enabled=task_actions_enabled,
         access_actions_enabled=access_actions_enabled,
         dynamic_access_provider=dynamic_provider,
+        memory_counts_provider=read_memory_maintenance_counts,
     )
 
 

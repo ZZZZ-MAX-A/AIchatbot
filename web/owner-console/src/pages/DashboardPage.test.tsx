@@ -284,6 +284,22 @@ afterEach(() => {
 });
 
 describe("DashboardPage", () => {
+  it("keeps diagnostic evidence on its dedicated page and retains configuration and maintenance links", async () => {
+    getDiagnostics.mockResolvedValue({
+      ...diagnosticsEnvelope,
+      data: {
+        ...diagnosticsEnvelope.data!,
+        memory: { ...section("记忆"), display_lines: ["message_count=12345"], summary_text: "message_count=12345" },
+      },
+    });
+    renderDashboard();
+    const links = await screen.findByLabelText("维护入口");
+    expect(within(links).getByRole("link", { name: "账号、人物、模型与音色配置" }).getAttribute("href")).toBe("/owner-console/settings");
+    expect(within(links).getByRole("link", { name: "按账号查看人格记忆统计与策略" }).getAttribute("href")).toBe("/owner-console/memory");
+    expect(screen.getByRole("link", { name: "执行手动检查" }).getAttribute("href")).toBe("/owner-console/diagnostics");
+    expect(screen.queryByText("message_count=12345")).toBeNull();
+  });
+
   it("loads all four read-only sources and keeps a historical failure count out of current status", async () => {
     renderDashboard();
 
@@ -295,7 +311,7 @@ describe("DashboardPage", () => {
     expect(within(overall).getByText("当前稳定")).toBeTruthy();
     expect(screen.getByText(/历史失败任务 19 个/)).toBeTruthy();
     expect(screen.queryByText("正常")).toBeNull();
-    expect(screen.getAllByText("可读取").length).toBeGreaterThanOrEqual(4);
+    expect(screen.getByText("检查与维护")).toBeTruthy();
     expect(screen.getByText("配置就绪不等于实时可用。")).toBeTruthy();
   });
 

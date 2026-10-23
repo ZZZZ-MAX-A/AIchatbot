@@ -23,14 +23,14 @@ class PersonaScopeTests(unittest.TestCase):
             "memory_v2_bot_ids": frozenset(),
             "legacy_persona_id": "aike",
             "legacy_role_card_key": "aike",
-            "raw_bindings": "2700318954=aike:aike;2993614760=linyin:linyin",
+            "raw_bindings": "2000000001=aike:aike;3000000001=linyin:linyin",
         }
         values.update(overrides)
         return self.persona.build_persona_routing_settings(**values)
 
     def test_binding_parser_accepts_stable_explicit_mappings(self):
         parsed = self.persona.parse_persona_bindings(
-            "2700318954=aike:aike;1234567890=luna:luna-card"
+            "2000000001=aike:aike;1234567890=luna:luna-card"
         )
 
         self.assertEqual(parsed.errors, ())
@@ -41,14 +41,14 @@ class PersonaScopeTests(unittest.TestCase):
             ],
             [
                 ("1234567890", "luna", "luna-card"),
-                ("2700318954", "aike", "aike"),
+                ("2000000001", "aike", "aike"),
             ],
         )
 
     def test_invalid_and_duplicate_bindings_fail_closed(self):
         parsed = self.persona.parse_persona_bindings(
             "bad=aike:aike;1234567890=Luna:luna;"
-            "2700318954=aike:aike;2700318954=luna:luna"
+            "2000000001=aike:aike;2000000001=luna:luna"
         )
 
         self.assertEqual(parsed.bindings, ())
@@ -64,16 +64,16 @@ class PersonaScopeTests(unittest.TestCase):
     def test_disabled_foundation_preserves_private_legacy_scope(self):
         scope = self.persona.resolve_conversation_scope(
             self.settings(),
-            bot_self_id="2700318954",
-            user_id="3313097998",
+            bot_self_id="2000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
         )
 
         self.assertEqual(scope.persona_id, "aike")
         self.assertEqual(scope.role_card_key, "aike")
         self.assertEqual(scope.runtime_mode, "legacy")
-        self.assertEqual(scope.legacy_session_key, "private:3313097998")
+        self.assertEqual(scope.legacy_session_key, "private:1000000001")
         self.assertFalse(scope.routing_v2_requested)
         self.assertFalse(scope.routing_v2_active)
         self.assertFalse(scope.memory_v2_requested)
@@ -84,8 +84,8 @@ class PersonaScopeTests(unittest.TestCase):
     def test_group_scope_keeps_the_existing_group_session_key(self):
         scope = self.persona.resolve_conversation_scope(
             self.settings(),
-            bot_self_id="2700318954",
-            user_id="3313097998",
+            bot_self_id="2000000001",
+            user_id="1000000001",
             chat_type="group",
             group_id="778899",
             legacy_session_key="group:778899",
@@ -100,14 +100,14 @@ class PersonaScopeTests(unittest.TestCase):
     def test_second_bot_activates_ephemeral_persona_route(self):
         settings = self.settings(
             routing_v2_enabled=True,
-            routing_v2_bot_ids=frozenset({"2993614760"}),
+            routing_v2_bot_ids=frozenset({"3000000001"}),
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
-            bot_self_id="2993614760",
-            user_id="3313097998",
+            bot_self_id="3000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
             available_role_card_keys=frozenset({"aike", "linyin"}),
         )
 
@@ -117,7 +117,7 @@ class PersonaScopeTests(unittest.TestCase):
         self.assertEqual(scope.role_card_key, "linyin")
         self.assertEqual(
             scope.runtime_session_key,
-            "persona:linyin:private:3313097998",
+            "persona:linyin:private:1000000001",
         )
         self.assertEqual(scope.runtime_mode, "persona_v2_ephemeral")
         self.assertFalse(scope.memory_v2_requested)
@@ -126,35 +126,35 @@ class PersonaScopeTests(unittest.TestCase):
     def test_aike_stays_on_exact_legacy_route_when_only_second_bot_is_allowlisted(self):
         settings = self.settings(
             routing_v2_enabled=True,
-            routing_v2_bot_ids=frozenset({"2993614760"}),
+            routing_v2_bot_ids=frozenset({"3000000001"}),
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
-            bot_self_id="2700318954",
-            user_id="3313097998",
+            bot_self_id="2000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
             available_role_card_keys=frozenset({"aike", "linyin"}),
         )
 
         self.assertFalse(scope.routing_v2_requested)
         self.assertFalse(scope.routing_v2_active)
         self.assertEqual(scope.runtime_mode, "legacy")
-        self.assertEqual(scope.runtime_session_key, "private:3313097998")
+        self.assertEqual(scope.runtime_session_key, "private:1000000001")
 
     def test_persona_memory_activates_only_for_the_explicit_routed_bot(self):
         settings = self.settings(
             routing_v2_enabled=True,
             memory_v2_enabled=True,
-            routing_v2_bot_ids=frozenset({"2993614760"}),
-            memory_v2_bot_ids=frozenset({"2993614760"}),
+            routing_v2_bot_ids=frozenset({"3000000001"}),
+            memory_v2_bot_ids=frozenset({"3000000001"}),
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
-            bot_self_id="2993614760",
-            user_id="3313097998",
+            bot_self_id="3000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
             available_role_card_keys=frozenset({"linyin"}),
         )
 
@@ -169,14 +169,14 @@ class PersonaScopeTests(unittest.TestCase):
             routing_v2_enabled=True,
             memory_v2_enabled=True,
             routing_v2_bot_ids=frozenset(),
-            memory_v2_bot_ids=frozenset({"2993614760"}),
+            memory_v2_bot_ids=frozenset({"3000000001"}),
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
-            bot_self_id="2993614760",
-            user_id="3313097998",
+            bot_self_id="3000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
             available_role_card_keys=frozenset({"linyin"}),
         )
 
@@ -187,38 +187,38 @@ class PersonaScopeTests(unittest.TestCase):
     def test_missing_role_card_fails_closed_without_legacy_persona_activation(self):
         settings = self.settings(
             routing_v2_enabled=True,
-            routing_v2_bot_ids=frozenset({"2993614760"}),
+            routing_v2_bot_ids=frozenset({"3000000001"}),
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
-            bot_self_id="2993614760",
-            user_id="3313097998",
+            bot_self_id="3000000001",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
             available_role_card_keys=frozenset({"aike"}),
         )
 
         self.assertFalse(scope.routing_v2_active)
-        self.assertEqual(scope.runtime_mode, "legacy")
-        self.assertEqual(scope.runtime_session_key, "private:3313097998")
+        self.assertEqual(scope.runtime_mode, "invalid")
+        self.assertEqual(scope.runtime_session_key, "private:1000000001")
         self.assertIn("missing_role_card", scope.configuration_error)
 
     def test_missing_binding_reports_configuration_error_without_routing(self):
         settings = self.settings(
             routing_v2_enabled=True,
             routing_v2_bot_ids=frozenset({"1234567890"}),
-            raw_bindings="2700318954=aike:aike",
+            raw_bindings="2000000001=aike:aike",
         )
         scope = self.persona.resolve_conversation_scope(
             settings,
             bot_self_id="1234567890",
-            user_id="3313097998",
+            user_id="1000000001",
             chat_type="private",
-            legacy_session_key="private:3313097998",
+            legacy_session_key="private:1000000001",
         )
 
         self.assertFalse(scope.routing_v2_active)
-        self.assertEqual(scope.runtime_mode, "legacy")
+        self.assertEqual(scope.runtime_mode, "invalid")
         self.assertIn("missing_persona_binding", scope.configuration_error)
 
 
@@ -246,7 +246,7 @@ class EphemeralPersonaHistoryTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            routed,
+            [dict(item, content=item["content"].split("\n", 1)[-1]) for item in routed],
             [
                 {"role": "system", "content": "system"},
                 {"role": "user", "content": "u2"},
@@ -292,7 +292,8 @@ class PersonaPhaseTwoIsolationContractTests(unittest.TestCase):
 
     def test_chat_request_uses_scope_key_but_legacy_key_is_preserved(self):
         self.assertIn("key=scope.runtime_session_key", self.plugin_source)
-        self.assertIn("async with session_lock(request.key):", self.plugin_source)
+        self.assertIn("async with chat_turn_scope(event, request.key):", self.plugin_source)
+        self.assertIn("history_lock = session_lock(session_key)", self.plugin_source)
         self.assertIn("legacy_session_key=session_key(event)", self.plugin_source)
 
     def test_routed_persona_uses_ephemeral_memory_and_resolves_tts_per_persona(self):
@@ -306,7 +307,7 @@ class PersonaPhaseTwoIsolationContractTests(unittest.TestCase):
         self.assertNotIn("Path(", self.ephemeral_source)
 
     def test_database_schema_is_unchanged_in_phase_one(self):
-        self.assertIn('SCHEMA_VERSION = "7"', self.database_source)
+        self.assertIn('SCHEMA_VERSION = "8"', self.database_source)
         self.assertNotIn("persona_id", self.database_source)
         self.assertNotIn("persona_messages", self.database_source)
 
@@ -314,7 +315,7 @@ class PersonaPhaseTwoIsolationContractTests(unittest.TestCase):
         helper_start = self.plugin_source.index("def resolve_chat_sticker_scope(")
         helper_end = self.plugin_source.index("def cache_image_urls(", helper_start)
         helper = self.plugin_source[helper_start:helper_end]
-        self.assertIn("if not conversation.routing_v2_requested:", helper)
+        self.assertIn("if not conversation.configuration_error:", helper)
         self.assertIn("resolve_sticker_selection_scope(", helper)
         self.assertIn("persona_memory_database_scope(conversation.persona_id)", helper)
         self.assertIn("ephemeral_persona_history.message_count", helper)
